@@ -1,0 +1,16 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local runtime artifacts
+.env
+data/
+logs/
+
+# OS/editor
+.DS_Store

@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: agent-stock-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agent_stock
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  agent-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: agent-stock-service
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file:
+      - ../.env
+    environment:
+      AGENT_SERVICE_MODE: "true"
+      AGENT_SERVICE_HOST: "0.0.0.0"
+      AGENT_SERVICE_PORT: "8001"
+      DATABASE_URL: "postgresql+psycopg://postgres:postgres@postgres:5432/agent_stock"
+      AGENT_SERVICE_AUTH_TOKEN: "change-me"
+    ports:
+      - "8001:8001"
+    command: ["uvicorn", "agent_server:app", "--host", "0.0.0.0", "--port", "8001"]
+
+volumes:
+  postgres-data:
