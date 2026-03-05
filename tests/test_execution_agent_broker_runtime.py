@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ExecutionAgent broker runtime fallback tests."""
+"""ExecutionAgent simulation-only runtime tests."""
 
 from __future__ import annotations
 
@@ -14,58 +14,11 @@ from src.config import Config, RuntimeExecutionConfig
 from src.repositories.execution_repo import ExecutionRepository
 from src.storage import DatabaseManager
 
-from agent_stock.integrations.backend_bridge_client import BackendBridgeError
 
-
-class _BridgeSuccess:
-    def __init__(self):
-        self.exchange_calls = []
-        self.event_calls = []
-
-    def exchange_credential_ticket(self, ticket: str):
-        self.exchange_calls.append(ticket)
-        return {
-            "ticket_id": 321,
-            "user_id": 9,
-            "broker_account": {"id": 88},
-            "task_id": "backend-task-1",
-        }
-
-    def post_execution_event(self, **kwargs):
-        self.event_calls.append(kwargs)
-        return {"ok": True}
-
-
-class _BridgeExchangeFail:
-    def __init__(self):
-        self.exchange_calls = []
-        self.event_calls = []
-
-    def exchange_credential_ticket(self, ticket: str):
-        self.exchange_calls.append(ticket)
-        raise BackendBridgeError("ticket=agt_secret_failure", status_code=500, error_code="internal_error")
-
-    def post_execution_event(self, **kwargs):
-        self.event_calls.append(kwargs)
-        return {"ok": True}
-
-
-class _BridgeNoop:
-    def __init__(self):
-        self.exchange_calls = []
-
-    def exchange_credential_ticket(self, ticket: str):
-        self.exchange_calls.append(ticket)
-        return {"ticket_id": 999}
-
-    def post_execution_event(self, **kwargs):
-        return {"ok": True}
-
-
-class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
+class ExecutionAgentSimulationOnlyTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.temp_dir.name, "execution_agent_broker_runtime.db")
+        self.db_path = os.path.join(self.temp_dir.name, "execution_agent_simulation_only.db")
 
         os.environ["DATABASE_PATH"] = self.db_path
         os.environ["DATABASE_URL"] = ""
@@ -86,9 +39,8 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
         Config.reset_instance()
         self.temp_dir.cleanup()
 
-    def test_broker_mode_fallback_to_paper_and_post_event(self):
-        bridge = _BridgeSuccess()
-        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo, bridge_client=bridge)
+    def test_runtime_execution_context_remains_paper_only(self):
+        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
@@ -99,36 +51,28 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
         )
 
         output = agent.run(
-            run_id="run-broker-fallback",
+            run_id="run-paper-mode",
             code="600519",
             trade_date=trade_date,
             current_price=10.0,
             risk_output=risk,
             runtime_execution=RuntimeExecutionConfig(
-                mode="broker",
+                mode="paper",
                 has_ticket=True,
-                credential_ticket="agt_secret_ticket",
-                ticket_id=123,
                 broker_account_id=88,
             ),
             backend_task_id="backend-task-1",
         )
 
-        self.assertEqual(output.execution_mode, "broker")
-        self.assertTrue(output.broker_requested)
+        self.assertEqual(output.execution_mode, "paper")
+        self.assertFalse(output.broker_requested)
         self.assertEqual(output.executed_via, "paper")
-        self.assertEqual(output.fallback_reason, "broker_contract_missing")
-        self.assertEqual(output.broker_ticket_id, 321)
-        self.assertEqual(len(bridge.exchange_calls), 1)
-        self.assertEqual(len(bridge.event_calls), 1)
-        self.assertEqual(bridge.event_calls[0]["status"], "failed")
-        self.assertEqual(bridge.event_calls[0]["error_code"], "broker_contract_missing")
-        self.assertNotIn("agt_secret_ticket", str(bridge.event_calls[0]))
-        self.assertNotIn("agt_secret_ticket", str(output.to_dict()))
+        self.assertIsNone(output.broker_ticket_id)
+        self.assertIsNone(output.fallback_reason)
+        self.assertEqual(output.backend_task_id, "backend-task-1")
 
-    def test_exchange_failure_fallbacks_to_paper_without_event(self):
-        bridge = _BridgeExchangeFail()
-        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo, bridge_client=bridge)
+    def test_default_runtime_execution_is_paper(self):
+        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
@@ -139,57 +83,48 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
         )
 
         output = agent.run(
-            run_id="run-broker-exchange-fail",
+            run_id="run-no-runtime",
             code="600519",
             trade_date=trade_date,
             current_price=10.0,
             risk_output=risk,
-            runtime_execution=RuntimeExecutionConfig(
-                mode="broker",
-                has_ticket=True,
-                credential_ticket="agt_secret_failure",
-                ticket_id=555,
-                broker_account_id=88,
-            ),
+            runtime_execution=None,
             backend_task_id="backend-task-2",
         )
 
-        self.assertEqual(output.execution_mode, "broker")
-        self.assertTrue(output.broker_requested)
+        self.assertEqual(output.execution_mode, "paper")
+        self.assertFalse(output.broker_requested)
         self.assertEqual(output.executed_via, "paper")
-        self.assertEqual(output.fallback_reason, "credential_exchange_failed")
-        self.assertEqual(output.broker_ticket_id, 555)
-        self.assertEqual(len(bridge.exchange_calls), 1)
-        self.assertEqual(len(bridge.event_calls), 0)
-        self.assertNotIn("agt_secret_failure", str(output.to_dict()))
+        self.assertIsNone(output.broker_ticket_id)
+        self.assertIsNone(output.fallback_reason)
 
-    def test_missing_ticket_in_broker_mode_fallback(self):
-        bridge = _BridgeNoop()
-        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo, bridge_client=bridge)
+    def test_skip_path_keeps_compatibility_fields_fixed(self):
+        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
             trade_date=trade_date,
-            target_notional=8000.0,
-            target_weight=0.08,
+            target_notional=0.0,
+            target_weight=0.0,
             current_price=10.0,
         )
 
         output = agent.run(
-            run_id="run-broker-missing-ticket",
+            run_id="run-skip",
             code="600519",
             trade_date=trade_date,
             current_price=10.0,
             risk_output=risk,
-            runtime_execution=RuntimeExecutionConfig(mode="broker", has_ticket=False, credential_ticket=None),
+            runtime_execution=RuntimeExecutionConfig(mode="paper", has_ticket=False, broker_account_id=88),
             backend_task_id="backend-task-3",
         )
 
-        self.assertEqual(output.execution_mode, "broker")
-        self.assertTrue(output.broker_requested)
+        self.assertEqual(output.state.value, "skipped")
+        self.assertEqual(output.execution_mode, "paper")
+        self.assertFalse(output.broker_requested)
         self.assertEqual(output.executed_via, "paper")
-        self.assertEqual(output.fallback_reason, "missing_credential_ticket")
-        self.assertEqual(len(bridge.exchange_calls), 0)
+        self.assertIsNone(output.broker_ticket_id)
+        self.assertIsNone(output.fallback_reason)
 
 
 if __name__ == "__main__":

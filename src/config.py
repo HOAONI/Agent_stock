@@ -127,9 +127,16 @@ class RuntimeExecutionConfig:
 
     mode: str = "paper"
     has_ticket: bool = False
-    credential_ticket: Optional[str] = None
-    ticket_id: Optional[int] = None
     broker_account_id: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class RuntimeContextConfig:
+    """Request-level account context snapshot from Backend."""
+
+    account_snapshot: Optional[Dict[str, Any]] = None
+    summary: Optional[Dict[str, Any]] = None
+    positions: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,7 @@ class AgentRuntimeConfig:
     llm: Optional[RuntimeLlmConfig] = None
     strategy: Optional[RuntimeStrategyConfig] = None
     execution: Optional[RuntimeExecutionConfig] = None
+    context: Optional[RuntimeContextConfig] = None
 
 
 @dataclass
@@ -309,12 +317,8 @@ class Config:
     agent_service_host: str = "0.0.0.0"
     agent_service_port: int = 8001
     agent_service_auth_token: Optional[str] = None
-    agent_backend_base_url: str = "http://127.0.0.1:8002"
-    agent_backend_request_timeout_ms: int = 5000
-    agent_backend_retry_count: int = 1
     agent_task_max_workers: int = 3
     agent_write_local_reports: bool = False
-    agent_legacy_notify_enabled: bool = False
     
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
@@ -606,12 +610,8 @@ class Config:
             agent_service_host=os.getenv('AGENT_SERVICE_HOST', '0.0.0.0'),
             agent_service_port=max(1, int(os.getenv('AGENT_SERVICE_PORT', '8001'))),
             agent_service_auth_token=os.getenv('AGENT_SERVICE_AUTH_TOKEN'),
-            agent_backend_base_url=os.getenv('AGENT_BACKEND_BASE_URL', 'http://127.0.0.1:8002').rstrip('/'),
-            agent_backend_request_timeout_ms=max(1000, int(os.getenv('AGENT_BACKEND_REQUEST_TIMEOUT_MS', '5000'))),
-            agent_backend_retry_count=max(0, int(os.getenv('AGENT_BACKEND_RETRY_COUNT', '1'))),
             agent_task_max_workers=max(1, int(os.getenv('AGENT_TASK_MAX_WORKERS', '3'))),
             agent_write_local_reports=os.getenv('AGENT_WRITE_LOCAL_REPORTS', 'false').lower() == 'true',
-            agent_legacy_notify_enabled=os.getenv('AGENT_LEGACY_NOTIFY_ENABLED', 'false').lower() == 'true',
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),
@@ -757,30 +757,13 @@ class Config:
 
     def clone_for_runtime_llm(self, runtime_llm: Optional[RuntimeLlmConfig]) -> 'Config':
         """
-        Build a request-scoped config with runtime LLM overrides.
+        Deprecated compatibility helper.
 
-        For provider=openai/deepseek/custom, this enforces OpenAI-compatible
-        path for the current request only while keeping singleton untouched.
+        Runtime request payload may still contain `runtime_config.llm`, but
+        LLM provider/model/token selection is controlled by service-side env.
         """
-        if runtime_llm is None:
-            return self
-
-        provider = str(runtime_llm.provider or "").strip().lower()
-        if provider not in {"openai", "deepseek", "custom"}:
-            return self
-
-        updates: Dict[str, Any] = {
-            "gemini_api_key": None,
-            "anthropic_api_key": None,
-        }
-        if runtime_llm.base_url:
-            updates["openai_base_url"] = str(runtime_llm.base_url).strip()
-        if runtime_llm.model:
-            updates["openai_model"] = str(runtime_llm.model).strip()
-        if runtime_llm.api_token:
-            updates["openai_api_key"] = str(runtime_llm.api_token).strip()
-
-        return self.clone_with_overrides(**updates)
+        _ = runtime_llm
+        return self
 
     def refresh_stock_list(self) -> None:
         """

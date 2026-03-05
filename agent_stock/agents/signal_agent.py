@@ -52,10 +52,7 @@ class SignalAgent:
         trend_result = self._build_trend_result(data_output)
         trend_payload = self._trend_to_payload(trend_result)
 
-        runtime_llm_active = bool(runtime_config and runtime_config.llm is not None)
-        use_signal_cache = not runtime_llm_active
-
-        cached = self.repo.get_signal_snapshot(code=code, trade_date=trade_date) if use_signal_cache else {}
+        cached = self.repo.get_signal_snapshot(code=code, trade_date=trade_date)
         ai_refreshed = False
 
         ai_policy = str(getattr(self.config, "agent_ai_refresh_policy", "daily_once") or "daily_once").lower()
@@ -74,21 +71,20 @@ class SignalAgent:
         stop_loss = self._parse_price(ai_payload.get("stop_loss"))
         take_profit = self._parse_price(ai_payload.get("take_profit"))
 
-        if use_signal_cache:
-            self.repo.upsert_signal_snapshot(
-                code=code,
-                trade_date=trade_date,
-                signal_payload={
-                    "operation_advice": operation_advice,
-                    "sentiment_score": sentiment_score,
-                    "trend_payload": trend_payload,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "resolved_stop_loss": stop_loss,
-                    "resolved_take_profit": take_profit,
-                },
-                ai_payload=ai_payload,
-            )
+        self.repo.upsert_signal_snapshot(
+            code=code,
+            trade_date=trade_date,
+            signal_payload={
+                "operation_advice": operation_advice,
+                "sentiment_score": sentiment_score,
+                "trend_payload": trend_payload,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "resolved_stop_loss": stop_loss,
+                "resolved_take_profit": take_profit,
+            },
+            ai_payload=ai_payload,
+        )
 
         state = AgentState.READY
         error_message = None
@@ -123,33 +119,45 @@ class SignalAgent:
                 logger.warning("[%s] custom AI resolver failed: %s", code, redact_sensitive_text(str(exc)))
                 return None
 
-        pipeline = self._pipeline
-        if runtime_config and runtime_config.llm:
-            runtime_pipeline_config = self.config.clone_for_runtime_llm(runtime_config.llm)
-            pipeline = StockAnalysisPipeline(
-                config=runtime_pipeline_config,
+        if self._pipeline is None:
+            self._pipeline = StockAnalysisPipeline(
+                config=self.config,
                 query_id=uuid.uuid4().hex,
                 query_source="agent",
-                runtime_llm=runtime_config.llm,
             )
-        else:
-            if self._pipeline is None:
-                self._pipeline = StockAnalysisPipeline(
-                    config=self.config,
-                    query_id=uuid.uuid4().hex,
-                    query_source="agent",
-                )
-            pipeline = self._pipeline
+        pipeline = self._pipeline
+
+        runtime_account_context = self._build_runtime_account_context(runtime_config=runtime_config)
 
         try:
             return pipeline.analyze_stock(
                 code=code,
                 report_type=ReportType.FULL,
                 query_id=uuid.uuid4().hex,
+                runtime_account_context=runtime_account_context,
             )
         except Exception as exc:
             logger.warning("[%s] default AI resolver failed: %s", code, redact_sensitive_text(str(exc)))
             return None
+
+    @staticmethod
+    def _build_runtime_account_context(*, runtime_config: Optional[AgentRuntimeConfig]) -> Optional[Dict[str, Any]]:
+        if not runtime_config or not runtime_config.context:
+            return None
+
+        context = runtime_config.context
+        account_snapshot = context.account_snapshot if isinstance(context.account_snapshot, dict) else {}
+        summary = context.summary if isinstance(context.summary, dict) else {}
+        positions = context.positions if isinstance(context.positions, list) else []
+
+        payload: Dict[str, Any] = {}
+        if account_snapshot:
+            payload["account_snapshot"] = dict(account_snapshot)
+        if summary:
+            payload["summary"] = dict(summary)
+        if positions:
+            payload["positions"] = [dict(item) for item in positions if isinstance(item, dict)]
+        return payload or None
 
     def _build_trend_result(self, data_output: DataAgentOutput) -> Optional[TrendAnalysisResult]:
         """Compute trend signal for every cycle from context raw data."""

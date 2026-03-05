@@ -1,6 +1,2 @@
-# -*- coding: utf-8 -*-
-"""Integration clients for external service bridges."""
+"""Integration package placeholder (legacy bridge client removed)."""
 
-from agent_stock.integrations.backend_bridge_client import BackendBridgeClient, BackendBridgeError
-
-__all__ = ["BackendBridgeClient", "BackendBridgeError"]

@@ -103,8 +103,12 @@ class RiskAgent:
 
         total_asset = float(account_snapshot.get("total_asset") or 0.0)
         total_market_value = float(account_snapshot.get("total_market_value") or 0.0)
+        if total_market_value <= 0:
+            total_market_value = sum(float(item.get("market_value") or 0.0) for item in account_snapshot.get("positions", []))
         if total_asset <= 0:
             total_asset = float(account_snapshot.get("cash") or 0.0)
+        if total_asset <= 0:
+            total_asset = float(getattr(self.config, "agent_initial_cash", 1_000_000.0))
 
         max_single = float(getattr(self.config, "agent_max_single_position_pct", 0.5))
         if runtime_strategy and runtime_strategy.position_max_pct is not None:

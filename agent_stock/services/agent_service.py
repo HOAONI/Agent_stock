@@ -16,6 +16,7 @@ from src.config import (
     AgentRuntimeConfig,
     Config,
     RuntimeAccountConfig,
+    RuntimeContextConfig,
     RuntimeExecutionConfig,
     RuntimeLlmConfig,
     RuntimeStrategyConfig,
@@ -190,6 +191,7 @@ class AgentService:
         llm_cfg: Optional[RuntimeLlmConfig] = None
         strategy_cfg: Optional[RuntimeStrategyConfig] = None
         execution_cfg: Optional[RuntimeExecutionConfig] = None
+        context_cfg: Optional[RuntimeContextConfig] = None
 
         account_raw = runtime_config.get("account")
         if account_raw is not None:
@@ -265,25 +267,18 @@ class AgentService:
         if execution_raw is not None:
             if not isinstance(execution_raw, dict):
                 raise ValueError("runtime_config.execution must be an object")
+            if "credential_ticket" in execution_raw or "ticket_id" in execution_raw:
+                raise ValueError("runtime_config.execution.credential_ticket/ticket_id are no longer supported")
+
+            allowed_execution_fields = {"mode", "has_ticket", "broker_account_id"}
+            unknown_execution_fields = set(execution_raw.keys()) - allowed_execution_fields
+            if unknown_execution_fields:
+                field_list = ", ".join(sorted(unknown_execution_fields))
+                raise ValueError(f"runtime_config.execution contains unsupported fields: {field_list}")
 
             mode = str(execution_raw.get("mode") or "").strip().lower()
-            if mode not in {"paper", "broker"}:
-                raise ValueError("runtime_config.execution.mode must be one of paper|broker")
-
-            credential_ticket = execution_raw.get("credential_ticket")
-            credential_ticket_text = str(credential_ticket).strip() if credential_ticket else None
-            if mode == "broker" and not credential_ticket_text:
-                raise ValueError("runtime_config.execution.credential_ticket is required when mode=broker")
-
-            ticket_id_raw = execution_raw.get("ticket_id")
-            ticket_id: Optional[int] = None
-            if ticket_id_raw is not None:
-                try:
-                    ticket_id = int(ticket_id_raw)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("runtime_config.execution.ticket_id must be an integer") from exc
-                if ticket_id <= 0:
-                    raise ValueError("runtime_config.execution.ticket_id must be >= 1")
+            if mode != "paper":
+                raise ValueError("runtime_config.execution.mode must be paper")
 
             broker_account_id_raw = execution_raw.get("broker_account_id")
             broker_account_id: Optional[int] = None
@@ -297,10 +292,38 @@ class AgentService:
 
             execution_cfg = RuntimeExecutionConfig(
                 mode=mode,
-                has_ticket=bool(execution_raw.get("has_ticket") or credential_ticket_text),
-                credential_ticket=credential_ticket_text,
-                ticket_id=ticket_id,
+                has_ticket=bool(execution_raw.get("has_ticket")),
                 broker_account_id=broker_account_id,
+            )
+
+        context_raw = runtime_config.get("context")
+        if context_raw is not None:
+            if not isinstance(context_raw, dict):
+                raise ValueError("runtime_config.context must be an object")
+            allowed_context_fields = {"account_snapshot", "summary", "positions"}
+            unknown_context_fields = set(context_raw.keys()) - allowed_context_fields
+            if unknown_context_fields:
+                field_list = ", ".join(sorted(unknown_context_fields))
+                raise ValueError(f"runtime_config.context contains unsupported fields: {field_list}")
+
+            account_snapshot = context_raw.get("account_snapshot")
+            summary = context_raw.get("summary")
+            positions = context_raw.get("positions")
+
+            if account_snapshot is not None and not isinstance(account_snapshot, dict):
+                raise ValueError("runtime_config.context.account_snapshot must be an object")
+            if summary is not None and not isinstance(summary, dict):
+                raise ValueError("runtime_config.context.summary must be an object")
+            if positions is not None:
+                if not isinstance(positions, list):
+                    raise ValueError("runtime_config.context.positions must be a list")
+                if any(not isinstance(item, dict) for item in positions):
+                    raise ValueError("runtime_config.context.positions items must be objects")
+
+            context_cfg = RuntimeContextConfig(
+                account_snapshot=dict(account_snapshot) if isinstance(account_snapshot, dict) else None,
+                summary=dict(summary) if isinstance(summary, dict) else None,
+                positions=[dict(item) for item in positions] if isinstance(positions, list) else None,
             )
 
         return AgentRuntimeConfig(
@@ -308,6 +331,7 @@ class AgentService:
             llm=llm_cfg,
             strategy=strategy_cfg,
             execution=execution_cfg,
+            context=context_cfg,
         )
 
     def _resolve_notify_enabled(self, notify_enabled: Optional[bool]) -> bool:

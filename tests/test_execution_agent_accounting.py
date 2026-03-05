@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for ExecutionAgent accounting and T+1 behavior."""
+"""Unit tests for ExecutionAgent intent projection with runtime snapshots."""
 
 from __future__ import annotations
 
 import os
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date
 
 from src.agents.contracts import RiskAgentOutput
 from src.agents.execution_agent import ExecutionAgent
@@ -39,8 +39,16 @@ class ExecutionAgentAccountingTestCase(unittest.TestCase):
         Config.reset_instance()
         self.temp_dir.cleanup()
 
-    def test_buy_hold_sell_with_t_plus_one(self):
+    def test_buy_hold_sell_with_runtime_snapshot(self):
         trade_date = date.today()
+        runtime_snapshot = {
+            "name": "paper-test",
+            "cash": 100000.0,
+            "initial_cash": 100000.0,
+            "total_market_value": 0.0,
+            "total_asset": 100000.0,
+            "positions": [],
+        }
 
         buy_risk = RiskAgentOutput(
             code="600519",
@@ -55,11 +63,13 @@ class ExecutionAgentAccountingTestCase(unittest.TestCase):
             trade_date=trade_date,
             current_price=10.0,
             risk_output=buy_risk,
+            account_snapshot=runtime_snapshot,
         )
         self.assertEqual(buy_out.action, "buy")
         self.assertGreater(buy_out.traded_qty, 0)
+        runtime_snapshot = buy_out.account_snapshot
 
-        # Keep same target to avoid extra trade.
+        # Keep same target and pass previous snapshot: should skip.
         hold_notional = float(buy_out.target_qty) * 10.0 * (1.0 + 5 / 10000.0)
         hold_risk = RiskAgentOutput(
             code="600519",
@@ -74,10 +84,12 @@ class ExecutionAgentAccountingTestCase(unittest.TestCase):
             trade_date=trade_date,
             current_price=10.0,
             risk_output=hold_risk,
+            account_snapshot=runtime_snapshot,
         )
         self.assertEqual(hold_out.action, "none")
+        runtime_snapshot = hold_out.account_snapshot
 
-        # Same-day sell should be blocked by T+1 available quantity.
+        # Sell intent uses runtime snapshot and executes immediately in light-state mode.
         flat_risk = RiskAgentOutput(
             code="600519",
             trade_date=trade_date,
@@ -85,34 +97,17 @@ class ExecutionAgentAccountingTestCase(unittest.TestCase):
             target_weight=0.0,
             current_price=10.0,
         )
-        same_day_sell = self.agent.run(
-            run_id="run-sell-same-day",
+        sell_out = self.agent.run(
+            run_id="run-sell",
             code="600519",
             trade_date=trade_date,
             current_price=10.0,
             risk_output=flat_risk,
+            account_snapshot=runtime_snapshot,
         )
-        self.assertEqual(same_day_sell.action, "none")
-        self.assertEqual(same_day_sell.reason, "insufficient_available_qty")
-
-        # Next-day sell should pass after rollover.
-        next_day = trade_date + timedelta(days=1)
-        next_day_sell = self.agent.run(
-            run_id="run-sell-next-day",
-            code="600519",
-            trade_date=next_day,
-            current_price=10.2,
-            risk_output=RiskAgentOutput(
-                code="600519",
-                trade_date=next_day,
-                target_notional=0.0,
-                target_weight=0.0,
-                current_price=10.2,
-            ),
-        )
-        self.assertEqual(next_day_sell.action, "sell")
-        self.assertGreater(next_day_sell.traded_qty, 0)
-        self.assertEqual(next_day_sell.position_after, 0)
+        self.assertEqual(sell_out.action, "sell")
+        self.assertGreater(sell_out.traded_qty, 0)
+        self.assertEqual(sell_out.position_after, 0)
 
 
 if __name__ == "__main__":

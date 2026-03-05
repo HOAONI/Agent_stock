@@ -11,6 +11,8 @@ This project keeps the multi-agent paper-trading workflow with service-friendly 
 - Polling-based async task lifecycle
 - PostgreSQL-first persistence in service mode
 - Backend-oriented integration contracts (no default direct notification)
+- Paper-only execution engine (`mode=paper` only). Local Backtrader-style simulation execution is triggered by `Backend_stock` worker, while Agent remains decision-only for public run APIs.
+- Backtest internal compute endpoints for Backend (`/internal/v1/backtest/*`), stateless and persistence-free.
 
 ## Runtime Modes
 
@@ -62,9 +64,20 @@ Request body:
     "execution": {
       "mode": "paper",
       "has_ticket": false,
-      "credential_ticket": "optional-one-time-ticket",
-      "ticket_id": 123,
       "broker_account_id": 88
+    },
+    "context": {
+      "account_snapshot": {
+        "cash": 100000,
+        "total_asset": 120000,
+        "total_market_value": 20000,
+        "positions": [{"code": "600519", "quantity": 100}]
+      },
+      "summary": {
+        "cash": 100000,
+        "total_asset": 120000
+      },
+      "positions": [{"code": "600519", "quantity": 100}]
     }
   }
 }
@@ -86,11 +99,17 @@ Behavior:
   - `risk_snapshot`: `effective_stop_loss`, `effective_take_profit`, `position_cap_pct`, `strategy_applied`.
   - `signal_snapshot`: `resolved_stop_loss`, `resolved_take_profit`.
 - `runtime_config.execution` is optional:
-  - `mode` accepts `paper | broker`.
-  - `mode=broker` requires `credential_ticket`.
-  - Broker mode currently performs `ticket exchange + execution-event fallback audit`, then falls back to local paper execution because order-gateway contract is not enabled yet.
+  - `mode` only accepts `paper` (simulation execution semantic).
+  - `mode=broker` is rejected by API schema with `422`.
+  - `has_ticket` and `broker_account_id` are retained for backward-compatible payload shape only; they do not trigger broker execution.
+- `runtime_config.context` is optional:
+  - accepted fields: `account_snapshot`, `summary`, `positions`
+  - used as the primary account input for risk/execution (light-state mode).
+- For end-to-end “analysis auto order”, Backend maps Agent execution snapshots to local simulation orders (`/internal/v1/backtrader/*`) after run completion.
 - Execution snapshots include compatibility fields:
   - `execution_mode`, `backend_task_id`, `broker_requested`, `executed_via`, `broker_ticket_id`, `fallback_reason`.
+  - Values are fixed for simulation-only execution: `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`, `broker_ticket_id=null`, `fallback_reason=null`.
+- Execution stage no longer persists paper ledger trades; it emits execution intent and projected snapshot only.
 - Runtime tokens are never persisted in DB snapshots/task rows and are redacted from logs/errors.
 
 ### 2) Poll Task
@@ -113,10 +132,42 @@ Returns persisted run snapshots: data/signal/risk/execution + account snapshot.
 
 `GET /api/v1/accounts/{account_name}/snapshot`
 
+Returns the latest persisted run snapshot for the given account (compat path).  
+If no run snapshot exists yet, the endpoint returns `404`.
+
 ### 6) Health
 
 - `GET /api/health/live`
 - `GET /api/health/ready`
+
+### 7) Internal Backtrader Runtime (Backend only)
+
+- `POST /internal/v1/backtrader/accounts/provision`
+- `POST /internal/v1/backtrader/account-summary`
+- `POST /internal/v1/backtrader/positions`
+- `POST /internal/v1/backtrader/orders`
+- `POST /internal/v1/backtrader/trades`
+- `POST /internal/v1/backtrader/place-order`
+- `POST /internal/v1/backtrader/cancel-order`
+
+These routes are authenticated with the same bearer token and are intended for `Backend_stock` only.
+
+### 8) Internal Backtest Compute (Backend only)
+
+- `POST /internal/v1/backtest/run`
+- `POST /internal/v1/backtest/summary`
+- `POST /internal/v1/backtest/curves`
+- `POST /internal/v1/backtest/distribution`
+- `POST /internal/v1/backtest/compare`
+
+These routes are authenticated with the same bearer token and return `{ ok, data }`.
+
+Date-range strategy backtest (`POST /internal/v1/backtest/strategy/run`) additionally requires `backtrader` to be installed in the active Python environment.  
+Quick readiness check:
+
+```bash
+python -c "import backtrader; print('ok')"
+```
 
 ## Authentication
 
@@ -140,10 +191,6 @@ Optional service knobs:
 - `AGENT_SERVICE_PORT` (default `8001`)
 - `AGENT_TASK_MAX_WORKERS` (default `3`)
 - `AGENT_WRITE_LOCAL_REPORTS` (default `false`)
-- `AGENT_LEGACY_NOTIFY_ENABLED` (default `false`)
-- `AGENT_BACKEND_BASE_URL` (default `http://127.0.0.1:8002`)
-- `AGENT_BACKEND_REQUEST_TIMEOUT_MS` (default `5000`)
-- `AGENT_BACKEND_RETRY_COUNT` (default `1`)
 
 ## Setup
 

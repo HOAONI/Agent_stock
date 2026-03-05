@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from datetime import date, datetime
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from agent_stock.agents.contracts import AgentRunResult, StockAgentResult
@@ -116,7 +116,11 @@ class AgentOrchestrator:
             if initial_cash_override is not None
             else float(getattr(self.config, "agent_initial_cash", 1_000_000.0))
         )
-        self.repo.get_or_create_account(account_name, initial_cash)
+        working_account_snapshot = self._resolve_runtime_account_snapshot(
+            runtime_config=runtime_config,
+            account_name=account_name,
+            initial_cash=initial_cash,
+        )
 
         per_stock: List[StockAgentResult] = []
 
@@ -149,7 +153,11 @@ class AgentOrchestrator:
             }
 
             current_price = self._resolve_current_price(data_out)
-            account_snapshot = self.repo.get_account_snapshot(account_name)
+            account_snapshot = self._normalize_account_snapshot(
+                working_account_snapshot,
+                account_name=account_name,
+                initial_cash=initial_cash,
+            )
             current_position_value = self._current_position_value(account_snapshot, data_out.code)
 
             risk_started = time.perf_counter()
@@ -187,6 +195,7 @@ class AgentOrchestrator:
                 trade_date=trade_date,
                 current_price=current_price,
                 risk_output=risk_out,
+                account_snapshot=account_snapshot,
                 account_name=account_name,
                 initial_cash_override=initial_cash_override,
                 runtime_execution=(runtime_config.execution if runtime_config else None),
@@ -213,6 +222,12 @@ class AgentOrchestrator:
                 "broker_ticket_id": execution_out.broker_ticket_id,
                 "fallback_reason": execution_out.fallback_reason,
             }
+            if execution_out.account_snapshot:
+                working_account_snapshot = self._normalize_account_snapshot(
+                    execution_out.account_snapshot,
+                    account_name=account_name,
+                    initial_cash=initial_cash,
+                )
 
             per_stock.append(
                 StockAgentResult(
@@ -225,7 +240,6 @@ class AgentOrchestrator:
             )
 
         ended_at = self._now()
-        account_snapshot = self.repo.get_account_snapshot(account_name)
         return AgentRunResult(
             run_id=run_id,
             mode=mode,
@@ -233,7 +247,7 @@ class AgentOrchestrator:
             ended_at=ended_at,
             trade_date=trade_date,
             results=per_stock,
-            account_snapshot=account_snapshot,
+            account_snapshot=working_account_snapshot,
         )
 
     def run_once(
@@ -345,3 +359,115 @@ class AgentOrchestrator:
             if pos.get("code") == code:
                 return float(pos.get("market_value") or 0.0)
         return 0.0
+
+    @staticmethod
+    def _as_number(value: Any, default: float = 0.0) -> float:
+        try:
+            num = float(value)
+            if num != num:
+                return default
+            return num
+        except Exception:
+            return default
+
+    @staticmethod
+    def _as_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+    @classmethod
+    def _normalize_positions(cls, value: Any) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or item.get("stock_code") or item.get("symbol") or "").strip()
+            if not code:
+                continue
+            quantity = max(0, cls._as_int(item.get("quantity") or item.get("qty") or item.get("volume"), 0))
+            available_qty = max(0, cls._as_int(item.get("available_qty") or item.get("available") or quantity, quantity))
+            avg_cost = cls._as_number(item.get("avg_cost") or item.get("cost_price"), 0.0)
+            last_price = cls._as_number(item.get("last_price") or item.get("price"), 0.0)
+            market_value = cls._as_number(item.get("market_value"), quantity * last_price)
+            if market_value <= 0 and quantity > 0 and last_price > 0:
+                market_value = quantity * last_price
+            normalized.append(
+                {
+                    "code": code,
+                    "quantity": quantity,
+                    "available_qty": min(available_qty, quantity),
+                    "avg_cost": avg_cost,
+                    "last_price": last_price,
+                    "market_value": market_value,
+                    "unrealized_pnl": cls._as_number(item.get("unrealized_pnl"), 0.0),
+                }
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_account_snapshot(
+        cls,
+        snapshot: Optional[Dict[str, Any]],
+        *,
+        account_name: str,
+        initial_cash: float,
+    ) -> Dict[str, Any]:
+        raw = snapshot if isinstance(snapshot, dict) else {}
+        positions = cls._normalize_positions(raw.get("positions"))
+        inferred_market_value = sum(float(item.get("market_value") or 0.0) for item in positions)
+        cash = cls._as_number(raw.get("cash"), initial_cash)
+        total_market_value = cls._as_number(raw.get("total_market_value"), inferred_market_value)
+        if total_market_value <= 0 and inferred_market_value > 0:
+            total_market_value = inferred_market_value
+        total_asset = cls._as_number(raw.get("total_asset"), cash + total_market_value)
+        if total_asset <= 0:
+            total_asset = cash + total_market_value
+
+        return {
+            "account_id": raw.get("account_id"),
+            "name": str(raw.get("name") or account_name),
+            "cash": round(cash, 4),
+            "initial_cash": cls._as_number(raw.get("initial_cash"), initial_cash),
+            "total_market_value": round(total_market_value, 4),
+            "total_asset": round(total_asset, 4),
+            "realized_pnl": cls._as_number(raw.get("realized_pnl"), 0.0),
+            "unrealized_pnl": cls._as_number(raw.get("unrealized_pnl"), 0.0),
+            "cumulative_fees": cls._as_number(raw.get("cumulative_fees"), 0.0),
+            "positions": positions,
+            "snapshot_at": raw.get("snapshot_at"),
+            "data_source": raw.get("data_source"),
+            "broker_account_id": raw.get("broker_account_id"),
+            "provider_code": raw.get("provider_code"),
+            "provider_name": raw.get("provider_name"),
+            "account_uid": raw.get("account_uid"),
+            "account_display_name": raw.get("account_display_name"),
+        }
+
+    @classmethod
+    def _resolve_runtime_account_snapshot(
+        cls,
+        *,
+        runtime_config: Optional[AgentRuntimeConfig],
+        account_name: str,
+        initial_cash: float,
+    ) -> Dict[str, Any]:
+        seed: Dict[str, Any] = {}
+        context = runtime_config.context if runtime_config else None
+        if context:
+            if isinstance(context.account_snapshot, dict):
+                seed.update(context.account_snapshot)
+            if isinstance(context.summary, dict):
+                summary = context.summary
+                if "cash" not in seed:
+                    seed["cash"] = summary.get("cash") or summary.get("available_cash") or summary.get("availableCash")
+                if "total_market_value" not in seed:
+                    seed["total_market_value"] = summary.get("market_value") or summary.get("total_market_value") or summary.get("marketValue")
+                if "total_asset" not in seed:
+                    seed["total_asset"] = summary.get("total_asset") or summary.get("totalAsset") or summary.get("total_equity")
+            if "positions" not in seed and isinstance(context.positions, list):
+                seed["positions"] = [item for item in context.positions if isinstance(item, dict)]
+        return cls._normalize_account_snapshot(seed, account_name=account_name, initial_cash=initial_cash)

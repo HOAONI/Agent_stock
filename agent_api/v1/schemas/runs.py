@@ -68,19 +68,27 @@ class RuntimeExecutionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["paper", "broker"]
+    mode: Literal["paper"]
     has_ticket: bool = False
-    credential_ticket: str | None = Field(default=None, min_length=1, max_length=4096)
-    ticket_id: int | None = Field(default=None, ge=1)
     broker_account_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
-    def _validate_broker_ticket(self) -> "RuntimeExecutionRequest":
-        if self.credential_ticket and not self.has_ticket:
-            self.has_ticket = True
-        if self.mode == "broker" and not self.credential_ticket:
-            raise ValueError("credential_ticket is required when execution.mode=broker")
+    def _normalize_execution(self) -> "RuntimeExecutionRequest":
+        # Keep has_ticket for backward-compatible payload shape, but paper mode
+        # never requires broker credential exchange.
+        if self.mode != "paper":
+            raise ValueError("execution.mode must be paper")
         return self
+
+
+class RuntimeContextRequest(BaseModel):
+    """Request-level upstream account context from backend."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_snapshot: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+    positions: list[dict[str, Any]] | None = None
 
 
 class RuntimeConfigRequest(BaseModel):
@@ -92,6 +100,7 @@ class RuntimeConfigRequest(BaseModel):
     llm: RuntimeLlmRequest | None = None
     strategy: RuntimeStrategyRequest | None = None
     execution: RuntimeExecutionRequest | None = None
+    context: RuntimeContextRequest | None = None
 
 
 class RunCreateRequest(BaseModel):

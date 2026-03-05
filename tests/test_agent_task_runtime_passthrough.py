@@ -134,11 +134,19 @@ class AgentTaskRuntimePassthroughTestCase(unittest.TestCase):
                 "take_profit_pct": 10,
             },
             "execution": {
-                "mode": "broker",
+                "mode": "paper",
                 "has_ticket": True,
-                "credential_ticket": "agt-worker-ticket",
-                "ticket_id": 11,
                 "broker_account_id": 22,
+            },
+            "context": {
+                "summary": {
+                    "cash": 80000.0,
+                    "total_asset": 100000.0,
+                    "total_market_value": 20000.0,
+                },
+                "positions": [
+                    {"code": "600519", "quantity": 100, "market_value": 20000.0},
+                ],
             },
         }
         task = self.task_service.submit_task(
@@ -160,7 +168,8 @@ class AgentTaskRuntimePassthroughTestCase(unittest.TestCase):
         self.assertEqual(self.capture_service.calls[-1]["account_name"], "user-async")
         self.assertEqual(self.capture_service.calls[-1]["request_id"], "req-async-runtime")
         self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["llm"]["model"], "gpt-4o-mini")
-        self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["execution"]["mode"], "broker")
+        self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["execution"]["mode"], "paper")
+        self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["context"]["summary"]["cash"], 80000.0)
 
 
 if __name__ == "__main__":

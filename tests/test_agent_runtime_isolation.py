@@ -109,10 +109,8 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
                 "take_profit_pct": 15,
             },
             "execution": {
-                "mode": "broker",
+                "mode": "paper",
                 "has_ticket": True,
-                "credential_ticket": "agt-ticket-a",
-                "ticket_id": 101,
                 "broker_account_id": 501,
             },
         }
@@ -137,7 +135,6 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
             "execution": {
                 "mode": "paper",
                 "has_ticket": False,
-                "ticket_id": 202,
                 "broker_account_id": 502,
             },
         }
@@ -167,7 +164,7 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
             for item in self.capture_orchestrator.calls
             if item["runtime_config"] and item["runtime_config"].execution
         }
-        self.assertEqual(execution_modes, {"broker", "paper"})
+        self.assertEqual(execution_modes, {"paper"})
 
         # Ensure singleton config remains unchanged after request-level overrides.
         self.assertEqual(self.service.config.openai_model, "gpt-env-default")

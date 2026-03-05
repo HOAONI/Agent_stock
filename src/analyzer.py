@@ -532,9 +532,9 @@ class GeminiAnalyzer:
             api_key: Gemini API Key（可选，默认从配置读取）
         """
         self._config = config or get_config()
+        # runtime_llm is kept for backward-compatible call signatures but
+        # LLM routing is controlled by service-side environment configuration.
         self._runtime_llm = runtime_llm
-        if self._runtime_llm is not None:
-            self._config = self._config.clone_for_runtime_llm(self._runtime_llm)
 
         config = self._config
         self._api_key = api_key or config.gemini_api_key
@@ -1101,14 +1101,6 @@ class GeminiAnalyzer:
             
             logger.info(f"========== AI 分析 {name}({code}) ==========")
             logger.info(f"[LLM配置] 模型: {model_name}")
-            if self._runtime_llm is not None:
-                logger.info(
-                    "[LLM配置] runtime provider=%s model=%s base_url=%s has_token=%s",
-                    self._runtime_llm.provider,
-                    self._runtime_llm.model,
-                    self._runtime_llm.base_url,
-                    bool(self._runtime_llm.api_token),
-                )
             logger.info(f"[LLM配置] Prompt 长度: {len(prompt)} 字符")
             logger.info(f"[LLM配置] 是否包含新闻: {'是' if news_context else '否'}")
             
@@ -1295,6 +1287,28 @@ class GeminiAnalyzer:
 - 成交量较昨日变化：{volume_change}倍
 - 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
 """
+
+        # 注入运行时账户快照（来自 Backend runtime_config.context）
+        runtime_account = context.get('runtime_account')
+        if isinstance(runtime_account, dict):
+            position = runtime_account.get('position')
+            has_position = isinstance(position, dict) and bool(position)
+            position_text = (
+                f"持仓 {position.get('quantity', 'N/A')} 股 / 可用 {position.get('available_qty', 'N/A')} 股"
+                if has_position else
+                "当前标的无持仓"
+            )
+            prompt += f"""
+### 账户资金约束（运行时快照）
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 可用现金 | {self._format_amount(runtime_account.get('cash'))} | 约束可买入规模 |
+| 总资产 | {self._format_amount(runtime_account.get('total_asset'))} | 风控仓位基准 |
+| 持仓市值 | {self._format_amount(runtime_account.get('total_market_value'))} | 已有风险暴露 |
+| 当前标的持仓 | {position_text} | 用于判断加仓/减仓 |
+"""
+            if runtime_account.get('snapshot_at') or runtime_account.get('data_source'):
+                prompt += f"- 账户快照时间：{runtime_account.get('snapshot_at', 'N/A')}（来源：{runtime_account.get('data_source', 'N/A')}）\n"
         
         # 添加新闻搜索结果（重点区域）
         prompt += """

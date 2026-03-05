@@ -122,23 +122,7 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
         response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
         self.assertEqual(response.status_code, 200)
 
-    def test_broker_execution_requires_ticket(self):
-        payload = {
-            "stock_codes": ["600519"],
-            "async_mode": False,
-            "runtime_config": {
-                "execution": {
-                    "mode": "broker",
-                    "has_ticket": False,
-                    "ticket_id": 123,
-                    "broker_account_id": 88,
-                }
-            },
-        }
-        response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
-        self.assertEqual(response.status_code, 422)
-
-    def test_broker_execution_with_ticket_is_accepted(self):
+    def test_broker_execution_is_rejected(self):
         payload = {
             "stock_codes": ["600519"],
             "async_mode": False,
@@ -146,10 +130,50 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
                 "execution": {
                     "mode": "broker",
                     "has_ticket": True,
-                    "credential_ticket": "agt_ticket_for_test_only",
-                    "ticket_id": 123,
                     "broker_account_id": 88,
                 }
+            },
+        }
+        response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
+        self.assertEqual(response.status_code, 422)
+
+    def test_paper_execution_is_accepted(self):
+        payload = {
+            "stock_codes": ["600519"],
+            "async_mode": False,
+            "runtime_config": {
+                "execution": {
+                    "mode": "paper",
+                    "has_ticket": True,
+                    "broker_account_id": 88,
+                }
+            },
+        }
+        response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
+        self.assertEqual(response.status_code, 200)
+
+    def test_runtime_context_is_accepted(self):
+        payload = {
+            "stock_codes": ["600519"],
+            "async_mode": False,
+            "runtime_config": {
+                "execution": {
+                    "mode": "paper",
+                    "has_ticket": False,
+                },
+                "context": {
+                    "account_snapshot": {
+                        "cash": 100000.0,
+                        "total_asset": 120000.0,
+                        "total_market_value": 20000.0,
+                        "positions": [{"code": "600519", "quantity": 100, "market_value": 20000.0}],
+                    },
+                    "summary": {
+                        "cash": 100000.0,
+                        "total_asset": 120000.0,
+                    },
+                    "positions": [{"code": "600519", "quantity": 100, "market_value": 20000.0}],
+                },
             },
         }
         response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)

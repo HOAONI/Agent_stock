@@ -96,6 +96,28 @@ class ExecutionRepository:
                 ],
             }
 
+    def get_latest_runtime_account_snapshot(self, name: str) -> Dict[str, Any]:
+        """Get latest persisted run snapshot for the account (light-state source)."""
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(AgentRun)
+                .where(AgentRun.account_name == name)
+                .order_by(desc(AgentRun.created_at))
+                .limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return {}
+            snapshot = self._safe_loads(row.account_snapshot)
+            if not snapshot:
+                return {}
+            payload = dict(snapshot)
+            payload.setdefault("name", name)
+            payload.setdefault(
+                "snapshot_at",
+                row.ended_at.isoformat() if row.ended_at else (row.created_at.isoformat() if row.created_at else None),
+            )
+            return payload
+
     def get_position(self, account_id: int, code: str) -> Optional[PaperPosition]:
         """Get one position by account/code."""
         with self.db.get_session() as session:
@@ -303,6 +325,36 @@ class ExecutionRepository:
             session.commit()
 
         return self.get_account_snapshot(account_name)
+
+    def add_funds(self, account_name: str, amount: float) -> Dict[str, Any]:
+        """Increase account cash and initial cash atomically."""
+        amount_num = float(amount)
+        if amount_num <= 0:
+            raise ValueError("amount must be > 0")
+
+        with self.db.get_session() as session:
+            account = session.execute(
+                select(PaperAccount).where(PaperAccount.name == account_name).limit(1)
+            ).scalar_one_or_none()
+            if account is None:
+                raise ValueError("account not found")
+
+            cash_before = float(account.cash or 0.0)
+            initial_cash_before = float(account.initial_cash or 0.0)
+
+            account.cash = cash_before + amount_num
+            account.initial_cash = initial_cash_before + amount_num
+            account.updated_at = datetime.now()
+
+            self._recompute_account_metrics_in_session(session=session, account=account)
+            session.commit()
+
+            return {
+                "cash_before": cash_before,
+                "cash_after": float(account.cash or 0.0),
+                "initial_cash_before": initial_cash_before,
+                "initial_cash_after": float(account.initial_cash or 0.0),
+            }
 
     def _recompute_account_metrics_in_session(
         self,

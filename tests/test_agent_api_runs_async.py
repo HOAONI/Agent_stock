@@ -110,11 +110,16 @@ class AgentApiRunsAsyncTestCase(unittest.TestCase):
                     "take_profit_pct": 12,
                 },
                 "execution": {
-                    "mode": "broker",
+                    "mode": "paper",
                     "has_ticket": True,
-                    "credential_ticket": "agt-ticket-123",
-                    "ticket_id": 77,
                     "broker_account_id": 88,
+                },
+                "context": {
+                    "summary": {
+                        "cash": 90000.0,
+                        "total_asset": 120000.0,
+                    },
+                    "positions": [{"code": "600519", "quantity": 100, "market_value": 30000.0}],
                 },
             },
         }
@@ -122,7 +127,8 @@ class AgentApiRunsAsyncTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.fake_service.last_account_name, "user-async")
         self.assertEqual(self.fake_service.last_runtime_config["llm"]["provider"], "deepseek")
-        self.assertEqual(self.fake_service.last_runtime_config["execution"]["mode"], "broker")
+        self.assertEqual(self.fake_service.last_runtime_config["execution"]["mode"], "paper")
+        self.assertEqual(self.fake_service.last_runtime_config["context"]["summary"]["cash"], 90000.0)
 
 
 if __name__ == "__main__":

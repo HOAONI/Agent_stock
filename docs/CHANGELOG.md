@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-03-01
+
+### Changed
+- Converged `runtime_config.execution` to simulation-only semantics:
+  - accepted fields: `mode|has_ticket|broker_account_id`
+  - removed/rejected fields: `credential_ticket|ticket_id`
+- Added optional runtime account context contract:
+  - `runtime_config.context.account_snapshot|summary|positions`
+  - used as primary risk/execution account input.
+- Simplified `ExecutionAgent` runtime flow to local paper engine only (no broker ticket exchange, no broker fallback event posting).
+- Switched `ExecutionAgent` to light-state intent mode:
+  - no persistence writes to `paper_accounts|paper_positions|paper_orders|paper_trades`
+  - output remains compatibility-safe (`execution_mode/executed_via=paper`) with projected account snapshot.
+- Changed `/api/v1/accounts/{account_name}/snapshot` compatibility semantics:
+  - now sourced from latest persisted run snapshot context, not realtime paper ledger.
+- Kept execution snapshot compatibility fields while fixing simulation-only values:
+  - `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`, `broker_ticket_id=null`, `fallback_reason=null`
+- Updated tests and docs to remove broker fallback expectations.
+- Clarified integration boundary: third-party simulation order submission is executed by `Backend_stock` worker after analysis, not by Agent.
+
+### Breaking
+- `POST /api/v1/runs` now rejects `runtime_config.execution.mode=broker` with schema `422` validation error.
+
 ## 2026-02-25
 
 ### Changed

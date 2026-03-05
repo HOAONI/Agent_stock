@@ -149,7 +149,13 @@ class StockAnalysisPipeline:
             logger.error(f"[{code}] {error_msg}")
             return False, error_msg
     
-    def analyze_stock(self, code: str, report_type: ReportType, query_id: str) -> Optional[AnalysisResult]:
+    def analyze_stock(
+        self,
+        code: str,
+        report_type: ReportType,
+        query_id: str,
+        runtime_account_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[AnalysisResult]:
         """
         分析单只股票（增强版：含量比、换手率、筹码分析、多维度情报）
         
@@ -165,6 +171,7 @@ class StockAnalysisPipeline:
             query_id: 查询链路关联 id
             code: 股票代码
             report_type: 报告类型
+            runtime_account_context: 运行时账户资金/持仓快照（可选）
             
         Returns:
             AnalysisResult 或 None（如果分析失败）
@@ -280,11 +287,12 @@ class StockAnalysisPipeline:
             
             # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
             enhanced_context = self._enhance_context(
-                context, 
-                realtime_quote, 
-                chip_data, 
+                context,
+                realtime_quote,
+                chip_data,
                 trend_result,
-                stock_name  # 传入股票名称
+                stock_name,  # 传入股票名称
+                runtime_account_context=runtime_account_context,
             )
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
@@ -329,7 +337,8 @@ class StockAnalysisPipeline:
         realtime_quote,
         chip_data: Optional[ChipDistribution],
         trend_result: Optional[TrendAnalysisResult],
-        stock_name: str = ""
+        stock_name: str = "",
+        runtime_account_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -400,6 +409,73 @@ class StockAnalysisPipeline:
                 'signal_score': trend_result.signal_score,
                 'signal_reasons': trend_result.signal_reasons,
                 'risk_factors': trend_result.risk_factors,
+            }
+
+        # 注入来自 Backend/Agent runtime_config 的账户约束上下文（可选）
+        if isinstance(runtime_account_context, dict):
+            account_snapshot = runtime_account_context.get('account_snapshot')
+            summary = runtime_account_context.get('summary')
+            positions = runtime_account_context.get('positions')
+            account_snapshot = account_snapshot if isinstance(account_snapshot, dict) else {}
+            summary = summary if isinstance(summary, dict) else {}
+            position_list = positions if isinstance(positions, list) else []
+
+            def pick_number(*values):
+                for value in values:
+                    try:
+                        number = float(value)
+                        if number == number:
+                            return number
+                    except Exception:
+                        continue
+                return None
+
+            cash = pick_number(
+                account_snapshot.get('cash'),
+                summary.get('cash'),
+                summary.get('available_cash'),
+                summary.get('availableCash'),
+            )
+            total_asset = pick_number(
+                account_snapshot.get('total_asset'),
+                summary.get('total_asset'),
+                summary.get('totalAsset'),
+                summary.get('total_equity'),
+            )
+            total_market_value = pick_number(
+                account_snapshot.get('total_market_value'),
+                summary.get('market_value'),
+                summary.get('total_market_value'),
+                summary.get('marketValue'),
+            )
+
+            current_code = str(enhanced.get('code') or '').strip()
+            current_position = None
+            for row in position_list:
+                if not isinstance(row, dict):
+                    continue
+                row_code = str(row.get('code') or row.get('stock_code') or row.get('symbol') or '').strip()
+                if row_code != current_code:
+                    continue
+                current_position = {
+                    'code': row_code,
+                    'quantity': int(float(row.get('quantity') or row.get('qty') or 0) or 0),
+                    'available_qty': int(float(row.get('available_qty') or row.get('available') or row.get('quantity') or row.get('qty') or 0) or 0),
+                    'market_value': pick_number(row.get('market_value')),
+                }
+                break
+
+            enhanced['runtime_account'] = {
+                'cash': cash,
+                'total_asset': total_asset,
+                'total_market_value': total_market_value,
+                'position': current_position,
+                'snapshot_at': account_snapshot.get('snapshot_at'),
+                'data_source': account_snapshot.get('data_source'),
+            }
+            enhanced['runtime_account'] = {
+                key: value for key, value in enhanced['runtime_account'].items()
+                if value is not None
             }
         
         return enhanced

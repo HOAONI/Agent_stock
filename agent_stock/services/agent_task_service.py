@@ -208,8 +208,8 @@ class AgentTaskService:
         return self.repo.list_agent_runs(limit=limit, status=status, trade_date=parsed_trade_date)
 
     def get_account_snapshot(self, account_name: str) -> Dict:
-        """Fetch account snapshot by account name."""
-        return self.repo.get_account_snapshot(account_name)
+        """Fetch latest runtime snapshot by account name (compat endpoint)."""
+        return self.repo.get_latest_runtime_account_snapshot(account_name)
 
     @staticmethod
     def _normalize_codes(stock_codes: List[str]) -> List[str]:
