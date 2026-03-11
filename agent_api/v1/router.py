@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from agent_api.v1.endpoints import accounts, backtest_internal, backtrader_internal, health, runs, tasks
+from agent_api.v1.endpoints import accounts, backtest_internal, backtrader_internal, health, runs, runtime_internal, tasks
 
 api_v1_router = APIRouter(prefix="/api/v1")
 api_v1_router.include_router(runs.router, prefix="/runs", tags=["Runs"])
@@ -20,3 +20,6 @@ internal_backtrader_router.include_router(backtrader_internal.router, tags=["Bac
 
 internal_backtest_router = APIRouter(prefix="/internal/v1/backtest")
 internal_backtest_router.include_router(backtest_internal.router, tags=["BacktestInternal"])
+
+internal_runtime_router = APIRouter(prefix="/internal/v1/runtime")
+internal_runtime_router.include_router(runtime_internal.router, tags=["RuntimeInternal"])

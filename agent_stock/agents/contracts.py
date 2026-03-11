@@ -110,7 +110,7 @@ class ExecutionAgentOutput:
     backend_task_id: Optional[str] = None
     broker_requested: bool = False
     executed_via: str = "paper"
-    broker_ticket_id: Optional[int] = None
+    broker_ticket_id: Optional[str] = None
     fallback_reason: Optional[str] = None
     action: str = "none"
     reason: str = ""

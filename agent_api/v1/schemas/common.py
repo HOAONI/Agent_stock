@@ -19,3 +19,14 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: str
     detail: str | None = None
+
+
+class RuntimeLlmDefaultResponse(BaseModel):
+    """Internal response exposing the current built-in default LLM metadata."""
+
+    available: bool
+    source: str = "agent_env"
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+    has_token: bool = False

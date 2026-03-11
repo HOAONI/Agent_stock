@@ -11,7 +11,7 @@ This project keeps the multi-agent paper-trading workflow with service-friendly 
 - Polling-based async task lifecycle
 - PostgreSQL-first persistence in service mode
 - Backend-oriented integration contracts (no default direct notification)
-- Paper-only execution engine (`mode=paper` only). Local Backtrader-style simulation execution is triggered by `Backend_stock` worker, while Agent remains decision-only for public run APIs.
+- Runtime-aware execution engine: `mode=paper` keeps intent-only semantics, while trusted Backend requests may use `mode=broker` to execute one local Backtrader-style simulated order inside the Execution Agent.
 - Backtest internal compute endpoints for Backend (`/internal/v1/backtest/*`), stateless and persistence-free.
 
 ## Runtime Modes
@@ -99,17 +99,17 @@ Behavior:
   - `risk_snapshot`: `effective_stop_loss`, `effective_take_profit`, `position_cap_pct`, `strategy_applied`.
   - `signal_snapshot`: `resolved_stop_loss`, `resolved_take_profit`.
 - `runtime_config.execution` is optional:
-  - `mode` only accepts `paper` (simulation execution semantic).
-  - `mode=broker` is rejected by API schema with `422`.
-  - `has_ticket` and `broker_account_id` are retained for backward-compatible payload shape only; they do not trigger broker execution.
+  - `mode=paper` keeps intent-only simulation semantics.
+  - `mode=broker` enables trusted Backend -> Agent internal simulated execution and requires `broker_account_id`.
+  - `has_ticket` is retained for backward-compatible payload shape only.
 - `runtime_config.context` is optional:
   - accepted fields: `account_snapshot`, `summary`, `positions`
   - used as the primary account input for risk/execution (light-state mode).
-- For end-to-end “analysis auto order”, Backend maps Agent execution snapshots to local simulation orders (`/internal/v1/backtrader/*`) after run completion.
+- For end-to-end “analysis auto order”, Backend now requests `mode=broker` so Execution Agent itself submits the local simulation order.
 - Execution snapshots include compatibility fields:
   - `execution_mode`, `backend_task_id`, `broker_requested`, `executed_via`, `broker_ticket_id`, `fallback_reason`.
-  - Values are fixed for simulation-only execution: `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`, `broker_ticket_id=null`, `fallback_reason=null`.
-- Execution stage no longer persists paper ledger trades; it emits execution intent and projected snapshot only.
+  - `mode=paper` keeps `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`.
+  - `mode=broker` returns real local simulation execution results such as `executed_via='backtrader_internal'` and `broker_ticket_id='bt-order-*'`.
 - Runtime tokens are never persisted in DB snapshots/task rows and are redacted from logs/errors.
 
 ### 2) Poll Task
@@ -191,6 +191,7 @@ Optional service knobs:
 - `AGENT_SERVICE_PORT` (default `8001`)
 - `AGENT_TASK_MAX_WORKERS` (default `3`)
 - `AGENT_WRITE_LOCAL_REPORTS` (default `false`)
+- `AGENT_LLM_REQUEST_TIMEOUT_MS` (default `120000`, explicit per-request LLM timeout to avoid async task hangs)
 
 ## Setup
 

@@ -5,8 +5,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from agent_api.deps import get_backtest_service_dep, get_strategy_backtest_service_dep
+from agent_api.deps import (
+    get_agent_historical_backtest_service_dep,
+    get_backtest_service_dep,
+    get_strategy_backtest_service_dep,
+)
 from agent_api.v1.schemas.backtest import (
+    AgentHistoricalRunRequest,
     BacktestCompareRequest,
     BacktestCurvesRequest,
     BacktestDistributionRequest,
@@ -15,6 +20,7 @@ from agent_api.v1.schemas.backtest import (
     BacktestSummaryRequest,
     StrategyRangeRunRequest,
 )
+from agent_stock.services.agent_historical_backtest_service import AgentHistoricalBacktestService
 from agent_stock.services.backtest_service import BacktestService
 from agent_stock.services.strategy_backtest_service import StrategyBacktestService
 from src.config import redact_sensitive_text
@@ -99,6 +105,18 @@ def compare_backtest(
 def run_strategy_backtest(
     request: StrategyRangeRunRequest,
     service: StrategyBacktestService = Depends(get_strategy_backtest_service_dep),
+) -> BacktestInternalEnvelope:
+    try:
+        data = service.run(request.model_dump(exclude_none=True))
+        return BacktestInternalEnvelope(ok=True, data=data)
+    except Exception as exc:
+        raise _handle_error(exc) from exc
+
+
+@router.post("/agent/run", response_model=BacktestInternalEnvelope)
+def run_agent_historical_backtest(
+    request: AgentHistoricalRunRequest,
+    service: AgentHistoricalBacktestService = Depends(get_agent_historical_backtest_service_dep),
 ) -> BacktestInternalEnvelope:
     try:
         data = service.run(request.model_dump(exclude_none=True))

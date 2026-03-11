@@ -23,7 +23,7 @@ from src.config import Config, RuntimeLlmConfig, get_config
 from src.storage import get_db
 from data_provider import DataFetcherManager
 from data_provider.realtime_types import ChipDistribution
-from src.analyzer import GeminiAnalyzer, AnalysisResult, STOCK_NAME_MAP
+from src.analyzer import GeminiAnalyzer, AnalysisResult, LlmRequestTimeoutError, STOCK_NAME_MAP
 from src.notification import NotificationService, NotificationChannel
 from src.search_service import SearchService
 from src.enums import ReportType
@@ -177,6 +177,7 @@ class StockAnalysisPipeline:
             AnalysisResult 或 None（如果分析失败）
         """
         try:
+            logger.info(f"[{code}] 分析流水线开始: realtime/chip/trend/search/llm")
             # 获取股票名称（优先从实时行情获取真实名称）
             stock_name = STOCK_NAME_MAP.get(code, '')
             
@@ -324,8 +325,12 @@ class StockAnalysisPipeline:
                 except Exception as e:
                     logger.warning(f"[{code}] 保存分析历史失败: {e}")
 
+            logger.info(f"[{code}] 分析流水线完成")
             return result
             
+        except LlmRequestTimeoutError:
+            logger.error(f"[{code}] LLM 请求超时，终止本次分析任务")
+            raise
         except Exception as e:
             logger.error(f"[{code}] 分析失败: {e}")
             logger.exception(f"[{code}] 详细错误信息:")

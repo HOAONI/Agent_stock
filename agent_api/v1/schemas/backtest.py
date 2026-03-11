@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_api.v1.schemas.runs import RuntimeLlmRequest
+
 
 class BacktestRunCandidate(BaseModel):
     """Candidate analysis record for backtest evaluation."""
@@ -139,6 +141,17 @@ class BacktestInternalEnvelope(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class StrategyTemplateRunDefinition(BaseModel):
+    """Concrete strategy definition resolved by Backend."""
+
+    model_config = ConfigDict(extra="allow")
+
+    strategy_id: int | None = Field(default=None, ge=1)
+    strategy_name: str = Field(min_length=1, max_length=64)
+    template_code: Literal["ma_cross", "rsi_threshold"]
+    params: dict[str, float] = Field(default_factory=dict)
+
+
 class StrategyRangeRunRequest(BaseModel):
     """Date-range strategy backtest request."""
 
@@ -147,7 +160,53 @@ class StrategyRangeRunRequest(BaseModel):
     code: str = Field(min_length=1, max_length=32)
     start_date: str = Field(min_length=10, max_length=32)
     end_date: str = Field(min_length=10, max_length=32)
+    strategies: list[StrategyTemplateRunDefinition] | None = None
     strategy_codes: list[str] | None = None
     initial_capital: float | None = Field(default=None, gt=0)
     commission_rate: float | None = Field(default=None, ge=0, le=1)
     slippage_bps: float | None = Field(default=None, ge=0, le=1000)
+
+
+class AgentHistoricalRuntimeStrategy(BaseModel):
+    """Runtime strategy overrides for historical replay."""
+
+    model_config = ConfigDict(extra="allow")
+
+    position_max_pct: float | None = Field(default=None, ge=0, le=100)
+    stop_loss_pct: float | None = Field(default=None, ge=0, le=100)
+    take_profit_pct: float | None = Field(default=None, ge=0, le=500)
+
+
+class AgentHistoricalCachedSnapshot(BaseModel):
+    """Cached signal snapshot passed from Backend."""
+
+    model_config = ConfigDict(extra="allow")
+
+    trade_date: str = Field(min_length=10, max_length=32)
+    decision_source: str | None = None
+    llm_used: bool = False
+    confidence: float | None = None
+    factor_payload: dict[str, Any] = Field(default_factory=dict)
+    archived_news_payload: list[dict[str, Any]] = Field(default_factory=list)
+    signal_payload: dict[str, Any] = Field(default_factory=dict)
+    ai_overlay: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentHistoricalRunRequest(BaseModel):
+    """Agent historical replay backtest request."""
+
+    model_config = ConfigDict(extra="allow")
+
+    code: str = Field(min_length=1, max_length=32)
+    start_date: str = Field(min_length=10, max_length=32)
+    end_date: str = Field(min_length=10, max_length=32)
+    phase: Literal["fast", "refine"] = "fast"
+    initial_capital: float = Field(default=100000.0, gt=0)
+    commission_rate: float = Field(default=0.0003, ge=0, le=1)
+    slippage_bps: float = Field(default=2.0, ge=0, le=1000)
+    runtime_strategy: AgentHistoricalRuntimeStrategy | None = None
+    runtime_llm: RuntimeLlmRequest | None = None
+    signal_profile_hash: str | None = None
+    snapshot_version: int = Field(default=1, ge=1, le=1000)
+    archived_news_by_date: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    cached_snapshots: list[AgentHistoricalCachedSnapshot] = Field(default_factory=list)

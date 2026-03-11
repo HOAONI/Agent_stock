@@ -21,6 +21,9 @@ class AgentApiAuthTestCase(unittest.TestCase):
         os.environ["DATABASE_PATH"] = os.path.join(self.temp_dir.name, "agent_api_auth.db")
         os.environ["AGENT_SERVICE_AUTH_TOKEN"] = "test-token"
         os.environ["AGENT_SERVICE_MODE"] = "false"
+        os.environ["OPENAI_API_KEY"] = "deepseek-test-key-123456"
+        os.environ["OPENAI_BASE_URL"] = "https://api.deepseek.com/v1"
+        os.environ["OPENAI_MODEL"] = "deepseek-chat"
 
         Config.reset_instance()
         DatabaseManager.reset_instance()
@@ -33,6 +36,9 @@ class AgentApiAuthTestCase(unittest.TestCase):
         reset_agent_task_service()
         DatabaseManager.reset_instance()
         Config.reset_instance()
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("OPENAI_BASE_URL", None)
+        os.environ.pop("OPENAI_MODEL", None)
         self.temp_dir.cleanup()
 
     def test_health_endpoint_without_auth(self):
@@ -45,6 +51,23 @@ class AgentApiAuthTestCase(unittest.TestCase):
             json={"stock_codes": ["600519"], "async_mode": False},
         )
         self.assertEqual(response.status_code, 401)
+
+    def test_runtime_default_endpoint_requires_auth(self):
+        response = self.client.get("/internal/v1/runtime/llm-default")
+        self.assertEqual(response.status_code, 401)
+
+    def test_runtime_default_endpoint_reports_builtin_llm(self):
+        response = self.client.get(
+            "/internal/v1/runtime/llm-default",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["provider"], "deepseek")
+        self.assertEqual(payload["model"], "deepseek-chat")
+        self.assertEqual(payload["base_url"], "https://api.deepseek.com/v1")
+        self.assertTrue(payload["has_token"])
 
 
 if __name__ == "__main__":

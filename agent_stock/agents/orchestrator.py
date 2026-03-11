@@ -125,6 +125,7 @@ class AgentOrchestrator:
         per_stock: List[StockAgentResult] = []
 
         for raw_code in stock_codes:
+            logger.info("[run:%s][%s] data stage start", run_id, raw_code)
             data_started = time.perf_counter()
             data_out = self.data_agent.run(raw_code)
             data_out.duration_ms = int((time.perf_counter() - data_started) * 1000)
@@ -135,7 +136,15 @@ class AgentOrchestrator:
                 "has_analysis_context": bool(data_out.analysis_context),
                 "has_realtime_quote": bool(data_out.realtime_quote),
             }
+            logger.info(
+                "[run:%s][%s] data stage done duration=%sms state=%s",
+                run_id,
+                data_out.code,
+                data_out.duration_ms,
+                data_out.state.value,
+            )
 
+            logger.info("[run:%s][%s] signal stage start", run_id, data_out.code)
             signal_started = time.perf_counter()
             signal_out = self.signal_agent.run(data_out, runtime_config=runtime_config)
             signal_out.duration_ms = int((time.perf_counter() - signal_started) * 1000)
@@ -151,6 +160,14 @@ class AgentOrchestrator:
                 "stop_loss": signal_out.stop_loss,
                 "take_profit": signal_out.take_profit,
             }
+            logger.info(
+                "[run:%s][%s] signal stage done duration=%sms state=%s advice=%s",
+                run_id,
+                data_out.code,
+                signal_out.duration_ms,
+                signal_out.state.value,
+                signal_out.operation_advice,
+            )
 
             current_price = self._resolve_current_price(data_out)
             account_snapshot = self._normalize_account_snapshot(
@@ -160,6 +177,7 @@ class AgentOrchestrator:
             )
             current_position_value = self._current_position_value(account_snapshot, data_out.code)
 
+            logger.info("[run:%s][%s] risk stage start", run_id, data_out.code)
             risk_started = time.perf_counter()
             risk_out = self.risk_agent.run(
                 code=data_out.code,
@@ -187,7 +205,15 @@ class AgentOrchestrator:
                 "position_cap_pct": risk_out.position_cap_pct,
                 "strategy_applied": risk_out.strategy_applied,
             }
+            logger.info(
+                "[run:%s][%s] risk stage done duration=%sms target_weight=%s",
+                run_id,
+                data_out.code,
+                risk_out.duration_ms,
+                risk_out.target_weight,
+            )
 
+            logger.info("[run:%s][%s] execution stage start", run_id, data_out.code)
             execution_started = time.perf_counter()
             execution_out = self.execution_agent.run(
                 run_id=run_id,
@@ -222,6 +248,14 @@ class AgentOrchestrator:
                 "broker_ticket_id": execution_out.broker_ticket_id,
                 "fallback_reason": execution_out.fallback_reason,
             }
+            logger.info(
+                "[run:%s][%s] execution stage done duration=%sms action=%s via=%s",
+                run_id,
+                data_out.code,
+                execution_out.duration_ms,
+                execution_out.action,
+                execution_out.executed_via,
+            )
             if execution_out.account_snapshot:
                 working_account_snapshot = self._normalize_account_snapshot(
                     execution_out.account_snapshot,

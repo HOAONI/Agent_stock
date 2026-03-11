@@ -10,7 +10,11 @@ import unittest
 from fastapi.testclient import TestClient
 
 from agent_api.app import create_app
-from agent_api.deps import get_backtest_service_dep, get_strategy_backtest_service_dep
+from agent_api.deps import (
+    get_agent_historical_backtest_service_dep,
+    get_backtest_service_dep,
+    get_strategy_backtest_service_dep,
+)
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.storage import DatabaseManager
 from src.config import Config
@@ -84,6 +88,24 @@ class _FakeStrategyBacktestService:
         }
 
 
+class _FakeAgentHistoricalBacktestService:
+    def run(self, payload):
+        return {
+            "engine_version": "agent_replay_v1",
+            "code": payload.get("code"),
+            "phase": payload.get("phase", "fast"),
+            "requested_range": {"start_date": payload.get("start_date"), "end_date": payload.get("end_date")},
+            "effective_range": {"start_date": payload.get("start_date"), "end_date": payload.get("end_date")},
+            "summary": {},
+            "diagnostics": {},
+            "daily_steps": [],
+            "trades": [],
+            "equity": [],
+            "signal_snapshots": [],
+            "pending_anchor_dates": [],
+        }
+
+
 class AgentApiBacktestInternalTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -98,6 +120,7 @@ class AgentApiBacktestInternalTestCase(unittest.TestCase):
         self.app = create_app()
         self.app.dependency_overrides[get_backtest_service_dep] = lambda: _FakeBacktestService()
         self.app.dependency_overrides[get_strategy_backtest_service_dep] = lambda: _FakeStrategyBacktestService()
+        self.app.dependency_overrides[get_agent_historical_backtest_service_dep] = lambda: _FakeAgentHistoricalBacktestService()
         self.client = TestClient(self.app)
 
     def tearDown(self) -> None:
@@ -140,6 +163,23 @@ class AgentApiBacktestInternalTestCase(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["data"]["code"], "600519")
         self.assertEqual(len(data["data"]["items"]), 1)
+
+    def test_internal_agent_historical_backtest_run_envelope(self):
+        response = self.client.post(
+            "/internal/v1/backtest/agent/run",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "code": "600519",
+                "start_date": "2024-01-01",
+                "end_date": "2024-01-31",
+                "phase": "fast",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["data"]["engine_version"], "agent_replay_v1")
+        self.assertEqual(data["data"]["code"], "600519")
 
     def test_internal_backtest_compare_validation_error(self):
         class _FailCompareBacktestService(_FakeBacktestService):

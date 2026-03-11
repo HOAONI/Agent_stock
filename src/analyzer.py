@@ -15,11 +15,23 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
+
+import httpx
 from json_repair import repair_json
 
 from src.config import Config, RuntimeLlmConfig, get_config, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
+
+
+class LlmRequestTimeoutError(RuntimeError):
+    """Raised when one provider request exceeds the configured timeout."""
+
+    def __init__(self, *, provider: str, timeout_ms: int):
+        self.code = "llm_request_timeout"
+        self.provider = provider
+        self.timeout_ms = int(timeout_ms)
+        super().__init__(f"[llm_request_timeout] {provider} request timed out after {timeout_ms}ms")
 
 
 # 股票名称映射（常见股票）
@@ -531,12 +543,13 @@ class GeminiAnalyzer:
         Args:
             api_key: Gemini API Key（可选，默认从配置读取）
         """
-        self._config = config or get_config()
-        # runtime_llm is kept for backward-compatible call signatures but
-        # LLM routing is controlled by service-side environment configuration.
+        base_config = config or get_config()
+        self._config = base_config.clone_for_runtime_llm(runtime_llm)
         self._runtime_llm = runtime_llm
 
         config = self._config
+        self._llm_timeout_ms = max(1000, int(getattr(config, "agent_llm_request_timeout_ms", 120000) or 120000))
+        self._llm_timeout_seconds = self._llm_timeout_ms / 1000.0
         self._api_key = api_key or config.gemini_api_key
         self._model = None
         self._current_model_name = None  # 当前使用的模型名称
@@ -593,7 +606,11 @@ class GeminiAnalyzer:
         try:
             from anthropic import Anthropic
 
-            self._anthropic_client = Anthropic(api_key=config.anthropic_api_key)
+            self._anthropic_client = Anthropic(
+                api_key=config.anthropic_api_key,
+                timeout=self._llm_timeout_seconds,
+                max_retries=0,
+            )
             self._current_model_name = config.anthropic_model
             self._use_anthropic = True
             logger.info(
@@ -636,7 +653,11 @@ class GeminiAnalyzer:
 
         try:
             # base_url 可选，不填则使用 OpenAI 官方默认地址
-            client_kwargs = {"api_key": config.openai_api_key}
+            client_kwargs = {
+                "api_key": config.openai_api_key,
+                "timeout": self._llm_timeout_seconds,
+                "max_retries": 0,
+            }
             if config.openai_base_url and config.openai_base_url.startswith('http'):
                 client_kwargs["base_url"] = config.openai_base_url
 
@@ -744,6 +765,29 @@ class GeminiAnalyzer:
             or self._openai_client is not None
         )
 
+    def _openai_provider_label(self) -> str:
+        base_url = str(getattr(self._config, "openai_base_url", "") or "").strip().lower()
+        if "deepseek" in base_url:
+            return "DeepSeek"
+        if "openai" in base_url:
+            return "OpenAI"
+        return "OpenAI-compatible"
+
+    def _raise_llm_timeout(self, provider: str) -> None:
+        raise LlmRequestTimeoutError(provider=provider, timeout_ms=self._llm_timeout_ms)
+
+    @staticmethod
+    def _is_timeout_exception(error: Exception) -> bool:
+        if isinstance(error, TimeoutError):
+            return True
+        if isinstance(error, httpx.TimeoutException):
+            return True
+        error_name = error.__class__.__name__.lower()
+        if "timeout" in error_name:
+            return True
+        message = str(error).lower()
+        return "timed out" in message or "timeout" in message
+
     def _call_anthropic_api(self, prompt: str, generation_config: dict) -> str:
         """
         调用 Anthropic Claude Messages API。
@@ -780,6 +824,7 @@ class GeminiAnalyzer:
                     system=self.SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
+                    timeout=self._llm_timeout_seconds,
                 )
                 if (
                     message.content
@@ -795,6 +840,12 @@ class GeminiAnalyzer:
                     or 'rate' in error_str.lower()
                     or 'quota' in error_str.lower()
                 )
+                if self._is_timeout_exception(e):
+                    logger.error(
+                        "[Anthropic] request timed out after %sms",
+                        self._llm_timeout_ms,
+                    )
+                    self._raise_llm_timeout("Anthropic")
                 if is_rate_limit:
                     logger.warning(
                         f"[Anthropic] Rate limit, attempt {attempt + 1}/"
@@ -882,6 +933,13 @@ class GeminiAnalyzer:
                     
             except Exception as e:
                 error_str = self._safe_error(e)
+                if self._is_timeout_exception(e):
+                    logger.error(
+                        "[%s] request timed out after %sms",
+                        self._openai_provider_label(),
+                        self._llm_timeout_ms,
+                    )
+                    self._raise_llm_timeout(self._openai_provider_label())
                 is_rate_limit = '429' in error_str or 'rate' in error_str.lower() or 'quota' in error_str.lower()
                 
                 if is_rate_limit:
@@ -947,7 +1005,7 @@ class GeminiAnalyzer:
                 response = self._model.generate_content(
                     prompt,
                     generation_config=generation_config,
-                    request_options={"timeout": 120}
+                    request_options={"timeout": self._llm_timeout_seconds}
                 )
                 
                 if response and response.text:
@@ -958,6 +1016,12 @@ class GeminiAnalyzer:
             except Exception as e:
                 last_error = e
                 error_str = self._safe_error(e)
+                if self._is_timeout_exception(e):
+                    logger.error(
+                        "[Gemini] request timed out after %sms",
+                        self._llm_timeout_ms,
+                    )
+                    self._raise_llm_timeout("Gemini")
                 
                 # 检查是否是 429 限流错误
                 is_rate_limit = '429' in error_str or 'quota' in error_str.lower() or 'rate' in error_str.lower()
@@ -1148,6 +1212,8 @@ class GeminiAnalyzer:
             return result
             
         except Exception as e:
+            if isinstance(e, LlmRequestTimeoutError):
+                raise
             safe_error = self._safe_error(e)
             logger.error("AI 分析 %s(%s) 失败: %s", name, code, safe_error)
             return AnalysisResult(

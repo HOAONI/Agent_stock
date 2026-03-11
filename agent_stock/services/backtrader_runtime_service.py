@@ -323,9 +323,14 @@ class BacktraderRuntimeService:
             if cash + 1e-6 < gross_amount + fee:
                 return {
                     "order_id": None,
+                    "trade_id": None,
                     "status": "rejected",
                     "provider_status": "rejected",
                     "provider_order_id": None,
+                    "filled_quantity": 0,
+                    "filled_price": None,
+                    "fee": 0.0,
+                    "tax": 0.0,
                     "message": "可用资金不足",
                 }
         else:
@@ -333,9 +338,14 @@ class BacktraderRuntimeService:
             if available_qty < qty:
                 return {
                     "order_id": None,
+                    "trade_id": None,
                     "status": "rejected",
                     "provider_status": "rejected",
                     "provider_order_id": None,
+                    "filled_quantity": 0,
+                    "filled_price": None,
+                    "fee": 0.0,
+                    "tax": 0.0,
                     "message": "可用持仓不足",
                 }
 
@@ -357,12 +367,19 @@ class BacktraderRuntimeService:
 
         order_id = int(result.get("order_id") or 0)
         return {
-            "order_id": f"bt-order-{order_id}",
+            "order_id": order_id,
+            "trade_id": int(result.get("trade_id") or 0),
             "status": "filled",
             "provider_status": "filled",
             "provider_order_id": f"bt-order-{order_id}",
             "filled_quantity": qty,
             "filled_price": fill_price,
+            "fee": fee,
+            "tax": tax,
+            "cash_before": float(result.get("cash_before") or cash),
+            "cash_after": float(result.get("cash_after") or 0.0),
+            "position_before": int(result.get("position_before") or pos_map.get(stock_code, 0)),
+            "position_after": int(result.get("position_after") or 0),
             "submitted_at": datetime.now().isoformat(),
             "message": "ok",
         }

@@ -221,8 +221,8 @@ class AgentService:
             if not isinstance(llm_raw, dict):
                 raise ValueError("runtime_config.llm must be an object")
             provider = str(llm_raw.get("provider") or "").strip().lower()
-            if provider not in {"openai", "deepseek", "custom"}:
-                raise ValueError("runtime_config.llm.provider must be one of openai|deepseek|custom")
+            if provider not in {"gemini", "anthropic", "openai", "deepseek", "custom"}:
+                raise ValueError("runtime_config.llm.provider must be one of gemini|anthropic|openai|deepseek|custom")
             base_url = str(llm_raw.get("base_url") or "").strip()
             model = str(llm_raw.get("model") or "").strip()
             if not base_url:
@@ -277,8 +277,8 @@ class AgentService:
                 raise ValueError(f"runtime_config.execution contains unsupported fields: {field_list}")
 
             mode = str(execution_raw.get("mode") or "").strip().lower()
-            if mode != "paper":
-                raise ValueError("runtime_config.execution.mode must be paper")
+            if mode not in {"paper", "broker"}:
+                raise ValueError("runtime_config.execution.mode must be one of paper|broker")
 
             broker_account_id_raw = execution_raw.get("broker_account_id")
             broker_account_id: Optional[int] = None
@@ -289,6 +289,8 @@ class AgentService:
                     raise ValueError("runtime_config.execution.broker_account_id must be an integer") from exc
                 if broker_account_id <= 0:
                     raise ValueError("runtime_config.execution.broker_account_id must be >= 1")
+            if mode == "broker" and broker_account_id is None:
+                raise ValueError("runtime_config.execution.broker_account_id is required when mode=broker")
 
             execution_cfg = RuntimeExecutionConfig(
                 mode=mode,

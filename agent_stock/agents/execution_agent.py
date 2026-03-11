@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Execution Agent: simulation intent executor (no local ledger persistence)."""
+"""Execution Agent: request-scoped simulation executor."""
 
 from __future__ import annotations
 
@@ -11,22 +11,25 @@ from data_provider.base import canonical_stock_code
 
 from agent_stock.agents.contracts import AgentState, ExecutionAgentOutput, RiskAgentOutput
 from agent_stock.repositories.execution_repo import ExecutionRepository
+from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
 from agent_stock.storage import DatabaseManager
 from src.config import Config, RuntimeExecutionConfig, get_config
 
 
 class ExecutionAgent:
-    """Generate execution intent under paper semantics using runtime account snapshot."""
+    """Generate execution intent or submit one simulated order to local runtime."""
 
     def __init__(
         self,
         config: Optional[Config] = None,
         db_manager: Optional[DatabaseManager] = None,
         execution_repo: Optional[ExecutionRepository] = None,
+        runtime_service: Optional[BacktraderRuntimeService] = None,
     ) -> None:
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = execution_repo or ExecutionRepository(self.db)
+        self.runtime_service = runtime_service or get_backtrader_runtime_service()
 
     def run(
         self,
@@ -42,8 +45,7 @@ class ExecutionAgent:
         runtime_execution: Optional[RuntimeExecutionConfig] = None,
         backend_task_id: Optional[str] = None,
     ) -> ExecutionAgentOutput:
-        """Execute intent against provided runtime snapshot without writing paper_* tables."""
-        del run_id, runtime_execution  # retained for backward-compatible signature
+        """Execute one stock decision under paper or broker-backed simulation semantics."""
         normalized_code = canonical_stock_code(code)
         resolved_account_name = account_name or str(getattr(self.config, "agent_account_name", "paper-default") or "paper-default")
         initial_cash = (
@@ -51,6 +53,37 @@ class ExecutionAgent:
             if initial_cash_override is not None
             else float(getattr(self.config, "agent_initial_cash", 1_000_000.0))
         )
+        runtime_mode = str(getattr(runtime_execution, "mode", "paper") or "paper").strip().lower()
+        broker_account_id = self._as_int(getattr(runtime_execution, "broker_account_id", None), 0) if runtime_execution else 0
+
+        if runtime_mode == "broker":
+            if broker_account_id <= 0:
+                return ExecutionAgentOutput(
+                    code=normalized_code,
+                    trade_date=trade_date,
+                    state=AgentState.FAILED,
+                    execution_mode="broker",
+                    backend_task_id=backend_task_id,
+                    broker_requested=False,
+                    executed_via="backtrader_internal",
+                    broker_ticket_id=None,
+                    fallback_reason=None,
+                    action="none",
+                    reason="invalid_broker_account",
+                    error_message="runtime_execution.broker_account_id is required for broker mode",
+                )
+            return self._run_broker_execution(
+                run_id=run_id,
+                code=normalized_code,
+                trade_date=trade_date,
+                current_price=current_price,
+                risk_output=risk_output,
+                account_snapshot=account_snapshot,
+                account_name=resolved_account_name,
+                initial_cash=initial_cash,
+                broker_account_id=broker_account_id,
+                backend_task_id=backend_task_id,
+            )
 
         output = self._run_paper_intent(
             code=normalized_code,
@@ -61,7 +94,6 @@ class ExecutionAgent:
             initial_cash=initial_cash,
             account_snapshot=account_snapshot,
         )
-
         output.execution_mode = "paper"
         output.backend_task_id = backend_task_id
         output.broker_requested = False
@@ -69,6 +101,261 @@ class ExecutionAgent:
         output.broker_ticket_id = None
         output.fallback_reason = None
         return output
+
+    def _run_broker_execution(
+        self,
+        *,
+        run_id: str,
+        code: str,
+        trade_date: date,
+        current_price: float,
+        risk_output: RiskAgentOutput,
+        account_snapshot: Optional[Dict[str, Any]],
+        account_name: str,
+        initial_cash: float,
+        broker_account_id: int,
+        backend_task_id: Optional[str],
+    ) -> ExecutionAgentOutput:
+        candidate = self._run_paper_intent(
+            code=code,
+            trade_date=trade_date,
+            current_price=current_price,
+            risk_output=risk_output,
+            account_name=account_name,
+            initial_cash=initial_cash,
+            account_snapshot=account_snapshot,
+        )
+
+        snapshot_before = self._fetch_broker_snapshot(
+            broker_account_id=broker_account_id,
+            account_name=account_name,
+            initial_cash=initial_cash,
+            fallback_snapshot=account_snapshot,
+        )
+        if snapshot_before:
+            candidate.cash_before = round(float(snapshot_before.get("cash") or candidate.cash_before), 4)
+            candidate.position_before = int(self._find_position(snapshot_before, code).get("quantity") or candidate.position_before)
+            candidate.account_snapshot = snapshot_before
+
+        if candidate.state != AgentState.READY or candidate.action not in {"buy", "sell"} or candidate.traded_qty <= 0:
+            cash_before = float(snapshot_before.get("cash") or candidate.cash_before) if snapshot_before else candidate.cash_before
+            position_before = int(self._find_position(snapshot_before, code).get("quantity") or candidate.position_before) if snapshot_before else candidate.position_before
+            candidate.execution_mode = "broker"
+            candidate.backend_task_id = backend_task_id
+            candidate.broker_requested = False
+            candidate.executed_via = "backtrader_internal"
+            candidate.broker_ticket_id = None
+            candidate.fallback_reason = None
+            candidate.cash_before = round(cash_before, 4)
+            candidate.cash_after = round(cash_before if candidate.state != AgentState.READY else candidate.cash_after, 4)
+            candidate.position_before = position_before
+            candidate.position_after = position_before if candidate.state != AgentState.READY else candidate.position_after
+            if snapshot_before:
+                candidate.account_snapshot = snapshot_before
+            return candidate
+
+        try:
+            response = self.runtime_service.place_order(
+                {
+                    "broker_account_id": broker_account_id,
+                    "payload": {
+                        "stock_code": code,
+                        "direction": candidate.action,
+                        "type": "market",
+                        "price": current_price,
+                        "quantity": candidate.traded_qty,
+                    },
+                }
+            )
+        except Exception as exc:
+            return self._build_broker_failure_output(
+                code=code,
+                trade_date=trade_date,
+                backend_task_id=backend_task_id,
+                candidate=candidate,
+                broker_account_id=broker_account_id,
+                account_name=account_name,
+                initial_cash=initial_cash,
+                snapshot_before=snapshot_before,
+                reason="broker_runtime_error",
+                error_message=str(exc),
+            )
+
+        status = str(response.get("status") or response.get("provider_status") or "").strip().lower()
+        if status not in {"filled", "submitted"}:
+            return self._build_broker_failure_output(
+                code=code,
+                trade_date=trade_date,
+                backend_task_id=backend_task_id,
+                candidate=candidate,
+                broker_account_id=broker_account_id,
+                account_name=account_name,
+                initial_cash=initial_cash,
+                snapshot_before=snapshot_before,
+                reason="broker_rejected",
+                error_message=str(response.get("message") or "broker rejected order").strip() or "broker rejected order",
+                response=response,
+            )
+
+        snapshot_after = self._fetch_broker_snapshot(
+            broker_account_id=broker_account_id,
+            account_name=account_name,
+            initial_cash=initial_cash,
+            fallback_snapshot=snapshot_before,
+        ) or snapshot_before or candidate.account_snapshot
+        position_before = int(self._find_position(snapshot_before, code).get("quantity") or candidate.position_before) if snapshot_before else candidate.position_before
+        position_after = int(self._find_position(snapshot_after, code).get("quantity") or candidate.position_after) if snapshot_after else candidate.position_after
+        cash_before = self._as_number(response.get("cash_before"), candidate.cash_before)
+        cash_after = self._as_number(
+            response.get("cash_after"),
+            float(snapshot_after.get("cash") or candidate.cash_after) if snapshot_after else candidate.cash_after,
+        )
+        filled_quantity = max(0, self._as_int(response.get("filled_quantity"), candidate.traded_qty))
+        fill_price = self._as_number(response.get("filled_price"), candidate.fill_price or current_price)
+        fee = self._as_number(response.get("fee"), candidate.fee)
+        tax = self._as_number(response.get("tax"), candidate.tax)
+        provider_order_id = self._as_text(response.get("provider_order_id") or response.get("order_id"))
+
+        return ExecutionAgentOutput(
+            code=code,
+            trade_date=trade_date,
+            state=AgentState.READY,
+            execution_mode="broker",
+            backend_task_id=backend_task_id,
+            broker_requested=True,
+            executed_via="backtrader_internal",
+            broker_ticket_id=provider_order_id,
+            fallback_reason=None,
+            action=candidate.action,
+            reason="broker_executed",
+            order_id=self._parse_optional_int(response.get("order_id")),
+            trade_id=self._parse_optional_int(response.get("trade_id")),
+            target_qty=candidate.target_qty,
+            traded_qty=filled_quantity,
+            fill_price=round(fill_price, 4) if fill_price is not None else None,
+            fee=round(fee, 4),
+            tax=round(tax, 4),
+            cash_before=round(cash_before, 4),
+            cash_after=round(cash_after, 4),
+            position_before=position_before,
+            position_after=position_after,
+            account_snapshot=snapshot_after or candidate.account_snapshot,
+        )
+
+    def _build_broker_failure_output(
+        self,
+        *,
+        code: str,
+        trade_date: date,
+        backend_task_id: Optional[str],
+        candidate: ExecutionAgentOutput,
+        broker_account_id: int,
+        account_name: str,
+        initial_cash: float,
+        snapshot_before: Optional[Dict[str, Any]],
+        reason: str,
+        error_message: str,
+        response: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionAgentOutput:
+        snapshot_after = self._fetch_broker_snapshot(
+            broker_account_id=broker_account_id,
+            account_name=account_name,
+            initial_cash=initial_cash,
+            fallback_snapshot=snapshot_before or candidate.account_snapshot,
+        ) or snapshot_before or candidate.account_snapshot
+        cash_before = self._as_number(
+            response.get("cash_before") if response else None,
+            float(snapshot_before.get("cash") or candidate.cash_before) if snapshot_before else candidate.cash_before,
+        )
+        cash_after = self._as_number(
+            response.get("cash_after") if response else None,
+            float(snapshot_after.get("cash") or cash_before) if snapshot_after else cash_before,
+        )
+        position_before = int(self._find_position(snapshot_before, code).get("quantity") or candidate.position_before) if snapshot_before else candidate.position_before
+        position_after = int(self._find_position(snapshot_after, code).get("quantity") or position_before) if snapshot_after else position_before
+        provider_order_id = self._as_text(response.get("provider_order_id") or response.get("order_id")) if response else None
+
+        return ExecutionAgentOutput(
+            code=code,
+            trade_date=trade_date,
+            state=AgentState.FAILED,
+            execution_mode="broker",
+            backend_task_id=backend_task_id,
+            broker_requested=True,
+            executed_via="backtrader_internal",
+            broker_ticket_id=provider_order_id,
+            fallback_reason=None,
+            action=candidate.action,
+            reason=reason,
+            order_id=self._parse_optional_int(response.get("order_id")) if response else None,
+            trade_id=self._parse_optional_int(response.get("trade_id")) if response else None,
+            target_qty=candidate.target_qty,
+            traded_qty=0,
+            fill_price=None,
+            fee=round(self._as_number(response.get("fee") if response else None, 0.0), 4),
+            tax=round(self._as_number(response.get("tax") if response else None, 0.0), 4),
+            cash_before=round(cash_before, 4),
+            cash_after=round(cash_after, 4),
+            position_before=position_before,
+            position_after=position_after,
+            account_snapshot=snapshot_after,
+            error_message=error_message.strip()[:500] or reason,
+        )
+
+    def _fetch_broker_snapshot(
+        self,
+        *,
+        broker_account_id: int,
+        account_name: str,
+        initial_cash: float,
+        fallback_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            summary = self.runtime_service.get_account_summary({"broker_account_id": broker_account_id})
+            positions_raw = self.runtime_service.get_positions({"broker_account_id": broker_account_id})
+        except Exception:
+            if isinstance(fallback_snapshot, dict):
+                return self._normalize_snapshot(fallback_snapshot, account_name=account_name, initial_cash=initial_cash)
+            return None
+
+        positions = []
+        for raw in positions_raw:
+            if not isinstance(raw, dict):
+                continue
+            positions.append(
+                {
+                    "code": raw.get("stock_code") or raw.get("code") or raw.get("symbol"),
+                    "quantity": raw.get("quantity"),
+                    "available_qty": raw.get("available_qty"),
+                    "avg_cost": raw.get("avg_cost"),
+                    "last_price": raw.get("last_price"),
+                    "market_value": raw.get("market_value"),
+                    "unrealized_pnl": raw.get("unrealized_pnl"),
+                }
+            )
+
+        fallback_name = ""
+        if isinstance(fallback_snapshot, dict):
+            fallback_name = str(fallback_snapshot.get("name") or "").strip()
+        snapshot = {
+            "name": fallback_name or account_name,
+            "cash": summary.get("cash"),
+            "initial_cash": summary.get("initial_capital"),
+            "total_market_value": summary.get("market_value"),
+            "total_asset": summary.get("total_asset"),
+            "realized_pnl": summary.get("realized_pnl"),
+            "unrealized_pnl": summary.get("unrealized_pnl"),
+            "cumulative_fees": summary.get("cumulative_fees"),
+            "positions": positions,
+            "snapshot_at": summary.get("snapshot_at"),
+            "data_source": "backtrader_internal",
+            "broker_account_id": broker_account_id,
+            "provider_code": "backtrader_local",
+            "provider_name": "Backtrader Local Sim",
+            "account_uid": f"bt-{broker_account_id}",
+            "account_display_name": fallback_snapshot.get("account_display_name") if isinstance(fallback_snapshot, dict) else account_name,
+        }
+        return self._normalize_snapshot(snapshot, account_name=account_name, initial_cash=initial_cash)
 
     def _run_paper_intent(
         self,
@@ -234,6 +521,20 @@ class ExecutionAgent:
             return int(float(value))
         except Exception:
             return default
+
+    @staticmethod
+    def _as_text(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        return text or None
+
+    @classmethod
+    def _parse_optional_int(cls, value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.startswith("bt-order-"):
+            return cls._as_int(value.replace("bt-order-", "", 1), 0) or None
+        parsed = cls._as_int(value, 0)
+        return parsed or None
 
     @classmethod
     def _normalize_positions(cls, value: Any) -> list[Dict[str, Any]]:

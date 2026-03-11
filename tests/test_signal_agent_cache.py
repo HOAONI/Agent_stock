@@ -94,7 +94,7 @@ class SignalAgentCacheTestCase(unittest.TestCase):
         self.assertEqual(second.operation_advice, "买入")
         self.assertAlmostEqual(float(second.stop_loss), 9.5)
 
-    def test_runtime_llm_request_still_uses_global_ai_cache(self):
+    def test_runtime_llm_request_bypasses_shared_daily_cache(self):
         context = {"raw_data": self._build_raw_data()}
         data_output = DataAgentOutput(
             code="600519",
@@ -115,9 +115,9 @@ class SignalAgentCacheTestCase(unittest.TestCase):
         first = self.agent.run(data_output, runtime_config=runtime_config)
         second = self.agent.run(data_output, runtime_config=runtime_config)
 
-        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.calls, 2)
         self.assertTrue(first.ai_refreshed)
-        self.assertFalse(second.ai_refreshed)
+        self.assertTrue(second.ai_refreshed)
 
 
 if __name__ == "__main__":

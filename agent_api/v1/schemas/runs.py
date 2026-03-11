@@ -32,7 +32,7 @@ class RuntimeLlmRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai", "deepseek", "custom"]
+    provider: Literal["gemini", "anthropic", "openai", "deepseek", "custom"]
     base_url: str = Field(min_length=1, max_length=1024)
     model: str = Field(min_length=1, max_length=128)
     api_token: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -68,16 +68,16 @@ class RuntimeExecutionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["paper"]
+    mode: Literal["paper", "broker"]
     has_ticket: bool = False
     broker_account_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _normalize_execution(self) -> "RuntimeExecutionRequest":
-        # Keep has_ticket for backward-compatible payload shape, but paper mode
-        # never requires broker credential exchange.
-        if self.mode != "paper":
-            raise ValueError("execution.mode must be paper")
+        # Keep has_ticket for backward-compatible payload shape. `broker` is
+        # reserved for trusted Backend -> Agent internal simulation execution.
+        if self.mode == "broker" and self.broker_account_id is None:
+            raise ValueError("execution.broker_account_id is required when mode=broker")
         return self
 
 

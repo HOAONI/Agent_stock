@@ -59,6 +59,22 @@ def mask_secret(value: Optional[str]) -> str:
     return f"{text[:2]}{'*' * (len(text) - 4)}{text[-2:]}"
 
 
+def is_valid_secret(value: Optional[str]) -> bool:
+    """Check whether a token-like value is plausibly configured."""
+    text = str(value or "").strip()
+    return bool(text) and len(text) > 10 and not text.startswith("your_")
+
+
+def infer_openai_compatible_provider(base_url: Optional[str]) -> str:
+    """Infer the visible provider label for one OpenAI-compatible endpoint."""
+    normalized = str(base_url or "").strip().lower()
+    if "deepseek" in normalized:
+        return "deepseek"
+    if normalized and "openai.com" not in normalized:
+        return "custom"
+    return "openai"
+
+
 def redact_sensitive_text(text: Optional[str]) -> str:
     """Redact token/key/secret fragments from plain-text messages."""
     raw = str(text or "")
@@ -109,6 +125,16 @@ class RuntimeLlmConfig:
     base_url: Optional[str] = None
     model: Optional[str] = None
     api_token: Optional[str] = None
+    has_token: bool = False
+
+
+@dataclass(frozen=True)
+class RuntimeLlmDefaultConfig:
+    """Resolved service-level default LLM metadata."""
+
+    provider: str
+    base_url: str
+    model: str
     has_token: bool = False
 
 
@@ -195,6 +221,7 @@ class Config:
     openai_model: str = "gpt-4o-mini"  # OpenAI 兼容模型名称
     openai_vision_model: Optional[str] = None  # Vision 专用模型（可选，不配置则用 openai_model；部分模型如 DeepSeek 不支持图像）
     openai_temperature: float = 0.7  # OpenAI 温度参数（0.0-2.0，默认0.7）
+    agent_llm_request_timeout_ms: int = 120000  # 单次 LLM 请求超时（毫秒）
     
     # === 搜索引擎配置（支持多 Key 负载均衡）===
     bocha_api_keys: List[str] = field(default_factory=list)  # Bocha API Keys
@@ -536,6 +563,7 @@ class Config:
             openai_model=os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
             openai_vision_model=os.getenv('OPENAI_VISION_MODEL') or None,
             openai_temperature=float(os.getenv('OPENAI_TEMPERATURE', '0.7')),
+            agent_llm_request_timeout_ms=max(1000, int(os.getenv('AGENT_LLM_REQUEST_TIMEOUT_MS', '120000'))),
             bocha_api_keys=bocha_api_keys,
             tavily_api_keys=tavily_api_keys,
             brave_api_keys=brave_api_keys,
@@ -757,13 +785,77 @@ class Config:
 
     def clone_for_runtime_llm(self, runtime_llm: Optional[RuntimeLlmConfig]) -> 'Config':
         """
-        Deprecated compatibility helper.
-
-        Runtime request payload may still contain `runtime_config.llm`, but
-        LLM provider/model/token selection is controlled by service-side env.
+        Build a request-scoped config view for one runtime LLM override.
         """
-        _ = runtime_llm
-        return self
+        if runtime_llm is None:
+            return self
+
+        provider = str(runtime_llm.provider or "").strip().lower()
+        base_url = str(runtime_llm.base_url or "").strip() or None
+        model = str(runtime_llm.model or "").strip()
+        api_token = str(runtime_llm.api_token or "").strip() or None
+
+        overrides: Dict[str, Any] = {
+            "gemini_api_key": None,
+            "anthropic_api_key": None,
+            "openai_api_key": None,
+        }
+
+        if provider == "gemini":
+            overrides.update(
+                {
+                    "gemini_api_key": api_token or self.gemini_api_key,
+                    "gemini_model": model or self.gemini_model,
+                }
+            )
+        elif provider == "anthropic":
+            overrides.update(
+                {
+                    "anthropic_api_key": api_token or self.anthropic_api_key,
+                    "anthropic_model": model or self.anthropic_model,
+                }
+            )
+        elif provider in {"openai", "deepseek", "custom"}:
+            overrides.update(
+                {
+                    "openai_api_key": api_token or self.openai_api_key,
+                    "openai_base_url": base_url or self.openai_base_url,
+                    "openai_model": model or self.openai_model,
+                }
+            )
+        else:
+            return self
+
+        return self.clone_with_overrides(**overrides)
+
+    def resolve_default_runtime_llm(self) -> Optional[RuntimeLlmDefaultConfig]:
+        """Resolve the currently effective built-in default LLM metadata."""
+        if is_valid_secret(self.gemini_api_key):
+            return RuntimeLlmDefaultConfig(
+                provider="gemini",
+                base_url="https://generativelanguage.googleapis.com",
+                model=self.gemini_model or "gemini-3-flash-preview",
+                has_token=True,
+            )
+
+        if is_valid_secret(self.anthropic_api_key):
+            return RuntimeLlmDefaultConfig(
+                provider="anthropic",
+                base_url="https://api.anthropic.com",
+                model=self.anthropic_model or "claude-3-5-sonnet-20241022",
+                has_token=True,
+            )
+
+        if is_valid_secret(self.openai_api_key):
+            base_url = str(self.openai_base_url or "").strip() or "https://api.openai.com/v1"
+            return RuntimeLlmDefaultConfig(
+                provider=infer_openai_compatible_provider(base_url),
+                base_url=base_url,
+                model=self.openai_model or "gpt-4o-mini",
+                has_token=True,
+            )
+
+        return None
 
     def refresh_stock_list(self) -> None:
         """

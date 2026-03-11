@@ -163,7 +163,8 @@ def test_strategy_backtest_returns_range_and_items():
 
     items = result["items"]
     assert len(items) == 2
-    assert {item["strategy_code"] for item in items} == {"ma20_trend", "rsi14_mean_reversion"}
+    assert {item["strategy_code"] for item in items} == {"ma_cross", "rsi_threshold"}
+    assert {item["template_code"] for item in items} == {"ma_cross", "rsi_threshold"}
     assert all(isinstance(item["equity"], list) and len(item["equity"]) > 0 for item in items)
 
 
@@ -203,8 +204,8 @@ def test_strategy_backtest_handles_margin_without_homogenizing_results():
     )
 
     items = {item["strategy_code"]: item for item in result["items"]}
-    ma20_metrics = items["ma20_trend"]["metrics"]
-    rsi_metrics = items["rsi14_mean_reversion"]["metrics"]
+    ma20_metrics = items["ma_cross"]["metrics"]
+    rsi_metrics = items["rsi_threshold"]["metrics"]
 
     assert ma20_metrics["margin_rejections"] >= 0
     assert rsi_metrics["margin_rejections"] >= 0
@@ -263,6 +264,8 @@ def test_strategy_backtest_ma20_supports_window_start_state_entry_with_warmup():
     assert call["end_date"] == "2024-03-29"
 
     item = result["items"][0]
+    assert item["strategy_code"] == "ma_cross"
+    assert item["template_code"] == "ma_cross"
     metrics = item["metrics"]
     assert metrics["entry_signal_count"] >= 1
     assert metrics["total_trades"] >= 1
@@ -271,3 +274,56 @@ def test_strategy_backtest_ma20_supports_window_start_state_entry_with_warmup():
     assert first_trade["entry_date"] == "2024-03-04"
     assert first_trade["exit_date"] == "2024-03-29"
     assert first_trade["exit_reason"] == "window_end"
+
+
+@pytest.mark.skipif(strategy_module.bt is None, reason="backtrader not installed")
+def test_strategy_backtest_supports_parameterized_template_payload():
+    service = StrategyBacktestService(fetcher_manager=_StubFetcher(_sample_frame()))
+    result = service.run(
+        {
+            "code": "600519",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "strategies": [
+                {
+                    "strategy_id": 11,
+                    "strategy_name": "Fast MA",
+                    "template_code": "ma_cross",
+                    "params": {"maWindow": 10},
+                },
+                {
+                    "strategy_id": 12,
+                    "strategy_name": "Wide RSI",
+                    "template_code": "rsi_threshold",
+                    "params": {"rsiPeriod": 10, "oversoldThreshold": 25, "overboughtThreshold": 75},
+                },
+            ],
+        }
+    )
+
+    assert [item["strategy_id"] for item in result["items"]] == [11, 12]
+    assert [item["strategy_name"] for item in result["items"]] == ["Fast MA", "Wide RSI"]
+    assert result["items"][0]["params"]["maWindow"] == 10
+    assert result["items"][1]["params"]["rsiPeriod"] == 10
+    assert result["items"][1]["params"]["oversoldThreshold"] == 25
+    assert result["items"][1]["params"]["overboughtThreshold"] == 75
+
+
+def test_strategy_backtest_rejects_invalid_template_params():
+    service = StrategyBacktestService(fetcher_manager=_StubFetcher(_sample_frame()))
+
+    with pytest.raises(ValueError, match="oversoldThreshold must be between 1 and 49"):
+        service.run(
+            {
+                "code": "600519",
+                "start_date": "2024-01-01",
+                "end_date": "2024-12-31",
+                "strategies": [
+                    {
+                        "strategy_name": "Bad RSI",
+                        "template_code": "rsi_threshold",
+                        "params": {"rsiPeriod": 14, "oversoldThreshold": 80, "overboughtThreshold": 70},
+                    }
+                ],
+            }
+        )

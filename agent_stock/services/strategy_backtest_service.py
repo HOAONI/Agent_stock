@@ -18,10 +18,32 @@ try:
 except Exception:  # pragma: no cover
     bt = None
 
-STRATEGY_CODES = ["ma20_trend", "rsi14_mean_reversion"]
-STRATEGY_NAMES: Dict[str, str] = {
+LEGACY_STRATEGY_CODES = ["ma20_trend", "rsi14_mean_reversion"]
+LEGACY_STRATEGY_NAMES: Dict[str, str] = {
     "ma20_trend": "MA20 Trend",
     "rsi14_mean_reversion": "RSI14 Mean Reversion",
+}
+TEMPLATE_NAMES: Dict[str, str] = {
+    "ma_cross": "MA Cross",
+    "rsi_threshold": "RSI Threshold",
+}
+LEGACY_STRATEGY_TEMPLATE_MAP: Dict[str, Dict[str, Any]] = {
+    "ma20_trend": {
+        "template_code": "ma_cross",
+        "strategy_name": LEGACY_STRATEGY_NAMES["ma20_trend"],
+        "params": {
+            "maWindow": 20,
+        },
+    },
+    "rsi14_mean_reversion": {
+        "template_code": "rsi_threshold",
+        "strategy_name": LEGACY_STRATEGY_NAMES["rsi14_mean_reversion"],
+        "params": {
+            "rsiPeriod": 14,
+            "oversoldThreshold": 30,
+            "overboughtThreshold": 70,
+        },
+    },
 }
 WARMUP_CALENDAR_DAYS = 120
 
@@ -34,6 +56,15 @@ class StrategyRunParams:
     initial_capital: float
     commission_rate: float
     slippage_bps: float
+
+
+@dataclass(frozen=True)
+class StrategyDefinition:
+    strategy_id: Optional[int]
+    strategy_name: str
+    template_code: str
+    template_name: str
+    params: Dict[str, float]
 
 
 class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
@@ -238,57 +269,72 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         self.pending_exit_reason = None
 
 
-class _MA20TrendStrategy(_BaseTrackedStrategy):
-    """MA20 cross strategy: up-cross enter, down-cross exit."""
+class _MACrossStrategy(_BaseTrackedStrategy):
+    """Moving-average cross strategy with configurable window."""
+
+    params = dict(initial_capital=100000.0, trade_start=None, trade_end=None, ma_window=20)
 
     def __init__(self):  # type: ignore[override]
         super().__init__()
-        self.ma20 = bt.indicators.SimpleMovingAverage(self.data.close, period=20)
-        self.cross_up = bt.indicators.CrossUp(self.data.close, self.ma20)
-        self.cross_down = bt.indicators.CrossDown(self.data.close, self.ma20)
+        self.ma_window = max(5, int(getattr(self.p, "ma_window", 20) or 20))
+        self.moving_average = bt.indicators.SimpleMovingAverage(self.data.close, period=self.ma_window)
+        self.cross_up = bt.indicators.CrossUp(self.data.close, self.moving_average)
+        self.cross_down = bt.indicators.CrossDown(self.data.close, self.moving_average)
 
     def _should_buy(self) -> bool:
-        if len(self) < 20:
+        if len(self) < self.ma_window:
             return False
 
-        ma20_value = float(self.ma20[0])
-        if not math.isfinite(ma20_value):
+        ma_value = float(self.moving_average[0])
+        if not math.isfinite(ma_value):
             return False
 
         if self._is_window_start_bar():
             close_value = float(self.data.close[0])
-            return math.isfinite(close_value) and close_value > ma20_value
+            return math.isfinite(close_value) and close_value > ma_value
 
-        return len(self) >= 21 and float(self.cross_up[0]) > 0
+        return len(self) >= self.ma_window + 1 and float(self.cross_up[0]) > 0
 
     def _should_sell(self) -> bool:
-        return len(self) >= 21 and float(self.cross_down[0]) > 0
+        return len(self) >= self.ma_window + 1 and float(self.cross_down[0]) > 0
 
     def _signal_exit_reason(self) -> str:
-        return "ma20_cross_down"
+        return f"ma{self.ma_window}_cross_down"
 
 
-class _RSI14MeanReversionStrategy(_BaseTrackedStrategy):
-    """RSI14 strategy: RSI<30 enter, RSI>70 exit."""
+class _RSIThresholdStrategy(_BaseTrackedStrategy):
+    """RSI threshold strategy with configurable period and thresholds."""
+
+    params = dict(
+        initial_capital=100000.0,
+        trade_start=None,
+        trade_end=None,
+        rsi_period=14,
+        oversold_threshold=30,
+        overbought_threshold=70,
+    )
 
     def __init__(self):  # type: ignore[override]
         super().__init__()
-        self.rsi14 = bt.indicators.RSI_Safe(self.data.close, period=14)
+        self.rsi_period = max(5, int(getattr(self.p, "rsi_period", 14) or 14))
+        self.oversold_threshold = float(getattr(self.p, "oversold_threshold", 30) or 30)
+        self.overbought_threshold = float(getattr(self.p, "overbought_threshold", 70) or 70)
+        self.rsi = bt.indicators.RSI_Safe(self.data.close, period=self.rsi_period)
 
     def _should_buy(self) -> bool:
-        if len(self) < 15:
+        if len(self) < self.rsi_period + 1:
             return False
-        value = float(self.rsi14[0])
-        return math.isfinite(value) and value < 30
+        value = float(self.rsi[0])
+        return math.isfinite(value) and value < self.oversold_threshold
 
     def _should_sell(self) -> bool:
-        if len(self) < 15:
+        if len(self) < self.rsi_period + 1:
             return False
-        value = float(self.rsi14[0])
-        return math.isfinite(value) and value > 70
+        value = float(self.rsi[0])
+        return math.isfinite(value) and value > self.overbought_threshold
 
     def _signal_exit_reason(self) -> str:
-        return "rsi14_gt_70"
+        return f"rsi_gt_{int(self.overbought_threshold)}"
 
 
 class StrategyBacktestService:
@@ -334,13 +380,93 @@ class StrategyBacktestService:
         return normalize_stock_code(code)
 
     @staticmethod
-    def _parse_strategy_codes(raw: Any) -> List[str]:
-        if not isinstance(raw, list):
-            return list(STRATEGY_CODES)
-        values = [str(item).strip() for item in raw]
-        selected = [item for item in values if item in STRATEGY_CODES]
-        dedup = list(dict.fromkeys(selected))
-        return dedup if dedup else list(STRATEGY_CODES)
+    def _normalize_template_params(template_code: str, raw_params: Any) -> Dict[str, float]:
+        source = raw_params if isinstance(raw_params, dict) else {}
+
+        if template_code == "ma_cross":
+            ma_window = int(StrategyBacktestService._to_float(source.get("maWindow"), 20))
+            if ma_window < 5 or ma_window > 120:
+                raise ValueError("validation_error: maWindow must be between 5 and 120")
+            return {
+                "maWindow": float(ma_window),
+            }
+
+        if template_code == "rsi_threshold":
+            rsi_period = int(StrategyBacktestService._to_float(source.get("rsiPeriod"), 14))
+            oversold_threshold = int(StrategyBacktestService._to_float(source.get("oversoldThreshold"), 30))
+            overbought_threshold = int(StrategyBacktestService._to_float(source.get("overboughtThreshold"), 70))
+
+            if rsi_period < 5 or rsi_period > 60:
+                raise ValueError("validation_error: rsiPeriod must be between 5 and 60")
+            if oversold_threshold < 1 or oversold_threshold > 49:
+                raise ValueError("validation_error: oversoldThreshold must be between 1 and 49")
+            if overbought_threshold < 51 or overbought_threshold > 99:
+                raise ValueError("validation_error: overboughtThreshold must be between 51 and 99")
+            if oversold_threshold >= overbought_threshold:
+                raise ValueError("validation_error: oversoldThreshold must be less than overboughtThreshold")
+
+            return {
+                "rsiPeriod": float(rsi_period),
+                "oversoldThreshold": float(oversold_threshold),
+                "overboughtThreshold": float(overbought_threshold),
+            }
+
+        raise ValueError(f"validation_error: unsupported template_code={template_code}")
+
+    def _normalize_strategy_definitions(self, payload: Dict[str, Any]) -> List[StrategyDefinition]:
+        raw_strategies = payload.get("strategies")
+        if isinstance(raw_strategies, list) and raw_strategies:
+            definitions: List[StrategyDefinition] = []
+            seen: set[tuple[Optional[int], str, str]] = set()
+            for item in raw_strategies:
+                if not isinstance(item, dict):
+                    raise ValueError("validation_error: strategies must be objects")
+                template_code = str(item.get("template_code") or "").strip()
+                if template_code not in TEMPLATE_NAMES:
+                    raise ValueError(f"validation_error: unsupported template_code={template_code}")
+                strategy_name = str(item.get("strategy_name") or "").strip() or TEMPLATE_NAMES[template_code]
+                strategy_id_raw = item.get("strategy_id")
+                strategy_id = int(strategy_id_raw) if strategy_id_raw is not None else None
+                if strategy_id is not None and strategy_id <= 0:
+                    raise ValueError("validation_error: strategy_id must be positive integer")
+                params = self._normalize_template_params(template_code, item.get("params"))
+                dedupe_key = (strategy_id, strategy_name, template_code)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                definitions.append(
+                    StrategyDefinition(
+                        strategy_id=strategy_id,
+                        strategy_name=strategy_name[:64],
+                        template_code=template_code,
+                        template_name=TEMPLATE_NAMES[template_code],
+                        params=params,
+                    )
+                )
+
+            if definitions:
+                return definitions
+
+        raw_codes = payload.get("strategy_codes")
+        values = raw_codes if isinstance(raw_codes, list) else LEGACY_STRATEGY_CODES
+        selected = [str(item).strip() for item in values if str(item).strip() in LEGACY_STRATEGY_TEMPLATE_MAP]
+        deduped = list(dict.fromkeys(selected))
+        if not deduped:
+            deduped = list(LEGACY_STRATEGY_CODES)
+
+        definitions = []
+        for strategy_code in deduped:
+            resolved = LEGACY_STRATEGY_TEMPLATE_MAP[strategy_code]
+            definitions.append(
+                StrategyDefinition(
+                    strategy_id=None,
+                    strategy_name=str(resolved["strategy_name"]),
+                    template_code=str(resolved["template_code"]),
+                    template_name=TEMPLATE_NAMES[str(resolved["template_code"])],
+                    params={key: float(value) for key, value in dict(resolved["params"]).items()},
+                )
+            )
+        return definitions
 
     def _validate_params(self, payload: Dict[str, Any]) -> StrategyRunParams:
         if bt is None:
@@ -519,13 +645,26 @@ class StrategyBacktestService:
 
     def _run_single_strategy(
         self,
-        strategy_code: str,
+        strategy: StrategyDefinition,
         frame: pd.DataFrame,
         trade_window: pd.DataFrame,
         params: StrategyRunParams,
         benchmark: Dict[str, Any],
     ) -> Dict[str, Any]:
-        strategy_cls = _MA20TrendStrategy if strategy_code == "ma20_trend" else _RSI14MeanReversionStrategy
+        if strategy.template_code == "ma_cross":
+            strategy_cls = _MACrossStrategy
+            strategy_kwargs = {
+                "ma_window": int(strategy.params.get("maWindow", 20)),
+            }
+        elif strategy.template_code == "rsi_threshold":
+            strategy_cls = _RSIThresholdStrategy
+            strategy_kwargs = {
+                "rsi_period": int(strategy.params.get("rsiPeriod", 14)),
+                "oversold_threshold": float(strategy.params.get("oversoldThreshold", 30)),
+                "overbought_threshold": float(strategy.params.get("overboughtThreshold", 70)),
+            }
+        else:
+            raise ValueError(f"validation_error: unsupported template_code={strategy.template_code}")
 
         cerebro = bt.Cerebro(stdstats=False)
         data_feed = bt.feeds.PandasData(dataname=frame)
@@ -537,6 +676,7 @@ class StrategyBacktestService:
             initial_capital=params.initial_capital,
             trade_start=trade_start,
             trade_end=trade_end,
+            **strategy_kwargs,
         )
         cerebro.broker.setcash(float(params.initial_capital))
         cerebro.broker.setcommission(commission=float(params.commission_rate))
@@ -552,7 +692,7 @@ class StrategyBacktestService:
         # when indicator period is longer than available bars.
         result = cerebro.run(runonce=False)
         if not result:
-            raise ValueError(f"backtest_failed: empty result for strategy={strategy_code}")
+            raise ValueError(f"backtest_failed: empty result for template={strategy.template_code}")
         strategy_state = result[0]
 
         raw_points = strategy_state.equity_points if isinstance(strategy_state.equity_points, list) else []
@@ -634,25 +774,34 @@ class StrategyBacktestService:
         }
 
         params_payload = {
-            "signal_profile": "classic",
+            "signal_profile": "template_v1",
+            "template_code": strategy.template_code,
+            **strategy.params,
             "initial_capital": self._round(params.initial_capital, 2),
             "commission_rate": self._round(params.commission_rate, 6),
             "slippage_bps": self._round(params.slippage_bps, 4),
             "entry_rule": (
-                "window_start: close[t] > ma20[t] => t+1 open buy; otherwise close[t-1] <= ma20[t-1] and close[t] > ma20[t], t+1 open buy"
-                if strategy_code == "ma20_trend"
-                else "rsi14[t] < 30, t+1 open buy"
+                f"window_start: close[t] > ma{int(strategy.params.get('maWindow', 20))}[t] => t+1 open buy; otherwise cross above MA => t+1 open buy"
+                if strategy.template_code == "ma_cross"
+                else (
+                    f"rsi{int(strategy.params.get('rsiPeriod', 14))}[t] < {int(strategy.params.get('oversoldThreshold', 30))}, t+1 open buy"
+                )
             ),
             "exit_rule": (
-                "close[t-1] >= ma20[t-1] and close[t] < ma20[t], t+1 open sell"
-                if strategy_code == "ma20_trend"
-                else "rsi14[t] > 70, t+1 open sell"
+                f"cross below MA{int(strategy.params.get('maWindow', 20))}, t+1 open sell"
+                if strategy.template_code == "ma_cross"
+                else (
+                    f"rsi{int(strategy.params.get('rsiPeriod', 14))}[t] > {int(strategy.params.get('overboughtThreshold', 70))}, t+1 open sell"
+                )
             ),
         }
 
         return {
-            "strategy_code": strategy_code,
-            "strategy_name": STRATEGY_NAMES[strategy_code],
+            "strategy_id": strategy.strategy_id,
+            "strategy_code": strategy.template_code,
+            "strategy_name": strategy.strategy_name,
+            "template_code": strategy.template_code,
+            "template_name": strategy.template_name,
             "strategy_version": "v1",
             "params": params_payload,
             "metrics": metrics,
@@ -666,15 +815,15 @@ class StrategyBacktestService:
         }
 
     def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        strategy_definitions = self._normalize_strategy_definitions(payload)
         params = self._validate_params(payload)
-        strategy_codes = self._parse_strategy_codes(payload.get("strategy_codes"))
         frame, trade_window = self._load_daily_frame(params)
 
         effective_start = trade_window.index[0].date().isoformat()
         effective_end = trade_window.index[-1].date().isoformat()
 
         benchmark = self._compute_benchmark_equity(trade_window, params.initial_capital)
-        items = [self._run_single_strategy(code, frame, trade_window, params, benchmark) for code in strategy_codes]
+        items = [self._run_single_strategy(strategy, frame, trade_window, params, benchmark) for strategy in strategy_definitions]
 
         return {
             "engine_version": "backtrader_v1",

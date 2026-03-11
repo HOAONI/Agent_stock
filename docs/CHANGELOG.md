@@ -9,19 +9,19 @@
 - Added optional runtime account context contract:
   - `runtime_config.context.account_snapshot|summary|positions`
   - used as primary risk/execution account input.
-- Simplified `ExecutionAgent` runtime flow to local paper engine only (no broker ticket exchange, no broker fallback event posting).
-- Switched `ExecutionAgent` to light-state intent mode:
-  - no persistence writes to `paper_accounts|paper_positions|paper_orders|paper_trades`
-  - output remains compatibility-safe (`execution_mode/executed_via=paper`) with projected account snapshot.
+- Restored trusted internal broker runtime mode for `ExecutionAgent`:
+  - `mode=paper` keeps projected intent semantics
+  - `mode=broker` writes one local simulated order through `BacktraderRuntimeService`
+  - execution snapshots now reflect the real simulated order result for trusted Backend requests
 - Changed `/api/v1/accounts/{account_name}/snapshot` compatibility semantics:
   - now sourced from latest persisted run snapshot context, not realtime paper ledger.
-- Kept execution snapshot compatibility fields while fixing simulation-only values:
-  - `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`, `broker_ticket_id=null`, `fallback_reason=null`
-- Updated tests and docs to remove broker fallback expectations.
-- Clarified integration boundary: third-party simulation order submission is executed by `Backend_stock` worker after analysis, not by Agent.
+- Kept execution snapshot compatibility fields while allowing broker-backed internal values:
+  - `mode=paper`: `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`
+  - `mode=broker`: `execution_mode='broker'`, `broker_requested=true`, `executed_via='backtrader_internal'`
+- Updated tests and docs to reflect Agent-owned internal simulated execution.
 
 ### Breaking
-- `POST /api/v1/runs` now rejects `runtime_config.execution.mode=broker` with schema `422` validation error.
+- Trusted callers may now send `runtime_config.execution.mode=broker`; when they do, `broker_account_id` is required.
 
 ## 2026-02-25
 

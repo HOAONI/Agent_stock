@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ExecutionAgent simulation-only runtime tests."""
+"""ExecutionAgent broker runtime tests."""
 
 from __future__ import annotations
 
@@ -15,10 +15,84 @@ from src.repositories.execution_repo import ExecutionRepository
 from src.storage import DatabaseManager
 
 
-class ExecutionAgentSimulationOnlyTestCase(unittest.TestCase):
+class _FakeBacktraderRuntimeService:
+    def __init__(self) -> None:
+        self.cash = 100000.0
+        self.initial_capital = 100000.0
+        self.positions = []
+        self.last_order = None
+        self.reject_with = None
+
+    def get_account_summary(self, req):
+        return {
+            "broker_account_id": req["broker_account_id"],
+            "cash": self.cash,
+            "market_value": sum(float(item["market_value"]) for item in self.positions),
+            "total_asset": self.cash + sum(float(item["market_value"]) for item in self.positions),
+            "initial_capital": self.initial_capital,
+            "realized_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "cumulative_fees": 0.0,
+            "snapshot_at": "2026-03-07T10:00:00",
+        }
+
+    def get_positions(self, _req):
+        return list(self.positions)
+
+    def place_order(self, req):
+        self.last_order = req
+        if self.reject_with:
+            return {
+                "order_id": None,
+                "trade_id": None,
+                "status": "rejected",
+                "provider_status": "rejected",
+                "provider_order_id": None,
+                "filled_quantity": 0,
+                "filled_price": None,
+                "fee": 0.0,
+                "tax": 0.0,
+                "message": self.reject_with,
+            }
+
+        payload = req["payload"]
+        qty = int(payload["quantity"])
+        price = float(payload["price"])
+        fee = round(price * qty * 0.0003, 4)
+        self.cash = round(self.cash - price * qty - fee, 4)
+        self.positions = [
+            {
+                "stock_code": payload["stock_code"],
+                "quantity": qty,
+                "available_qty": qty,
+                "avg_cost": price,
+                "last_price": price,
+                "market_value": round(price * qty, 4),
+                "unrealized_pnl": 0.0,
+            }
+        ]
+        return {
+            "order_id": 11,
+            "trade_id": 22,
+            "status": "filled",
+            "provider_status": "filled",
+            "provider_order_id": "bt-order-11",
+            "filled_quantity": qty,
+            "filled_price": price,
+            "fee": fee,
+            "tax": 0.0,
+            "cash_before": 100000.0,
+            "cash_after": self.cash,
+            "position_before": 0,
+            "position_after": qty,
+            "message": "ok",
+        }
+
+
+class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.temp_dir.name, "execution_agent_simulation_only.db")
+        self.db_path = os.path.join(self.temp_dir.name, "execution_agent_broker_runtime.db")
 
         os.environ["DATABASE_PATH"] = self.db_path
         os.environ["DATABASE_URL"] = ""
@@ -39,7 +113,7 @@ class ExecutionAgentSimulationOnlyTestCase(unittest.TestCase):
         Config.reset_instance()
         self.temp_dir.cleanup()
 
-    def test_runtime_execution_context_remains_paper_only(self):
+    def test_runtime_execution_context_remains_paper(self):
         agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
         trade_date = date.today()
         risk = RiskAgentOutput(
@@ -71,60 +145,104 @@ class ExecutionAgentSimulationOnlyTestCase(unittest.TestCase):
         self.assertIsNone(output.fallback_reason)
         self.assertEqual(output.backend_task_id, "backend-task-1")
 
-    def test_default_runtime_execution_is_paper(self):
-        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
+    def test_broker_mode_executes_via_internal_runtime(self):
+        runtime_service = _FakeBacktraderRuntimeService()
+        agent = ExecutionAgent(
+            db_manager=self.db,
+            execution_repo=self.repo,
+            runtime_service=runtime_service,
+        )
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
             trade_date=trade_date,
-            target_notional=12000.0,
-            target_weight=0.12,
+            target_notional=15000.0,
+            target_weight=0.15,
             current_price=10.0,
         )
 
         output = agent.run(
-            run_id="run-no-runtime",
+            run_id="run-broker-mode",
             code="600519",
             trade_date=trade_date,
             current_price=10.0,
             risk_output=risk,
-            runtime_execution=None,
+            runtime_execution=RuntimeExecutionConfig(
+                mode="broker",
+                has_ticket=False,
+                broker_account_id=88,
+            ),
             backend_task_id="backend-task-2",
         )
 
-        self.assertEqual(output.execution_mode, "paper")
-        self.assertFalse(output.broker_requested)
-        self.assertEqual(output.executed_via, "paper")
-        self.assertIsNone(output.broker_ticket_id)
-        self.assertIsNone(output.fallback_reason)
+        self.assertEqual(output.execution_mode, "broker")
+        self.assertTrue(output.broker_requested)
+        self.assertEqual(output.executed_via, "backtrader_internal")
+        self.assertEqual(output.broker_ticket_id, "bt-order-11")
+        self.assertEqual(output.order_id, 11)
+        self.assertEqual(output.trade_id, 22)
+        self.assertGreater(output.traded_qty, 0)
+        self.assertEqual(output.reason, "broker_executed")
+        self.assertEqual(runtime_service.last_order["broker_account_id"], 88)
+        self.assertEqual(runtime_service.last_order["payload"]["direction"], "buy")
 
-    def test_skip_path_keeps_compatibility_fields_fixed(self):
+    def test_broker_mode_rejects_when_account_id_missing(self):
         agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
             trade_date=trade_date,
-            target_notional=0.0,
-            target_weight=0.0,
+            target_notional=15000.0,
+            target_weight=0.15,
             current_price=10.0,
         )
 
         output = agent.run(
-            run_id="run-skip",
+            run_id="run-broker-missing-account",
             code="600519",
             trade_date=trade_date,
             current_price=10.0,
             risk_output=risk,
-            runtime_execution=RuntimeExecutionConfig(mode="paper", has_ticket=False, broker_account_id=88),
+            runtime_execution=RuntimeExecutionConfig(mode="broker", has_ticket=False, broker_account_id=None),
             backend_task_id="backend-task-3",
         )
 
-        self.assertEqual(output.state.value, "skipped")
-        self.assertEqual(output.execution_mode, "paper")
-        self.assertFalse(output.broker_requested)
-        self.assertEqual(output.executed_via, "paper")
-        self.assertIsNone(output.broker_ticket_id)
-        self.assertIsNone(output.fallback_reason)
+        self.assertEqual(output.state.value, "failed")
+        self.assertEqual(output.execution_mode, "broker")
+        self.assertEqual(output.reason, "invalid_broker_account")
+
+    def test_broker_mode_surfaces_runtime_rejection(self):
+        runtime_service = _FakeBacktraderRuntimeService()
+        runtime_service.reject_with = "可用资金不足"
+        agent = ExecutionAgent(
+            db_manager=self.db,
+            execution_repo=self.repo,
+            runtime_service=runtime_service,
+        )
+        trade_date = date.today()
+        risk = RiskAgentOutput(
+            code="600519",
+            trade_date=trade_date,
+            target_notional=15000.0,
+            target_weight=0.15,
+            current_price=10.0,
+        )
+
+        output = agent.run(
+            run_id="run-broker-reject",
+            code="600519",
+            trade_date=trade_date,
+            current_price=10.0,
+            risk_output=risk,
+            runtime_execution=RuntimeExecutionConfig(mode="broker", has_ticket=False, broker_account_id=88),
+            backend_task_id="backend-task-4",
+        )
+
+        self.assertEqual(output.state.value, "failed")
+        self.assertEqual(output.execution_mode, "broker")
+        self.assertTrue(output.broker_requested)
+        self.assertEqual(output.reason, "broker_rejected")
+        self.assertEqual(output.error_message, "可用资金不足")
 
 
 if __name__ == "__main__":

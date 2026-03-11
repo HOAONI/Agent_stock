@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Optional
 import pandas as pd
 
 from agent_stock.agents.contracts import AgentState, DataAgentOutput, SignalAgentOutput
+from src.analyzer import LlmRequestTimeoutError
 from src.config import AgentRuntimeConfig, Config, get_config, redact_sensitive_text
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
@@ -48,11 +49,12 @@ class SignalAgent:
         """Run trend + AI policy with daily cache."""
         code = data_output.code
         trade_date = data_output.trade_date
+        has_runtime_llm = bool(runtime_config and runtime_config.llm is not None)
 
         trend_result = self._build_trend_result(data_output)
         trend_payload = self._trend_to_payload(trend_result)
 
-        cached = self.repo.get_signal_snapshot(code=code, trade_date=trade_date)
+        cached = None if has_runtime_llm else self.repo.get_signal_snapshot(code=code, trade_date=trade_date)
         ai_refreshed = False
 
         ai_policy = str(getattr(self.config, "agent_ai_refresh_policy", "daily_once") or "daily_once").lower()
@@ -115,27 +117,42 @@ class SignalAgent:
         if self._ai_resolver is not None:
             try:
                 return self._ai_resolver(code)
+            except LlmRequestTimeoutError:
+                raise
             except Exception as exc:
                 logger.warning("[%s] custom AI resolver failed: %s", code, redact_sensitive_text(str(exc)))
                 return None
 
-        if self._pipeline is None:
-            self._pipeline = StockAnalysisPipeline(
+        runtime_llm = runtime_config.llm if runtime_config else None
+        if runtime_llm is not None:
+            pipeline = StockAnalysisPipeline(
                 config=self.config,
                 query_id=uuid.uuid4().hex,
                 query_source="agent",
+                runtime_llm=runtime_llm,
             )
-        pipeline = self._pipeline
+        else:
+            if self._pipeline is None:
+                self._pipeline = StockAnalysisPipeline(
+                    config=self.config,
+                    query_id=uuid.uuid4().hex,
+                    query_source="agent",
+                )
+            pipeline = self._pipeline
 
         runtime_account_context = self._build_runtime_account_context(runtime_config=runtime_config)
 
         try:
+            logger.info("[%s] signal stage AI analysis start (runtime_llm=%s)", code, bool(runtime_llm is not None))
             return pipeline.analyze_stock(
                 code=code,
                 report_type=ReportType.FULL,
                 query_id=uuid.uuid4().hex,
                 runtime_account_context=runtime_account_context,
             )
+        except LlmRequestTimeoutError:
+            logger.error("[%s] signal stage AI analysis timed out", code)
+            raise
         except Exception as exc:
             logger.warning("[%s] default AI resolver failed: %s", code, redact_sensitive_text(str(exc)))
             return None
