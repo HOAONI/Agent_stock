@@ -25,10 +25,10 @@ class ReportType(str, Enum):
         """
         从字符串安全地转换为枚举值
         
-        Args:
+        参数：
             value: 字符串值
             
-        Returns:
+        返回：
             对应的枚举值，无效输入返回默认值 SIMPLE
         """
         try:

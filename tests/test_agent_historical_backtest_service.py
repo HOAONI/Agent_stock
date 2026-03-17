@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for Agent historical replay backtest service."""
+"""Agent historical replay backtest service 单元测试。"""
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 import unittest
+import warnings
 
 import pandas as pd
 
 from agent_stock.services.agent_historical_backtest_service import AgentHistoricalBacktestService
-from src.stock_analyzer import BuySignal, TrendAnalysisResult
+from agent_stock.stock_analyzer import BuySignal, TrendAnalysisResult
 
 
 def _build_days(count: int) -> list[date]:
@@ -61,6 +62,45 @@ class _FakeAiAnalyzer:
 
 
 class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
+    def test_run_does_not_emit_pandas_fillna_futurewarning(self):
+        days = _build_days(3)
+        frame = _build_frame(
+            [
+                {
+                    "date": day.isoformat(),
+                    "open": 10 + index,
+                    "high": 11 + index,
+                    "low": 9 + index,
+                    "close": 10.5 + index,
+                    "volume": 1000 if index < 2 else 0,
+                    "amount": 10000 + index * 100,
+                }
+                for index, day in enumerate(days)
+            ]
+        )
+        service = AgentHistoricalBacktestService(fetcher_manager=_FakeFetcher(frame))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", FutureWarning)
+            result = service.run(
+                {
+                    "code": "600519",
+                    "start_date": days[0].isoformat(),
+                    "end_date": days[-1].isoformat(),
+                    "phase": "fast",
+                }
+            )
+
+        pandas_fillna_warnings = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, FutureWarning)
+            and "Downcasting object dtype arrays on .fillna, .ffill, .bfill is deprecated" in str(warning.message)
+        ]
+
+        self.assertEqual(len(result["daily_steps"]), 3)
+        self.assertEqual(pandas_fillna_warnings, [])
+
     def test_rolling_window_never_uses_future_bars(self):
         days = _build_days(5)
         frame = _build_frame(

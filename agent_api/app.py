@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""FastAPI app factory for Agent microservice."""
+"""FastAPI 应用工厂。
+
+这里统一装配中间件、公开路由和内部路由，并在生命周期钩子中恢复异常中断的
+异步任务。阅读 API 链路时，一般从本文件进入，再看 `agent_api/v1/router.py`
+和各个 endpoint 模块。
+"""
 
 from __future__ import annotations
 
@@ -23,8 +28,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
-    """Initialize shared state on startup."""
+    """在应用启动时恢复任务状态并初始化共享资源。"""
     service = get_agent_task_service()
+    # 如果上次进程异常退出，任务表里可能残留 processing 状态，这里统一补偿。
     recovered = service.recover_inflight_tasks()
     if recovered > 0:
         logger.warning("Recovered %s stale task(s) on startup", recovered)
@@ -32,7 +38,7 @@ async def app_lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """Create configured FastAPI app."""
+    """创建并返回配置完成的 FastAPI 应用。"""
     app = FastAPI(
         title="Agent_stock Service API",
         description="Microservice API for multi-agent paper trading execution",

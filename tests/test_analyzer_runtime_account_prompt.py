@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Prompt assembly tests for runtime account constraints."""
+"""运行时账户约束的提示词组装测试。"""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import os
 import tempfile
 import unittest
 
-from src.analyzer import GeminiAnalyzer
-from src.config import Config
-from src.storage import DatabaseManager
+from agent_stock.analyzer import GeminiAnalyzer
+from agent_stock.config import Config
+from agent_stock.storage import DatabaseManager
 
 
 class AnalyzerRuntimeAccountPromptTestCase(unittest.TestCase):

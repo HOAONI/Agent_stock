@@ -1,3 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Standalone Agent module package."""
-
+"""独立智能体模块包。"""

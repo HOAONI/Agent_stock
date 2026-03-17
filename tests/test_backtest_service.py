@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Backtest service computation tests."""
+"""内部回测服务计算测试。
+
+这里主要覆盖确定性回测的统计输出、窗口推断和策略对比逻辑。相比策略模板回测，
+这些测试更强调“输入一组候选记录后，服务层如何稳定汇总指标”。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ from agent_stock.services.backtest_service import BACKTEST_COMPARE_STRATEGY_CODE
 
 
 class _StubFetcherManager:
+    """最小化行情抓取桩，用于给 BacktestService 提供确定性行情。"""
+
     def __init__(self, frame: pd.DataFrame):
         self.frame = frame
 
@@ -22,6 +28,7 @@ class _StubFetcherManager:
 
 class BacktestServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
+        # 这组样本既能覆盖止盈/止损评估，也足以构造数据不足场景。
         frame = pd.DataFrame(
             [
                 {"date": "2026-01-02", "high": 10.2, "low": 9.8, "close": 10.0},
@@ -244,8 +251,8 @@ class BacktestServiceTestCase(unittest.TestCase):
         }
         result = service.compare(payload)
         self.assertEqual(len(result["items"]), 1)
-        # In a persistent up-trend with no fresh cross_up on analysis day,
-        # canonical MA20 strategy should stay cash.
+        # 在持续上升趋势中，如果分析日没有新的 `cross_up`，
+        # 标准 MA20 策略应保持空仓。
         self.assertEqual(result["items"][0]["prediction_win_rate_pct"], 0.0)
 
     def test_compare_rsi14_uses_lt30_entry_rule(self):
@@ -318,7 +325,7 @@ class BacktestServiceTestCase(unittest.TestCase):
         }
         result = service.compare(payload)
         self.assertEqual(len(result["items"]), 1)
-        # Analysis-day RSI is between 30 and 40, so canonical <30 rule stays cash.
+        # 分析日 RSI 介于 30 到 40 之间，因此标准 `<30` 规则应保持空仓。
         self.assertEqual(result["items"][0]["prediction_win_rate_pct"], 0.0)
 
 

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Signal Agent: computes trend signal and refreshes AI signal snapshot."""
+"""信号智能体。
+
+它站在“规则分析”和“AI 分析”之间做汇总：先从历史上下文构建趋势信号，再决定
+是否刷新 AI 结果，最后把两者压平成统一的 `SignalAgentOutput`。
+"""
 
 from __future__ import annotations
 
@@ -11,19 +15,19 @@ from typing import Any, Callable, Dict, Optional
 import pandas as pd
 
 from agent_stock.agents.contracts import AgentState, DataAgentOutput, SignalAgentOutput
-from src.analyzer import LlmRequestTimeoutError
-from src.config import AgentRuntimeConfig, Config, get_config, redact_sensitive_text
-from src.core.pipeline import StockAnalysisPipeline
-from src.enums import ReportType
+from agent_stock.analyzer import LlmRequestTimeoutError
+from agent_stock.config import AgentRuntimeConfig, Config, get_config, redact_sensitive_text
+from agent_stock.core.pipeline import StockAnalysisPipeline
+from agent_stock.enums import ReportType
 from agent_stock.repositories.execution_repo import ExecutionRepository
-from src.stock_analyzer import BuySignal, StockTrendAnalyzer, TrendAnalysisResult
+from agent_stock.stock_analyzer import BuySignal, StockTrendAnalyzer, TrendAnalysisResult
 from agent_stock.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
 
 class SignalAgent:
-    """Generate operation advice and risk price levels for one stock."""
+    """为单只股票生成操作建议与风险价格位。"""
 
     def __init__(
         self,
@@ -33,6 +37,7 @@ class SignalAgent:
         execution_repo: Optional[ExecutionRepository] = None,
         ai_resolver: Optional[Callable[[str], Any]] = None,
     ) -> None:
+        """初始化信号生成所需的趋势分析、缓存和 AI 依赖。"""
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.trend_analyzer = trend_analyzer or StockTrendAnalyzer()
@@ -46,7 +51,7 @@ class SignalAgent:
         *,
         runtime_config: Optional[AgentRuntimeConfig] = None,
     ) -> SignalAgentOutput:
-        """Run trend + AI policy with daily cache."""
+        """结合趋势分析与 AI 结果生成每日信号。"""
         code = data_output.code
         trade_date = data_output.trade_date
         has_runtime_llm = bool(runtime_config and runtime_config.llm is not None)
@@ -54,6 +59,7 @@ class SignalAgent:
         trend_result = self._build_trend_result(data_output)
         trend_payload = self._trend_to_payload(trend_result)
 
+        # 请求级 LLM 覆盖会绕过日级缓存，确保本次运行真正使用调用方指定的模型参数。
         cached = None if has_runtime_llm else self.repo.get_signal_snapshot(code=code, trade_date=trade_date)
         ai_refreshed = False
 
@@ -73,6 +79,7 @@ class SignalAgent:
         stop_loss = self._parse_price(ai_payload.get("stop_loss"))
         take_profit = self._parse_price(ai_payload.get("take_profit"))
 
+        # 无论本次是否调用 AI，最终都会把规则结果和 AI 结果按同一结构落入快照表。
         self.repo.upsert_signal_snapshot(
             code=code,
             trade_date=trade_date,
@@ -113,7 +120,7 @@ class SignalAgent:
         )
 
     def _resolve_ai(self, code: str, *, runtime_config: Optional[AgentRuntimeConfig] = None) -> Any:
-        """Resolve AI output via injected resolver or default pipeline."""
+        """通过注入的解析器或默认分析管线获取 AI 结果。"""
         if self._ai_resolver is not None:
             try:
                 return self._ai_resolver(code)
@@ -159,6 +166,7 @@ class SignalAgent:
 
     @staticmethod
     def _build_runtime_account_context(*, runtime_config: Optional[AgentRuntimeConfig]) -> Optional[Dict[str, Any]]:
+        """将运行时账户上下文整理为 AI 分析可消费的载荷。"""
         if not runtime_config or not runtime_config.context:
             return None
 
@@ -177,7 +185,7 @@ class SignalAgent:
         return payload or None
 
     def _build_trend_result(self, data_output: DataAgentOutput) -> Optional[TrendAnalysisResult]:
-        """Compute trend signal for every cycle from context raw data."""
+        """基于上下文原始数据计算趋势分析结果。"""
         context = data_output.analysis_context or {}
         raw_data = context.get("raw_data")
         if not isinstance(raw_data, list) or not raw_data:
@@ -194,6 +202,7 @@ class SignalAgent:
 
     @staticmethod
     def _trend_to_payload(trend_result: Optional[TrendAnalysisResult]) -> Dict[str, Any]:
+        """将趋势分析结果压平成可存储字典。"""
         if trend_result is None:
             return {}
 
@@ -208,7 +217,7 @@ class SignalAgent:
         }
 
     def _extract_ai_payload(self, ai_result: Any) -> Dict[str, Any]:
-        """Extract normalized fields from AnalysisResult-like object."""
+        """从 AI 分析结果中提取标准化字段。"""
         payload: Dict[str, Any] = {
             "operation_advice": getattr(ai_result, "operation_advice", None),
             "sentiment_score": getattr(ai_result, "sentiment_score", None),
@@ -229,7 +238,7 @@ class SignalAgent:
 
     @staticmethod
     def _parse_price(value: Any) -> Optional[float]:
-        """Parse numeric price from numeric/string fields."""
+        """从数字或字符串字段中提取价格。"""
         if value is None:
             return None
         if isinstance(value, (int, float)):
@@ -254,7 +263,7 @@ class SignalAgent:
 
     @staticmethod
     def _fallback_operation_advice(trend_result: Optional[TrendAnalysisResult]) -> str:
-        """Fallback operation advice from trend signal when AI is unavailable."""
+        """在 AI 不可用时，根据趋势信号回退生成操作建议。"""
         if trend_result is None:
             return "观望"
 

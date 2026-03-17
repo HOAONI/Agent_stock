@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Risk Agent: maps signal to target exposure under risk limits."""
+"""风控智能体。
+
+它不负责决定“看多还是看空”，而是把信号阶段的建议映射成可执行的目标仓位，
+并叠加账户级约束、止盈止损和请求级策略覆盖项。
+"""
 
 from __future__ import annotations
 
@@ -7,12 +11,13 @@ from datetime import date
 from typing import Any, Dict, Optional
 
 from agent_stock.agents.contracts import AgentState, RiskAgentOutput, SignalAgentOutput
-from src.config import Config, RuntimeStrategyConfig, get_config
+from agent_stock.config import Config, RuntimeStrategyConfig, get_config
 
 class RiskAgent:
-    """Apply fixed exposure mapping and account-level constraints."""
+    """应用固定仓位映射与账户级限制。"""
 
     def __init__(self, config: Optional[Config] = None) -> None:
+        """初始化风控配置。"""
         self.config = config or get_config()
 
     def run(
@@ -26,7 +31,7 @@ class RiskAgent:
         current_position_value: float,
         runtime_strategy: Optional[RuntimeStrategyConfig] = None,
     ) -> RiskAgentOutput:
-        """Compute target notional and enforce account-level limits."""
+        """计算目标持仓金额，并应用账户级风险限制。"""
         if current_price <= 0:
             return RiskAgentOutput(
                 code=code,
@@ -73,6 +78,7 @@ class RiskAgent:
         effective_stop_loss = signal_stop_loss if signal_stop_loss_enabled else None
         effective_take_profit = signal_take_profit if signal_take_profit_enabled else None
 
+        # 显式卖出建议拥有最高优先级，直接把目标仓位压到 0。
         if self._is_sell_advice(signal_output.operation_advice):
             target_weight = 0.0
             flags.append("sell_signal")
@@ -87,6 +93,7 @@ class RiskAgent:
         position = self._find_position(account_snapshot, code)
         position_qty = int(position.get("quantity") or 0)
         avg_cost = float(position.get("avg_cost") or 0.0)
+        # 运行时策略覆盖项只对“已有持仓”的止盈止损生效，因为需要依赖持仓成本价。
         if runtime_strategy and position_qty > 0 and avg_cost > 0:
             if runtime_stop_loss_pct is not None and runtime_stop_loss_pct > 0:
                 stop_loss_price = avg_cost * (1.0 - runtime_stop_loss_pct / 100.0)
@@ -149,6 +156,7 @@ class RiskAgent:
         )
 
     def _weight_from_advice(self, advice: str) -> float:
+        """根据操作建议映射基础目标仓位。"""
         text = (advice or "").strip().lower()
 
         strong_buy_tokens = ("强烈买入", "strong buy")
@@ -171,11 +179,13 @@ class RiskAgent:
 
     @staticmethod
     def _is_sell_advice(advice: str) -> bool:
+        """判断建议是否明确指向卖出/减仓。"""
         text = (advice or "").strip().lower()
         return any(token in text for token in ("卖出", "减仓", "清仓", "sell", "reduce", "strong sell", "强烈卖出"))
 
     @staticmethod
     def _find_position(account_snapshot: Dict[str, Any], code: str) -> Dict[str, Any]:
+        """从账户快照中提取指定股票的持仓。"""
         for item in account_snapshot.get("positions", []):
             if str(item.get("code")) == str(code):
                 return item

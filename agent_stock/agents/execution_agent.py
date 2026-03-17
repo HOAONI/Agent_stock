@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Execution Agent: request-scoped simulation executor."""
+"""执行智能体。
+
+它接收风控阶段给出的目标金额，决定本次应当生成纸面执行意图，还是调用本地
+broker 运行时做一次立即成交的模拟下单。
+"""
 
 from __future__ import annotations
 
@@ -13,11 +17,11 @@ from agent_stock.agents.contracts import AgentState, ExecutionAgentOutput, RiskA
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config, RuntimeExecutionConfig, get_config
+from agent_stock.config import Config, RuntimeExecutionConfig, get_config
 
 
 class ExecutionAgent:
-    """Generate execution intent or submit one simulated order to local runtime."""
+    """生成执行意图，或向本地模拟运行时提交订单。"""
 
     def __init__(
         self,
@@ -26,6 +30,7 @@ class ExecutionAgent:
         execution_repo: Optional[ExecutionRepository] = None,
         runtime_service: Optional[BacktraderRuntimeService] = None,
     ) -> None:
+        """初始化执行代理及其运行时依赖。"""
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = execution_repo or ExecutionRepository(self.db)
@@ -45,7 +50,7 @@ class ExecutionAgent:
         runtime_execution: Optional[RuntimeExecutionConfig] = None,
         backend_task_id: Optional[str] = None,
     ) -> ExecutionAgentOutput:
-        """Execute one stock decision under paper or broker-backed simulation semantics."""
+        """按纸面模式或 broker 模拟模式执行单只股票决策。"""
         normalized_code = canonical_stock_code(code)
         resolved_account_name = account_name or str(getattr(self.config, "agent_account_name", "paper-default") or "paper-default")
         initial_cash = (
@@ -56,6 +61,7 @@ class ExecutionAgent:
         runtime_mode = str(getattr(runtime_execution, "mode", "paper") or "paper").strip().lower()
         broker_account_id = self._as_int(getattr(runtime_execution, "broker_account_id", None), 0) if runtime_execution else 0
 
+        # broker 模式会真实调用本地运行时服务；paper 模式只做意图推演，不落订单。
         if runtime_mode == "broker":
             if broker_account_id <= 0:
                 return ExecutionAgentOutput(
@@ -116,6 +122,8 @@ class ExecutionAgent:
         broker_account_id: int,
         backend_task_id: Optional[str],
     ) -> ExecutionAgentOutput:
+        """调用本地 broker 运行时执行一笔模拟下单。"""
+        # 先用 paper 口径推导出“理论上应该下什么单”，再决定是否真正调用 broker。
         candidate = self._run_paper_intent(
             code=code,
             trade_date=trade_date,
@@ -257,6 +265,7 @@ class ExecutionAgent:
         error_message: str,
         response: Optional[Dict[str, Any]] = None,
     ) -> ExecutionAgentOutput:
+        """构造 broker 路径失败时的统一执行结果。"""
         snapshot_after = self._fetch_broker_snapshot(
             broker_account_id=broker_account_id,
             account_name=account_name,
@@ -310,6 +319,7 @@ class ExecutionAgent:
         initial_cash: float,
         fallback_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
+        """从本地 broker 运行时读取账户快照。"""
         try:
             summary = self.runtime_service.get_account_summary({"broker_account_id": broker_account_id})
             positions_raw = self.runtime_service.get_positions({"broker_account_id": broker_account_id})
@@ -368,6 +378,7 @@ class ExecutionAgent:
         initial_cash: float,
         account_snapshot: Optional[Dict[str, Any]],
     ) -> ExecutionAgentOutput:
+        """在不真正下单的情况下推导纸面交易意图。"""
         if current_price <= 0:
             return ExecutionAgentOutput(
                 code=code,
@@ -507,6 +518,7 @@ class ExecutionAgent:
 
     @staticmethod
     def _as_number(value: Any, default: float = 0.0) -> float:
+        """将输入安全解析为浮点数。"""
         try:
             num = float(value)
             if num != num:
@@ -517,6 +529,7 @@ class ExecutionAgent:
 
     @staticmethod
     def _as_int(value: Any, default: int = 0) -> int:
+        """将输入安全解析为整数。"""
         try:
             return int(float(value))
         except Exception:
@@ -524,11 +537,13 @@ class ExecutionAgent:
 
     @staticmethod
     def _as_text(value: Any) -> Optional[str]:
+        """将输入清洗为非空字符串。"""
         text = str(value or "").strip()
         return text or None
 
     @classmethod
     def _parse_optional_int(cls, value: Any) -> Optional[int]:
+        """解析可选整数字段，兼容 `bt-order-*` 格式。"""
         if value is None:
             return None
         if isinstance(value, str) and value.startswith("bt-order-"):
@@ -538,6 +553,7 @@ class ExecutionAgent:
 
     @classmethod
     def _normalize_positions(cls, value: Any) -> list[Dict[str, Any]]:
+        """将不同来源的持仓结构规整为统一格式。"""
         if not isinstance(value, list):
             return []
         items: list[Dict[str, Any]] = []
@@ -573,6 +589,7 @@ class ExecutionAgent:
         account_name: str,
         initial_cash: float,
     ) -> Dict[str, Any]:
+        """归一化账户快照，并补齐缺失的汇总字段。"""
         raw = snapshot if isinstance(snapshot, dict) else {}
         positions = cls._normalize_positions(raw.get("positions"))
         inferred_market_value = sum(float(item.get("market_value") or 0.0) for item in positions)
@@ -606,6 +623,7 @@ class ExecutionAgent:
 
     @staticmethod
     def _find_position(account_snapshot: Dict[str, Any], code: str) -> Dict[str, Any]:
+        """从账户快照中查找指定股票持仓。"""
         for item in account_snapshot.get("positions", []):
             if str(item.get("code")) == str(code):
                 return item
@@ -624,6 +642,7 @@ class ExecutionAgent:
         avg_cost_after: float,
         position_after_qty: int,
     ) -> Dict[str, Any]:
+        """基于当前快照推演成交后的账户状态。"""
         positions = [dict(item) for item in snapshot.get("positions", []) if isinstance(item, dict)]
         updated = False
         for idx, pos in enumerate(positions):
@@ -666,6 +685,7 @@ class ExecutionAgent:
 
     @staticmethod
     def _target_qty(target_notional: float, effective_price: float, lot: int) -> int:
+        """按目标金额、成交价和整手约束计算目标股数。"""
         if target_notional <= 0 or effective_price <= 0 or lot <= 0:
             return 0
         raw_qty = math.floor(target_notional / effective_price)

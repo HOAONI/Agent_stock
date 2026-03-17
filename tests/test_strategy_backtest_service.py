@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Strategy date-range backtest service tests."""
+"""区间策略回测服务测试。
+
+这些测试主要验证三类事情：
+1. 参数和结果结构是否稳定
+2. 短区间、跳空、资金不足等边界场景是否会回归
+3. 旧策略编码映射到新模板编码后，是否仍保持可用
+"""
 
 from __future__ import annotations
 
@@ -14,6 +20,8 @@ from agent_stock.services.strategy_backtest_service import StrategyBacktestServi
 
 
 class _StubFetcher:
+    """最小化行情抓取桩，只返回预构造的 DataFrame。"""
+
     def __init__(self, frame: pd.DataFrame):
         self._frame = frame
 
@@ -22,6 +30,8 @@ class _StubFetcher:
 
 
 class _RecordingFetcher(_StubFetcher):
+    """在桩对象基础上记录调用参数，方便断言取数窗口。"""
+
     def __init__(self, frame: pd.DataFrame):
         super().__init__(frame)
         self.calls = []
@@ -39,6 +49,7 @@ class _RecordingFetcher(_StubFetcher):
 
 
 def _sample_frame() -> pd.DataFrame:
+    """构造先涨后跌的平滑样本，适合验证基础区间回测流程。"""
     rows = []
     start = pd.Timestamp("2024-01-01")
     price = 10.0
@@ -62,6 +73,7 @@ def _sample_frame() -> pd.DataFrame:
 
 
 def _volatile_gap_frame() -> pd.DataFrame:
+    """构造含跳空的波动样本，用于测试保证金拒单与策略差异。"""
     rows = []
     start = pd.Timestamp("2024-01-01")
     for i in range(320):
@@ -86,6 +98,7 @@ def _volatile_gap_frame() -> pd.DataFrame:
 
 
 def _flat_frame() -> pd.DataFrame:
+    """构造横盘样本，用于验证“无信号/无收益”场景。"""
     rows = []
     start = pd.Timestamp("2024-01-01")
     for i in range(220):
@@ -106,6 +119,7 @@ def _flat_frame() -> pd.DataFrame:
 
 
 def _state_entry_frame() -> pd.DataFrame:
+    """构造单边上涨样本，用于验证窗口起点建仓逻辑。"""
     rows = []
     start = pd.Timestamp("2024-01-01")
     for i in range(180):
@@ -127,6 +141,7 @@ def _state_entry_frame() -> pd.DataFrame:
 
 
 def test_strategy_backtest_requires_backtrader(monkeypatch):
+    """未安装 Backtrader 时应明确报错，而不是默默返回空结果。"""
     service = StrategyBacktestService(fetcher_manager=_StubFetcher(_sample_frame()))
     monkeypatch.setattr(strategy_module, "bt", None)
 
@@ -142,6 +157,7 @@ def test_strategy_backtest_requires_backtrader(monkeypatch):
 
 @pytest.mark.skipif(strategy_module.bt is None, reason="backtrader not installed")
 def test_strategy_backtest_returns_range_and_items():
+    """标准路径下要返回请求区间、有效区间和逐策略结果列表。"""
     service = StrategyBacktestService(fetcher_manager=_StubFetcher(_sample_frame()))
     result = service.run(
         {
@@ -190,6 +206,7 @@ def test_strategy_backtest_short_range_does_not_crash():
 
 @pytest.mark.skipif(strategy_module.bt is None, reason="backtrader not installed")
 def test_strategy_backtest_handles_margin_without_homogenizing_results():
+    """不同策略遇到资金约束后，不应被错误地“抹平”为同一份结果。"""
     service = StrategyBacktestService(fetcher_manager=_StubFetcher(_volatile_gap_frame()))
     result = service.run(
         {

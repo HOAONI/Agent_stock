@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-YfinanceFetcher - 兜底数据源 (Priority 4)
+YfinanceFetcher - 兜底数据源（优先级 4）
 ===================================
 
 数据来源：Yahoo Finance（通过 yfinance 库）
@@ -9,7 +9,7 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 定位：当所有国内数据源都失败时的最后保障
 
 关键策略：
-1. 自动将 A 股代码转换为 yfinance 格式（.SS / .SZ）
+1. 自动将 A 股代码转换为 yfinance 格式（.SS /。SZ）
 2. 处理 Yahoo Finance 的数据格式差异
 3. 失败后指数退避重试
 """
@@ -71,13 +71,13 @@ class YfinanceFetcher(BaseFetcher):
         - 港股：0700.HK (Hong Kong Stock Exchange)
         - 美股：AAPL, TSLA, GOOGL (无需后缀)
 
-        Args:
+        参数：
             stock_code: 原始代码，如 '600519', 'hk00700', 'AAPL'
 
-        Returns:
+        返回：
             Yahoo Finance 格式代码
 
-        Examples:
+        示例：
             >>> fetcher._convert_stock_code('600519')
             '600519.SS'
             >>> fetcher._convert_stock_code('hk00700')
@@ -98,7 +98,7 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"识别为美股代码: {code}")
             return code
 
-        # 港股：hk前缀 -> .HK后缀
+        # 港股：hk前缀 ->。HK后缀
         if code.startswith('HK'):
             hk_code = code[2:].lstrip('0') or '0'  # 去除前导0，但保留至少一个0
             hk_code = hk_code.zfill(4)  # 补齐到4位
@@ -109,10 +109,10 @@ class YfinanceFetcher(BaseFetcher):
         if '.SS' in code or '.SZ' in code or '.HK' in code:
             return code
 
-        # 去除可能的 .SH 后缀
+        # 去除可能的。SH 后缀
         code = code.replace('.SH', '')
 
-        # ETF: Shanghai ETF (51xx, 52xx, 56xx, 58xx) -> .SS; Shenzhen ETF (15xx, 16xx, 18xx) -> .SZ
+        # ETF 根据代码前缀映射市场后缀：上交所走 `.SS`，深交所走 `.SZ`。
         if len(code) == 6:
             if code.startswith(('51', '52', '56', '58')):
                 return f"{code}.SS"
@@ -235,13 +235,13 @@ class YfinanceFetcher(BaseFetcher):
         """
         通过 yfinance 拉取单个指数/股票的行情数据。
 
-        Args:
+        参数：
             yf: yfinance 模块引用
             yf_code: yfinance 使用的代码（如 '000001.SS'、'^GSPC'）
             name: 指数显示名称
             return_code: 写入结果 dict 的 code 字段（如 'sh000001'、'SPX'）
 
-        Returns:
+        返回：
             行情字典，失败时返回 None
         """
         ticker = yf.Ticker(yf_code)
@@ -356,15 +356,15 @@ class YfinanceFetcher(BaseFetcher):
         index_name: str,
     ) -> Optional[UnifiedRealtimeQuote]:
         """
-        Get realtime quote for US index (e.g. SPX -> ^GSPC).
+        获取美股指数的实时行情（例如 `SPX -> ^GSPC`）。
 
-        Args:
-            user_code: User input code (e.g. SPX)
-            yf_symbol: Yahoo Finance symbol (e.g. ^GSPC)
-            index_name: Chinese name for the index
+        参数：
+            user_code: 用户输入的代码，例如 `SPX`
+            yf_symbol: Yahoo Finance 符号，例如 `^GSPC`
+            index_name: 指数的中文名称
 
-        Returns:
-            UnifiedRealtimeQuote or None
+        返回：
+            `UnifiedRealtimeQuote`，失败时返回 `None`
         """
         import yfinance as yf
 
@@ -441,10 +441,10 @@ class YfinanceFetcher(BaseFetcher):
         支持美股股票（AAPL、TSLA）和美股指数（SPX、DJI 等）。
         数据来源：yfinance Ticker.info
 
-        Args:
+        参数：
             stock_code: 美股代码或指数代码，如 'AMD', 'AAPL', 'SPX', 'DJI'
 
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
         import yfinance as yf

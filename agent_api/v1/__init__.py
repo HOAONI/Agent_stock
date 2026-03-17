@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Versioned API package."""
+"""按版本组织的 API 包。"""

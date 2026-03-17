@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Task recovery test for service restart behavior."""
+"""服务重启场景下的任务恢复测试。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import unittest
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.services.agent_task_service import get_agent_task_service, reset_agent_task_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class AgentTaskRecoveryTestCase(unittest.TestCase):
@@ -41,7 +41,7 @@ class AgentTaskRecoveryTestCase(unittest.TestCase):
             status="pending",
         )
 
-        # Simulate process restart by resetting singletons and reinitializing.
+        # 通过重置单例并重新初始化来模拟进程重启。
         reset_agent_task_service()
         DatabaseManager.reset_instance()
 

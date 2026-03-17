@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run endpoints for Agent API."""
+"""Agent API 的运行任务接口。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from agent_api.v1.schemas.common import ErrorResponse
 from agent_api.v1.schemas.runs import RunCreateRequest, RunListResponse, RunPayload
 from agent_api.v1.schemas.tasks import TaskStatusResponse
 from agent_stock.services.agent_task_service import AgentTaskService
-from src.config import redact_sensitive_text
+from agent_stock.config import redact_sensitive_text
 
 router = APIRouter()
 
@@ -31,7 +31,7 @@ def create_run(
     request: RunCreateRequest,
     task_service: AgentTaskService = Depends(get_task_service_dep),
 ):
-    """Create one run in sync or async mode."""
+    """按同步或异步模式创建一次 Agent 运行。"""
     if not request.stock_codes:
         raise HTTPException(
             status_code=400,
@@ -104,7 +104,7 @@ def create_run(
 
 @router.get("/{run_id}", response_model=RunPayload, responses={404: {"model": ErrorResponse}}, summary="Get one run")
 def get_run(run_id: str, task_service: AgentTaskService = Depends(get_task_service_dep)) -> RunPayload:
-    """Get one run payload."""
+    """按 `run_id` 查询一次运行结果。"""
     payload = task_service.get_run(run_id)
     if not payload:
         raise HTTPException(
@@ -121,7 +121,7 @@ def list_runs(
     trade_date: str | None = Query(default=None),
     task_service: AgentTaskService = Depends(get_task_service_dep),
 ) -> RunListResponse:
-    """List recent run payloads."""
+    """按条件列出最近的运行记录。"""
     try:
         rows = task_service.list_runs(limit=limit, status=status, trade_date_value=trade_date)
     except ValueError as exc:

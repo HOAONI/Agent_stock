@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Common schemas for Agent API."""
+"""Agent API 的通用数据模型。"""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from pydantic import BaseModel
 
 
 class ErrorResponse(BaseModel):
-    """Error response payload."""
+    """错误响应载荷。"""
 
     error: str
     message: str
 
 
 class HealthResponse(BaseModel):
-    """Health response payload."""
+    """健康检查响应载荷。"""
 
     status: str
     timestamp: str
@@ -22,7 +22,7 @@ class HealthResponse(BaseModel):
 
 
 class RuntimeLlmDefaultResponse(BaseModel):
-    """Internal response exposing the current built-in default LLM metadata."""
+    """暴露当前内置默认 LLM 元数据的内部响应。"""
 
     available: bool
     source: str = "agent_env"

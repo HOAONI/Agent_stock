@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Bearer auth middleware for Agent API."""
+"""Agent API 的 Bearer 鉴权中间件。"""
 
 from __future__ import annotations
 
@@ -7,17 +7,19 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.config import get_config
+from agent_stock.config import get_config
 
 
 class AgentAuthMiddleware(BaseHTTPMiddleware):
-    """Validate static bearer token for API calls."""
+    """为受保护接口校验静态 Bearer Token。"""
 
     def __init__(self, app):
+        """初始化鉴权中间件并缓存当前配置。"""
         super().__init__(app)
         self._config = get_config()
 
     async def dispatch(self, request: Request, call_next):
+        """放行健康检查，并拦截未携带正确令牌的请求。"""
         path = request.url.path
         if path in {"/api/health/live", "/api/health/ready"}:
             return await call_next(request)

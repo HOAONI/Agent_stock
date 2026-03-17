@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Backtrader replay engine tests."""
+"""Backtrader 回放引擎测试。"""
 
 from __future__ import annotations
 

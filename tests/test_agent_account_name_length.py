@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Account name length compatibility tests for run endpoint."""
+"""运行端点的账户名长度兼容性测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from agent_api.app import create_app
 from agent_api.deps import get_task_service_dep
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class _LengthTaskService:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Task schemas for Agent API."""
+"""Agent API 的任务状态数据模型。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class TaskStatusResponse(BaseModel):
-    """Task status response payload."""
+    """任务状态响应载荷。"""
 
     task_id: str
     status: str

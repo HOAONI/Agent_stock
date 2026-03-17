@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for SignalAgent daily AI cache behavior."""
+"""SignalAgent 每日 AI 缓存行为单元测试。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from datetime import date, timedelta
 
-from src.agents.contracts import DataAgentOutput
-from src.agents.signal_agent import SignalAgent
-from src.config import AgentRuntimeConfig, Config, RuntimeLlmConfig
-from src.storage import DatabaseManager
+from agent_stock.agents.contracts import DataAgentOutput
+from agent_stock.agents.signal_agent import SignalAgent
+from agent_stock.config import AgentRuntimeConfig, Config, RuntimeLlmConfig
+from agent_stock.storage import DatabaseManager
 
 
 class _FakeAIResult:

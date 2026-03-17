@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Regression tests for LLM timeout propagation."""
+"""LLM 超时传播回归测试。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from agent_stock.agents.contracts import AgentState, DataAgentOutput
 from agent_stock.agents.signal_agent import SignalAgent
 from agent_stock.services.agent_task_service import AgentTaskService
 from agent_stock.storage import DatabaseManager
-from src.analyzer import GeminiAnalyzer, LlmRequestTimeoutError
-from src.config import Config
+from agent_stock.analyzer import GeminiAnalyzer, LlmRequestTimeoutError
+from agent_stock.config import Config
 
 
 class _TimeoutAgentService:
@@ -24,7 +24,6 @@ class _TimeoutAgentService:
         *,
         account_name=None,
         request_id=None,
-        notify_enabled=None,
         write_reports=None,
         runtime_config=None,
     ):

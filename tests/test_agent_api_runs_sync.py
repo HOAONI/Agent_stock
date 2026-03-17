@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Sync run endpoint tests."""
+"""同步运行端点测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from agent_api.app import create_app
 from agent_api.deps import get_task_service_dep
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class _SyncTaskService:

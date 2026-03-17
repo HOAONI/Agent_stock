@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Orchestrator for Data -> Signal -> Risk -> Execution agents."""
+"""多 Agent 串行编排器。
+
+这是主链路里最值得优先阅读的文件之一。它把一次运行拆成四个阶段：
+`Data -> Signal -> Risk -> Execution`，并负责把阶段输入/输出、耗时和账户
+快照串成一条完整的可观测链路。
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ from agent_stock.agents.data_agent import DataAgent
 from agent_stock.agents.execution_agent import ExecutionAgent
 from agent_stock.agents.risk_agent import RiskAgent
 from agent_stock.agents.signal_agent import SignalAgent
-from src.config import AgentRuntimeConfig, Config, get_config
+from agent_stock.config import AgentRuntimeConfig, Config, get_config
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.storage import DatabaseManager
 
@@ -23,14 +28,16 @@ logger = logging.getLogger(__name__)
 
 
 class MarketSessionGuard:
-    """Market-time guard for A-share realtime loops."""
+    """A 股实时循环使用的交易时段守卫。"""
 
     def __init__(self, timezone_name: str, sessions: str) -> None:
+        """解析时区和交易时段配置。"""
         self.timezone = ZoneInfo(timezone_name)
         self.sessions = self._parse_sessions(sessions)
 
     @staticmethod
     def _parse_sessions(sessions: str) -> List[tuple[int, int]]:
+        """将 `09:30-11:30` 形式的配置解析为分钟区间。"""
         windows: List[tuple[int, int]] = []
         for item in (sessions or "").split(","):
             block = item.strip()
@@ -45,11 +52,12 @@ class MarketSessionGuard:
 
     @staticmethod
     def _to_minutes(hhmm: str) -> int:
+        """将 `HH:MM` 文本转换为分钟数。"""
         hour, minute = hhmm.strip().split(":", 1)
         return int(hour) * 60 + int(minute)
 
     def is_market_open(self, now: Optional[datetime] = None) -> bool:
-        """Return True if now falls in configured weekday sessions."""
+        """判断当前时间是否落在配置的工作日交易时段内。"""
         now = now or datetime.now(self.timezone)
         if now.tzinfo is None:
             now = now.replace(tzinfo=self.timezone)
@@ -64,7 +72,7 @@ class MarketSessionGuard:
 
 
 class AgentOrchestrator:
-    """Serial orchestrator for multi-agent paper trading cycles."""
+    """串行执行多智能体模拟交易周期的编排器。"""
 
     def __init__(
         self,
@@ -79,6 +87,7 @@ class AgentOrchestrator:
         now_provider: Optional[Callable[[], datetime]] = None,
         sleep_func: Optional[Callable[[float], None]] = None,
     ) -> None:
+        """初始化各阶段智能体、仓储和时段控制器。"""
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = execution_repo or ExecutionRepository(self.db)
@@ -106,7 +115,7 @@ class AgentOrchestrator:
         initial_cash_override: Optional[float] = None,
         runtime_config: Optional[AgentRuntimeConfig] = None,
     ) -> AgentRunResult:
-        """Run one serial cycle across all stock codes."""
+        """按顺序执行一次完整的多股票运行周期。"""
         run_id = uuid.uuid4().hex
         started_at = self._now()
         trade_date = started_at.date()
@@ -122,9 +131,11 @@ class AgentOrchestrator:
             initial_cash=initial_cash,
         )
 
+        # 这份账户快照会在同一轮多股票执行过程中不断递推，模拟同一账户连续处理多只股票。
         per_stock: List[StockAgentResult] = []
 
         for raw_code in stock_codes:
+            # 每只股票都走同一条四阶段链路，并把阶段快照写进最终运行结果。
             logger.info("[run:%s][%s] data stage start", run_id, raw_code)
             data_started = time.perf_counter()
             data_out = self.data_agent.run(raw_code)
@@ -169,6 +180,7 @@ class AgentOrchestrator:
                 signal_out.operation_advice,
             )
 
+            # 风控与执行都依赖统一价格口径，优先实时价，再退回收盘价/昨收价。
             current_price = self._resolve_current_price(data_out)
             account_snapshot = self._normalize_account_snapshot(
                 working_account_snapshot,
@@ -257,6 +269,7 @@ class AgentOrchestrator:
                 execution_out.executed_via,
             )
             if execution_out.account_snapshot:
+                # 执行阶段可能改变现金和持仓，后续股票要基于最新账户状态继续决策。
                 working_account_snapshot = self._normalize_account_snapshot(
                     execution_out.account_snapshot,
                     account_name=account_name,
@@ -293,7 +306,7 @@ class AgentOrchestrator:
         initial_cash_override: Optional[float] = None,
         runtime_config: Optional[AgentRuntimeConfig] = None,
     ) -> AgentRunResult:
-        """Run one cycle without market-time constraints."""
+        """执行一次不受交易时段约束的单轮运行。"""
         if account_name is None:
             return self.run_cycle(
                 stock_codes,
@@ -323,7 +336,7 @@ class AgentOrchestrator:
         initial_cash_override: Optional[float] = None,
         runtime_config: Optional[AgentRuntimeConfig] = None,
     ) -> List[AgentRunResult]:
-        """Run loop that executes cycles only during configured market sessions."""
+        """按配置交易时段执行循环运行。"""
         if interval_minutes <= 0:
             raise ValueError("interval_minutes must be positive")
 
@@ -367,7 +380,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _next_aligned_time(now: datetime, interval_minutes: int) -> datetime:
-        """Round up to next interval boundary in local timezone."""
+        """向上取整到下一个固定间隔边界。"""
         interval_seconds = interval_minutes * 60
         epoch = int(now.timestamp())
         next_epoch = ((epoch // interval_seconds) + 1) * interval_seconds
@@ -375,6 +388,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _resolve_current_price(data_out) -> float:
+        """优先实时价，其次今日收盘价，再退回昨收价。"""
         realtime_price = float(data_out.realtime_quote.get("price") or 0.0)
         if realtime_price > 0:
             return realtime_price
@@ -389,6 +403,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _current_position_value(account_snapshot, code: str) -> float:
+        """读取某只股票当前持仓市值。"""
         for pos in account_snapshot.get("positions", []):
             if pos.get("code") == code:
                 return float(pos.get("market_value") or 0.0)
@@ -396,6 +411,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _as_number(value: Any, default: float = 0.0) -> float:
+        """将输入安全解析为浮点数。"""
         try:
             num = float(value)
             if num != num:
@@ -406,6 +422,7 @@ class AgentOrchestrator:
 
     @staticmethod
     def _as_int(value: Any, default: int = 0) -> int:
+        """将输入安全解析为整数。"""
         try:
             return int(float(value))
         except Exception:
@@ -413,6 +430,7 @@ class AgentOrchestrator:
 
     @classmethod
     def _normalize_positions(cls, value: Any) -> List[Dict[str, Any]]:
+        """统一不同来源的持仓结构。"""
         if not isinstance(value, list):
             return []
         normalized: List[Dict[str, Any]] = []
@@ -450,6 +468,7 @@ class AgentOrchestrator:
         account_name: str,
         initial_cash: float,
     ) -> Dict[str, Any]:
+        """将账户快照归一化为执行链路使用的标准结构。"""
         raw = snapshot if isinstance(snapshot, dict) else {}
         positions = cls._normalize_positions(raw.get("positions"))
         inferred_market_value = sum(float(item.get("market_value") or 0.0) for item in positions)
@@ -489,6 +508,7 @@ class AgentOrchestrator:
         account_name: str,
         initial_cash: float,
     ) -> Dict[str, Any]:
+        """从运行时上下文中拼出初始账户快照。"""
         seed: Dict[str, Any] = {}
         context = runtime_config.context if runtime_config else None
         if context:

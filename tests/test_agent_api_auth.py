@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""API auth and health endpoint tests."""
+"""API 鉴权与健康检查端点测试。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from agent_api.app import create_app
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class AgentApiAuthTestCase(unittest.TestCase):

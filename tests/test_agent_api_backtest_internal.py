@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Internal backtest API endpoint tests."""
+"""内部回测 API 端点测试。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from agent_api.deps import (
 )
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class _FakeBacktestService:

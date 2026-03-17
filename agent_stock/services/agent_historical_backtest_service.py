@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Historical replay backtest service for Agent pipeline."""
+"""Agent 流水线历史回放服务。
+
+它和模板化区间回测不同：这里复用实时 Agent 的信号/风控口径，在历史日线上逐日
+重放，重点解决“不能偷看未来数据”和“只在部分锚点日调用 LLM 精修”两个问题。
+"""
 
 from __future__ import annotations
 
@@ -8,25 +12,29 @@ from datetime import date, datetime, timedelta
 import math
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from data_provider import DataFetcherManager
 from data_provider.base import canonical_stock_code
 from agent_stock.agents.contracts import AgentState, RiskAgentOutput, SignalAgentOutput
 from agent_stock.agents.risk_agent import RiskAgent
-from src.analyzer import GeminiAnalyzer
-from src.config import Config, RuntimeLlmConfig, RuntimeStrategyConfig, get_config
-from src.stock_analyzer import BuySignal, StockTrendAnalyzer, TrendAnalysisResult
+from agent_stock.analyzer import GeminiAnalyzer
+from agent_stock.config import Config, RuntimeLlmConfig, RuntimeStrategyConfig, get_config
+from agent_stock.stock_analyzer import BuySignal, StockTrendAnalyzer, TrendAnalysisResult
 
 ENGINE_VERSION = "agent_replay_v1"
 SIGNAL_PROFILE_VERSION = "agent_signal_profile_v1"
 WARMUP_CALENDAR_DAYS = 180
 ROLLING_WINDOW_BARS = 60
+# 历史回放允许有限次锚点日调用 LLM，避免长区间回放成本失控。
 MAX_LLM_ANCHOR_CALLS = 20
 
 
 @dataclass(frozen=True)
 class HistoricalRunParams:
+    """一次历史回放回测所需的运行参数。"""
+
     code: str
     start_date: date
     end_date: date
@@ -42,6 +50,8 @@ class HistoricalRunParams:
 
 @dataclass(frozen=True)
 class ReplayBar:
+    """回放过程中使用的增强版日线 bar。"""
+
     day: date
     open: float
     high: float
@@ -60,18 +70,21 @@ class ReplayBar:
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
+    """将任意值安全转换为字典。"""
     if isinstance(value, dict):
         return value
     return {}
 
 
 def _as_list_of_dicts(value: Any) -> List[Dict[str, Any]]:
+    """将输入转换为字典列表。"""
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
 
 
 def _to_float(value: Any, default: float | None = None) -> float | None:
+    """将输入解析为有限浮点数，失败时回退到默认值。"""
     if value is None:
         return default
     if isinstance(value, str) and not value.strip():
@@ -86,6 +99,7 @@ def _to_float(value: Any, default: float | None = None) -> float | None:
 
 
 def _to_int(value: Any, default: int = 0) -> int:
+    """将输入解析为整数。"""
     number = _to_float(value, float(default))
     if number is None:
         return default
@@ -93,6 +107,7 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 
 def _to_day(value: Any) -> date | None:
+    """将输入安全解析为日期。"""
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
     if isinstance(value, datetime):
@@ -107,16 +122,20 @@ def _to_day(value: Any) -> date | None:
 
 
 def _iso_day(value: date | None) -> str | None:
+    """将日期转换为 ISO 文本。"""
     return value.isoformat() if isinstance(value, date) else None
 
 
 class HistoricalDataAgent:
-    """Prepare historical rolling data windows without realtime leakage."""
+    """准备不泄露未来信息的历史滚动窗口。"""
 
     def __init__(self, fetcher_manager: Optional[DataFetcherManager] = None) -> None:
+        """初始化历史行情数据获取器。"""
         self.fetcher = fetcher_manager or DataFetcherManager()
 
     def load(self, params: HistoricalRunParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """加载预热区间和交易区间数据。"""
+        # 先多取一段预热区间，用于计算均线和 RSI，避免起始交易日指标失真。
         warmup_start = params.start_date - timedelta(days=WARMUP_CALENDAR_DAYS)
         frame, _ = self.fetcher.get_daily_data(
             params.code,
@@ -136,17 +155,20 @@ class HistoricalDataAgent:
             raise ValueError("insufficient_data: no trading bars inside date range")
 
         trade_end = pd.Timestamp(trade_window["date"].iloc[-1])
+        # prepared 保留“截至最后一个交易日”的完整可见历史，后续每日再切滚动窗口。
         prepared = normalized[normalized["date"] <= trade_end].copy()
         if prepared.empty:
             raise ValueError("insufficient_data: no bars available after warmup preparation")
         return prepared.reset_index(drop=True), trade_window.reset_index(drop=True)
 
     def rolling_window(self, prepared: pd.DataFrame, trade_day: date) -> pd.DataFrame:
+        """截取截至指定交易日的滚动观察窗口。"""
         scoped = prepared[prepared["date"] <= pd.Timestamp(trade_day)].copy()
         return scoped.tail(ROLLING_WINDOW_BARS).reset_index(drop=True)
 
     @staticmethod
     def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        """清洗原始行情，并补齐回放所需技术指标。"""
         rows: List[Dict[str, Any]] = []
         for _, row in frame.iterrows():
             day = _to_day(row.get("date"))
@@ -184,28 +206,31 @@ class HistoricalDataAgent:
         normalized["MA20"] = normalized["close"].rolling(20, min_periods=1).mean()
         normalized["MA60"] = normalized["close"].rolling(60, min_periods=1).mean()
         normalized["momentum20"] = normalized["close"].pct_change(20).fillna(0.0) * 100.0
+        avg_volume5 = normalized["volume"].rolling(5, min_periods=1).mean()
         normalized["vol_ratio5"] = (
-            normalized["volume"] / normalized["volume"].rolling(5, min_periods=1).mean().replace(0, pd.NA)
+            normalized["volume"] / avg_volume5.replace(0.0, np.nan)
         ).fillna(1.0)
         normalized["rsi14"] = HistoricalDataAgent._compute_rsi(normalized["close"], 14)
         return normalized
 
     @staticmethod
     def _compute_rsi(close_series: pd.Series, period: int) -> pd.Series:
+        """按滚动平均法计算 RSI 序列。"""
         delta = close_series.diff().fillna(0.0)
         gains = delta.clip(lower=0)
         losses = (-delta.clip(upper=0))
         avg_gain = gains.rolling(period, min_periods=1).mean()
         avg_loss = losses.rolling(period, min_periods=1).mean()
-        rs = avg_gain / avg_loss.replace(0, pd.NA)
+        rs = avg_gain / avg_loss.replace(0.0, np.nan)
         rsi = 100.0 - (100.0 / (1.0 + rs))
         return rsi.fillna(50.0)
 
 
 class HistoricalRiskAdapter:
-    """Adapter around live RiskAgent formulas for replay."""
+    """对实时 RiskAgent 的适配层，使其可用于历史回放。"""
 
     def __init__(self, risk_agent: Optional[RiskAgent] = None) -> None:
+        """初始化底层风险代理。"""
         self.risk_agent = risk_agent or RiskAgent()
 
     def run(
@@ -218,6 +243,7 @@ class HistoricalRiskAdapter:
         simulator: "HistoricalExecutionSimulator",
         runtime_strategy: RuntimeStrategyConfig,
     ) -> RiskAgentOutput:
+        """基于模拟账户快照调用实时风控逻辑。"""
         account_snapshot = simulator.account_snapshot(code, current_price)
         current_position_value = simulator.position_qty * current_price
         return self.risk_agent.run(
@@ -232,9 +258,10 @@ class HistoricalRiskAdapter:
 
 
 class HistoricalExecutionSimulator:
-    """Historical execution simulator with next-open fills and intraday stops."""
+    """支持次日开盘成交与盘中止盈止损的历史执行模拟器。"""
 
     def __init__(self, initial_capital: float, commission_rate: float, slippage_bps: float) -> None:
+        """初始化账户现金、持仓和基准状态。"""
         self.initial_capital = float(initial_capital)
         self.commission_rate = max(0.0, float(commission_rate))
         self.slippage_rate = max(0.0, float(slippage_bps) / 10000.0)
@@ -249,6 +276,7 @@ class HistoricalExecutionSimulator:
         self._benchmark_initialized = False
 
     def start_day(self, bar: ReplayBar) -> Dict[str, Any]:
+        """在新交易日开始时执行上一个交易日计划的动作。"""
         self._ensure_benchmark(bar.close)
         payload = {
             "action": "none",
@@ -306,6 +334,7 @@ class HistoricalExecutionSimulator:
         return payload
 
     def check_intraday_exit(self, bar: ReplayBar, runtime_strategy: RuntimeStrategyConfig) -> Dict[str, Any] | None:
+        """检查盘中是否触发运行时止盈止损。"""
         if self.position_qty <= 0 or self.avg_cost <= 0:
             return None
 
@@ -326,6 +355,7 @@ class HistoricalExecutionSimulator:
         return self._close_position(bar.day, float(take_profit), "take_profit", None)
 
     def plan_next_open(self, risk_output: RiskAgentOutput, current_price: float, is_last_day: bool) -> Dict[str, Any]:
+        """根据风控输出安排下一交易日开盘动作。"""
         if is_last_day:
             self.pending_action = None
             return {
@@ -367,6 +397,7 @@ class HistoricalExecutionSimulator:
         }
 
     def equity_point(self, bar: ReplayBar) -> Dict[str, Any]:
+        """计算当前交易日的权益点。"""
         position_value = self.position_qty * bar.close
         equity = self.cash + position_value
         benchmark_equity = self.benchmark_cash + self.benchmark_shares * bar.close
@@ -380,6 +411,7 @@ class HistoricalExecutionSimulator:
         }
 
     def account_snapshot(self, code: str, current_price: float) -> Dict[str, Any]:
+        """构造当前模拟账户快照。"""
         market_value = self.position_qty * current_price
         total_asset = self.cash + market_value
         positions: List[Dict[str, Any]] = []
@@ -401,6 +433,7 @@ class HistoricalExecutionSimulator:
         }
 
     def _ensure_benchmark(self, first_close: float) -> None:
+        """在第一天初始化买入持有基准。"""
         if self._benchmark_initialized or first_close <= 0:
             return
         self._benchmark_initialized = True
@@ -414,6 +447,7 @@ class HistoricalExecutionSimulator:
         reason: str,
         base_payload: Dict[str, Any] | None,
     ) -> Dict[str, Any]:
+        """按给定价格平仓，并记录收益与费用。"""
         qty = self.position_qty
         if qty <= 0:
             return base_payload or {}
@@ -469,7 +503,7 @@ class HistoricalExecutionSimulator:
 
 
 class HistoricalSignalReplayService:
-    """Build deterministic signals and refine sparse anchor days with AI."""
+    """构建快速规则信号，并用 AI 精修部分锚点日。"""
 
     def __init__(
         self,
@@ -478,12 +512,14 @@ class HistoricalSignalReplayService:
         runtime_llm: Optional[RuntimeLlmConfig] = None,
         config: Optional[Config] = None,
     ) -> None:
+        """初始化趋势分析器与懒加载 AI 分析器工厂。"""
         self.trend_analyzer = trend_analyzer or StockTrendAnalyzer()
         resolved_config = (config or get_config()).clone_for_runtime_llm(runtime_llm)
         self._ai_analyzer_factory = ai_analyzer_factory or (lambda: GeminiAnalyzer(config=resolved_config, runtime_llm=runtime_llm))
         self._ai_analyzer: Any | None = None
 
     def build_anchor_days(self, trade_frame: pd.DataFrame, fast_snapshots: List[Dict[str, Any]]) -> List[str]:
+        """挑选需要调用 LLM 精修的锚点交易日。"""
         anchors: Dict[str, int] = {}
         previous = None
         for index, (_, row) in enumerate(trade_frame.iterrows()):
@@ -518,6 +554,7 @@ class HistoricalSignalReplayService:
         window_frame: pd.DataFrame,
         archived_news_payload: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """仅基于规则信号构建快速快照。"""
         trend_result = None
         if not window_frame.empty:
             trend_result = self.trend_analyzer.analyze(window_frame.copy(), code)
@@ -546,6 +583,7 @@ class HistoricalSignalReplayService:
         }
 
     def load_cached_snapshot(self, cached: Dict[str, Any], fallback_fast: Dict[str, Any]) -> Dict[str, Any]:
+        """将缓存快照规整为统一结构。"""
         factor_payload = _as_dict(cached.get("factor_payload")) or fallback_fast["factor_payload"]
         signal_payload = _as_dict(cached.get("signal_payload")) or fallback_fast["signal_payload"]
         archived_news_payload = _as_list_of_dicts(cached.get("archived_news_payload")) or fallback_fast["archived_news_payload"]
@@ -571,6 +609,7 @@ class HistoricalSignalReplayService:
         fast_snapshot: Dict[str, Any],
         account_snapshot: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """对锚点日运行 AI 精修，并叠加到快速信号上。"""
         analyzer = self._get_ai_analyzer()
         context = self._build_ai_context(
             code=code,
@@ -613,6 +652,7 @@ class HistoricalSignalReplayService:
         }
 
     def apply_overlay(self, fast_snapshot: Dict[str, Any], overlay_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """将最近一次锚点日的 AI 覆盖层应用到普通交易日。"""
         ai_overlay = _as_dict(overlay_snapshot.get("ai_overlay"))
         if not ai_overlay:
             return fast_snapshot
@@ -639,6 +679,7 @@ class HistoricalSignalReplayService:
         }
 
     def to_signal_output(self, code: str, trade_day: date, snapshot: Dict[str, Any]) -> SignalAgentOutput:
+        """将快照字典转换为标准 SignalAgentOutput。"""
         signal_payload = _as_dict(snapshot.get("signal_payload"))
         factor_payload = _as_dict(snapshot.get("factor_payload"))
         ai_overlay = _as_dict(snapshot.get("ai_overlay"))
@@ -661,6 +702,7 @@ class HistoricalSignalReplayService:
 
     @staticmethod
     def _fast_advice_from_trend(trend_result: Optional[TrendAnalysisResult]) -> str:
+        """根据趋势结果快速生成基础操作建议。"""
         if trend_result is None:
             return "观望"
         if trend_result.buy_signal in (BuySignal.STRONG_BUY, BuySignal.BUY):
@@ -672,12 +714,14 @@ class HistoricalSignalReplayService:
         return "观望"
 
     def _get_ai_analyzer(self) -> Any:
+        """懒加载 AI 分析器实例。"""
         if self._ai_analyzer is None:
             self._ai_analyzer = self._ai_analyzer_factory()
         return self._ai_analyzer
 
     @staticmethod
     def _build_factor_payload(window_frame: pd.DataFrame, trend_result: Optional[TrendAnalysisResult]) -> Dict[str, Any]:
+        """从窗口行情中提取规则信号与技术因子。"""
         payload: Dict[str, Any] = {}
         if window_frame.empty:
             return payload
@@ -752,6 +796,7 @@ class HistoricalSignalReplayService:
         fast_snapshot: Dict[str, Any],
         account_snapshot: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """为 AI 分析器构建结构化上下文。"""
         latest = window_frame.iloc[-1]
         previous = window_frame.iloc[-2] if len(window_frame.index) > 1 else latest
         factor_payload = _as_dict(fast_snapshot.get("factor_payload"))
@@ -792,6 +837,7 @@ class HistoricalSignalReplayService:
 
     @staticmethod
     def _build_news_context(archived_news_payload: List[Dict[str, Any]]) -> str | None:
+        """将归档新闻整理为 LLM 可直接消费的文本块。"""
         if not archived_news_payload:
             return None
         parts: List[str] = []
@@ -805,7 +851,7 @@ class HistoricalSignalReplayService:
 
 
 class AgentHistoricalBacktestService:
-    """Stateless historical replay entry point for Backend_stock."""
+    """面向 Backend_stock 的无状态历史回放入口。"""
 
     def __init__(
         self,
@@ -815,6 +861,7 @@ class AgentHistoricalBacktestService:
         ai_analyzer_factory: Optional[Callable[[], Any]] = None,
         config: Optional[Config] = None,
     ) -> None:
+        """初始化历史回放依赖。"""
         self.config = config or get_config()
         self.data_agent = HistoricalDataAgent(fetcher_manager=fetcher_manager)
         self._trend_analyzer = trend_analyzer
@@ -822,6 +869,7 @@ class AgentHistoricalBacktestService:
         self.risk_adapter = HistoricalRiskAdapter(risk_agent=risk_agent)
 
     def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """执行历史回放主流程。"""
         params = self._parse_payload(payload)
         signal_replay = HistoricalSignalReplayService(
             trend_analyzer=self._trend_analyzer,
@@ -887,6 +935,7 @@ class AgentHistoricalBacktestService:
             fast_operation_advice = str(fast_snapshot["signal_payload"].get("operation_advice") or "")
 
             if params.phase == "fast":
+                # fast 模式只读取缓存，缓存缺失时退回规则快照，不调用 LLM。
                 cached = cached_snapshots.get(trade_day.isoformat())
                 if cached:
                     snapshot = signal_replay.load_cached_snapshot(cached, fast_snapshot)
@@ -897,6 +946,7 @@ class AgentHistoricalBacktestService:
             else:
                 cached = cached_snapshots.get(trade_day.isoformat())
                 if trade_day.isoformat() in anchor_days:
+                    # refine 模式只在锚点日调用 LLM，其余日期沿用最近一次覆盖层。
                     if self._is_refined_snapshot(cached):
                         snapshot = signal_replay.load_cached_snapshot(cached or {}, fast_snapshot)
                         snapshot_hit_count += 1
@@ -1002,6 +1052,7 @@ class AgentHistoricalBacktestService:
         }
 
     def _parse_payload(self, payload: Dict[str, Any]) -> HistoricalRunParams:
+        """校验请求并解析历史回放运行参数。"""
         code = canonical_stock_code(str(payload.get("code") or ""))
         if not code:
             raise ValueError("code is required")
@@ -1056,6 +1107,7 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _cached_snapshot_map(cached_rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """按交易日索引缓存快照。"""
         result: Dict[str, Dict[str, Any]] = {}
         for row in cached_rows:
             trade_date = str(row.get("trade_date") or "")
@@ -1065,6 +1117,7 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _is_refined_snapshot(row: Dict[str, Any] | None) -> bool:
+        """判断快照是否已经过 LLM 精修。"""
         if not row:
             return False
         source = str(row.get("decision_source") or "")
@@ -1075,6 +1128,7 @@ class AgentHistoricalBacktestService:
         archived_news_by_date: Dict[str, List[Dict[str, Any]]],
         trade_day: date,
     ) -> List[Dict[str, Any]]:
+        """收集交易日前 4 天内的最近新闻。"""
         payload: List[Dict[str, Any]] = []
         for offset in range(0, 4):
             day = (trade_day - timedelta(days=offset)).isoformat()
@@ -1083,6 +1137,7 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _frame_row_to_bar(row: pd.Series) -> ReplayBar:
+        """将 DataFrame 行转换为回放 bar。"""
         day = row["date"].date()
         return ReplayBar(
             day=day,
@@ -1104,6 +1159,7 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _with_drawdown(simulator: HistoricalExecutionSimulator, daily_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """根据每日步骤补齐权益曲线与回撤信息。"""
         points: List[Dict[str, Any]] = []
         peak = 0.0
         for row in daily_steps:
@@ -1134,6 +1190,7 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _build_summary(initial_capital: float, equity: List[Dict[str, Any]], trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """根据权益曲线和成交记录生成汇总指标。"""
         final_equity = float(equity[-1]["equity"]) if equity else float(initial_capital)
         final_benchmark = float(equity[-1]["benchmark_equity"]) if equity else float(initial_capital)
         total_return_pct = ((final_equity / initial_capital) - 1.0) * 100.0 if initial_capital > 0 else 0.0
@@ -1155,6 +1212,7 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _decision_source_breakdown(daily_steps: List[Dict[str, Any]]) -> Dict[str, int]:
+        """统计每日决策来源分布。"""
         payload: Dict[str, int] = {}
         for row in daily_steps:
             key = str(row.get("decision_source") or "unknown")
@@ -1166,6 +1224,7 @@ _agent_historical_backtest_service: AgentHistoricalBacktestService | None = None
 
 
 def get_agent_historical_backtest_service() -> AgentHistoricalBacktestService:
+    """返回历史回放回测服务单例。"""
     global _agent_historical_backtest_service
     if _agent_historical_backtest_service is None:
         _agent_historical_backtest_service = AgentHistoricalBacktestService()

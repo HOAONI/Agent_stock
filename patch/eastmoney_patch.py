@@ -1,3 +1,5 @@
+"""为东方财富请求补充认证 Cookie 与反封禁请求头。"""
+
 import hashlib
 import random
 import secrets
@@ -17,7 +19,10 @@ ua = UserAgent()
 
 
 class AuthCache:
+    """缓存短时有效的东方财富授权令牌。"""
+
     def __init__(self):
+        """初始化缓存内容、过期时间和并发锁。"""
         self.data = None
         self.expire_at = 0
         self.lock = threading.Lock()
@@ -28,13 +33,18 @@ _cache = AuthCache()
 
 
 class PatchSign:
+    """记录补丁是否已安装，避免重复覆盖请求入口。"""
+
     def __init__(self):
+        """初始化补丁状态。"""
         self.patched = False
 
     def set_patch(self, patched):
+        """写入补丁状态。"""
         self.patched = patched
 
     def is_patched(self):
+        """返回补丁是否已经生效。"""
         return self.patched
 
 
@@ -45,10 +55,10 @@ def _get_nid(user_agent):
     """
     获取东方财富的 NID 授权令牌
 
-    Args:
+    参数：
         user_agent (str): 用户代理字符串，用于模拟不同的浏览器访问
 
-    Returns:
+    返回：
         str: 返回获取到的 NID 授权令牌，如果获取失败则返回 None
 
     功能说明:
@@ -148,10 +158,12 @@ def _get_nid(user_agent):
 
 
 def eastmoney_patch():
+    """全局接管 `requests.Session.request`，仅对目标域名注入补丁。"""
     if _patch_sign.is_patched():
         return
 
     def patched_request(self, method, url, **kwargs):
+        """仅在目标域名上注入 User-Agent、Cookie 和随机延迟。"""
         # 排除非目标域名
         is_target = any(
             d in (url or "")

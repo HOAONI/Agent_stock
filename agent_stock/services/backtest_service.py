@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Internal backtest computation service for Backend_stock."""
+"""为 Backend_stock 提供内部回测计算能力的服务。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ BACKTEST_COMPARE_STRATEGY_NAMES: Dict[str, str] = {
 
 @dataclass(frozen=True)
 class DailyBar:
-    """OHLC snapshot for one trading day."""
+    """单个交易日的 OHLC 快照。"""
 
     day: date
     high: Optional[float]
@@ -34,7 +34,7 @@ class DailyBar:
 
 
 class BacktestService:
-    """Execute deterministic backtest calculations for internal APIs."""
+    """为内部 API 执行确定性的回测计算。"""
 
     bullish_keywords = ["买入", "加仓", "强烈买入", "增持", "建仓", "strong buy", "buy", "add"]
     bearish_keywords = ["卖出", "减仓", "强烈卖出", "清仓", "strong sell", "sell", "reduce"]
@@ -43,6 +43,7 @@ class BacktestService:
     negation_patterns = ["not", "don't", "do not", "no", "never", "avoid", "不要", "不", "别", "勿", "没有"]
 
     def __init__(self, fetcher_manager: Optional[DataFetcherManager] = None):
+        """初始化数据获取器与单笔交易回放引擎。"""
         self.fetcher = fetcher_manager or DataFetcherManager()
         commission_rate = float(os.getenv("BACKTEST_COMMISSION_RATE", os.getenv("BACKTRADER_DEFAULT_COMMISSION", "0.0003")))
         slippage_bps = float(os.getenv("BACKTEST_SLIPPAGE_BPS", os.getenv("BACKTRADER_DEFAULT_SLIPPAGE_BPS", "2")))
@@ -53,11 +54,13 @@ class BacktestService:
 
     @staticmethod
     def _round(value: float, digits: int = 2) -> float:
+        """按传统四舍五入方式保留指定小数位。"""
         factor = 10 ** digits
         return math.floor(value * factor + 0.5) / factor
 
     @staticmethod
     def _to_number(value: Any) -> Optional[float]:
+        """将输入安全转换为有限浮点数。"""
         if value is None:
             return None
         if isinstance(value, str) and not value.strip():
@@ -72,15 +75,18 @@ class BacktestService:
 
     @classmethod
     def _normalize_text(cls, value: Optional[str]) -> str:
+        """将建议文本规整为便于匹配的形式。"""
         return str(value or "").strip().lower()
 
     @classmethod
     def _is_negated(cls, prefix: str) -> bool:
+        """判断关键词前缀是否带有否定语义。"""
         stripped = prefix.rstrip()
         return any(stripped.endswith(token) for token in cls.negation_patterns)
 
     @classmethod
     def _matches_intent(cls, text: str, keywords: Iterable[str]) -> bool:
+        """判断文本是否表达了给定关键词集合对应的意图。"""
         if not text:
             return False
 
@@ -99,6 +105,7 @@ class BacktestService:
 
     @classmethod
     def infer_direction_expected(cls, operation_advice: Optional[str]) -> str:
+        """根据操作建议推断预期方向。"""
         text = cls._normalize_text(operation_advice)
         if cls._matches_intent(text, cls.bearish_keywords):
             return "down"
@@ -112,6 +119,7 @@ class BacktestService:
 
     @classmethod
     def infer_position_recommendation(cls, operation_advice: Optional[str]) -> str:
+        """根据操作建议推断仓位建议是做多还是空仓。"""
         text = cls._normalize_text(operation_advice)
         if cls._matches_intent(text, cls.bearish_keywords) or cls._matches_intent(text, cls.wait_keywords):
             return "cash"
@@ -121,6 +129,7 @@ class BacktestService:
 
     @classmethod
     def classify_outcome(cls, stock_return_pct: Optional[float], direction_expected: str, neutral_band_pct: float) -> tuple[Optional[str], Optional[bool]]:
+        """根据实际涨跌幅与预期方向，判定预测结果。"""
         if stock_return_pct is None:
             return None, None
 
@@ -154,6 +163,7 @@ class BacktestService:
 
     @classmethod
     def classify_trade_outcome(cls, simulated_return_pct: Optional[float], neutral_band_pct: float) -> Optional[str]:
+        """根据模拟收益率判定交易结果。"""
         if simulated_return_pct is None:
             return None
         band = abs(neutral_band_pct)
@@ -173,6 +183,7 @@ class BacktestService:
         window_bars: list[DailyBar],
         end_close: Optional[float],
     ) -> Dict[str, Any]:
+        """评估止盈止损在观察窗口内是否被触发。"""
         if position != "long":
             return {
                 "hit_stop_loss": None,
@@ -219,6 +230,7 @@ class BacktestService:
             first_hit_trading_days = idx + 1
 
             if stop_hit and take_hit:
+                # 单根 K 线同时触发止盈止损时无法还原真实先后顺序，标记为歧义。
                 first_hit = "ambiguous"
                 simulated_exit_price = stop_loss
                 simulated_exit_reason = "ambiguous_stop_loss"
@@ -260,6 +272,7 @@ class BacktestService:
         engine_version: str,
         replay_engine: Optional[BacktraderBacktestEngine] = None,
     ) -> Dict[str, Any]:
+        """对单条分析记录执行一次完整回测评估。"""
         position_recommendation = cls.infer_position_recommendation(operation_advice)
         direction_expected = cls.infer_direction_expected(operation_advice)
 
@@ -321,6 +334,7 @@ class BacktestService:
             ) if replay_engine is not None else None
 
             if replay is not None:
+                # 优先采用交易回放引擎的结果，保证收益率口径与手续费、滑点一致。
                 replay_entry = cls._to_number(replay.get("entry_price"))
                 replay_exit = cls._to_number(replay.get("exit_price"))
                 replay_return = cls._to_number(replay.get("return_pct"))
@@ -377,6 +391,7 @@ class BacktestService:
 
     @staticmethod
     def _average(values: Iterable[Optional[float]]) -> Optional[float]:
+        """计算一组数值的平均值，并忽略空值与非法值。"""
         usable = [item for item in values if item is not None and math.isfinite(item)]
         if not usable:
             return None
@@ -384,6 +399,7 @@ class BacktestService:
 
     @classmethod
     def _compute_advice_breakdown(cls, rows: list[Dict[str, Any]]) -> Dict[str, Any]:
+        """按操作建议汇总胜负分布。"""
         mapping: Dict[str, Dict[str, int]] = {}
         for row in rows:
             advice = str(row.get("operation_advice") or "").strip() or "(unknown)"
@@ -409,6 +425,7 @@ class BacktestService:
 
     @staticmethod
     def _compute_diagnostics(rows: list[Dict[str, Any]]) -> Dict[str, Any]:
+        """汇总评估状态与止盈止损触发诊断信息。"""
         eval_status: Dict[str, int] = {}
         first_hit: Dict[str, int] = {}
 
@@ -431,6 +448,7 @@ class BacktestService:
         engine_version: str,
         neutral_band_pct: float = 2.0,
     ) -> Dict[str, Any]:
+        """基于评估明细计算汇总指标。"""
         completed = [row for row in rows if row.get("eval_status") == "completed"]
 
         total_evaluations = len(rows)
@@ -543,10 +561,12 @@ class BacktestService:
 
     @classmethod
     def build_curves(cls, rows: list[Dict[str, Any]], mode: str = "sequential") -> List[Dict[str, Any]]:
+        """根据回测明细构建顺序曲线或组合曲线。"""
         completed = [row for row in rows if row.get("eval_status") == "completed"]
         completed.sort(key=lambda item: cls._curve_sort_tuple(item))
 
         if mode == "portfolio":
+            # 组合模式会先按日期聚合多只股票，再把当日平均收益滚入权益曲线。
             grouped: Dict[str, Dict[str, Any]] = {}
             for row in completed:
                 label = str(row.get("analysis_date") or row.get("evaluated_at") or "")
@@ -611,6 +631,7 @@ class BacktestService:
 
     @classmethod
     def _curve_sort_key(cls, item: Dict[str, Any]) -> float:
+        """提取曲线排序使用的主时间键。"""
         analysis_date = cls._parse_date(item.get("analysis_date"))
         if analysis_date is not None:
             return datetime.combine(analysis_date, datetime.min.time(), tzinfo=timezone.utc).timestamp()
@@ -621,6 +642,7 @@ class BacktestService:
 
     @classmethod
     def _curve_sort_tuple(cls, item: Dict[str, Any]) -> tuple[float, float, str, int]:
+        """构造稳定排序所需的复合键。"""
         primary = cls._curve_sort_key(item)
         evaluated = cls._parse_datetime(item.get("evaluated_at"))
         secondary = evaluated.timestamp() if evaluated is not None else 0.0
@@ -630,6 +652,7 @@ class BacktestService:
 
     @classmethod
     def _compute_max_drawdown_from_returns(cls, strategy_returns: List[float]) -> Optional[float]:
+        """根据收益率序列估算最大回撤。"""
         if not strategy_returns:
             return None
         equity = 1.0
@@ -646,6 +669,7 @@ class BacktestService:
 
     @classmethod
     def _compute_ma_at(cls, closes: List[Optional[float]], index: int, window: int) -> Optional[float]:
+        """计算指定位置的简单移动平均。"""
         if window <= 0 or index + 1 < window:
             return None
         chunk = closes[index + 1 - window : index + 1]
@@ -656,6 +680,7 @@ class BacktestService:
 
     @classmethod
     def _compute_rsi14_at(cls, closes: List[Optional[float]], index: int) -> Optional[float]:
+        """按经典 14 日口径计算某一位置的 RSI。"""
         if index < 14:
             return None
         if any(item is None for item in closes[: index + 1]):
@@ -689,6 +714,7 @@ class BacktestService:
 
     @classmethod
     def _is_ma20_cross_up(cls, closes: List[Optional[float]], index: int) -> bool:
+        """判断是否在指定位置发生 MA20 上穿。"""
         if index < 20 or index >= len(closes):
             return False
         close_prev = closes[index - 1]
@@ -701,6 +727,7 @@ class BacktestService:
 
     @classmethod
     def _is_ma20_cross_down(cls, closes: List[Optional[float]], index: int) -> bool:
+        """判断是否在指定位置发生 MA20 下穿。"""
         if index < 20 or index >= len(closes):
             return False
         close_prev = closes[index - 1]
@@ -713,6 +740,7 @@ class BacktestService:
 
     @classmethod
     def _is_technical_entry_signal(cls, strategy_code: str, closes: List[Optional[float]], index: int) -> bool:
+        """判断技术策略在指定位置是否产生入场信号。"""
         if strategy_code == "ma20_trend":
             return cls._is_ma20_cross_up(closes, index)
         if strategy_code == "rsi14_mean_reversion":
@@ -722,6 +750,7 @@ class BacktestService:
 
     @classmethod
     def _is_technical_exit_signal(cls, strategy_code: str, closes: List[Optional[float]], index: int) -> bool:
+        """判断技术策略在指定位置是否产生离场信号。"""
         if strategy_code == "ma20_trend":
             return cls._is_ma20_cross_down(closes, index)
         if strategy_code == "rsi14_mean_reversion":
@@ -731,6 +760,7 @@ class BacktestService:
 
     @staticmethod
     def _find_start_index(bars: List[DailyBar], analysis_date: date) -> int:
+        """在行情序列中找到不晚于分析日的最后一根 bar。"""
         found = -1
         for idx, bar in enumerate(bars):
             if bar.day <= analysis_date:
@@ -748,6 +778,7 @@ class BacktestService:
         eval_window_days: int,
         bars_by_code: Dict[str, List[DailyBar]],
     ) -> Dict[str, Any]:
+        """按指定策略口径重算单条记录的策略收益。"""
         operation_advice = str(row.get("operation_advice") or "")
         position_recommendation_raw = str(row.get("position_recommendation") or "").strip().lower()
         if position_recommendation_raw in {"long", "cash"}:
@@ -843,6 +874,7 @@ class BacktestService:
         eval_window_days: int,
         bars_by_code: Dict[str, List[DailyBar]],
     ) -> Dict[str, Any]:
+        """计算某个策略模板在一组记录上的对比指标。"""
         completed_rows = [
             row
             for row in rows
@@ -926,6 +958,7 @@ class BacktestService:
 
     @classmethod
     def _parse_date(cls, raw: Any) -> Optional[date]:
+        """将输入安全解析为日期。"""
         if raw is None:
             return None
         if isinstance(raw, date) and not isinstance(raw, datetime):
@@ -944,6 +977,7 @@ class BacktestService:
 
     @classmethod
     def _parse_datetime(cls, raw: Any) -> Optional[datetime]:
+        """将输入安全解析为 UTC 时间。"""
         if raw is None:
             return None
         if isinstance(raw, datetime):
@@ -960,6 +994,7 @@ class BacktestService:
 
     @classmethod
     def _safe_json_loads(cls, raw: Any) -> Any:
+        """安全解析 JSON 字符串；失败时返回空值。"""
         if raw is None:
             return None
         if isinstance(raw, dict):
@@ -978,12 +1013,14 @@ class BacktestService:
 
     @staticmethod
     def _as_dict(raw: Any) -> Dict[str, Any]:
+        """将任意值安全转换为字典。"""
         if isinstance(raw, dict):
             return raw
         return {}
 
     @classmethod
     def _resolve_analysis_date(cls, context_snapshot: Any, created_at: Any) -> date:
+        """优先从上下文快照中解析分析日，缺失时退回创建时间。"""
         payload = cls._as_dict(cls._safe_json_loads(context_snapshot))
         enhanced_context = payload.get("enhanced_context")
         if isinstance(enhanced_context, dict):
@@ -1000,6 +1037,7 @@ class BacktestService:
 
     @classmethod
     def _normalize_code(cls, raw: Any) -> str:
+        """规范化股票代码格式。"""
         code = canonical_stock_code(str(raw or ""))
         return normalize_stock_code(code)
 
@@ -1010,6 +1048,7 @@ class BacktestService:
         max_analysis_date: date,
         eval_window_days: int,
     ) -> List[DailyBar]:
+        """为给定股票抓取覆盖分析窗口及前瞻区间的行情。"""
         start_date = (min_analysis_date - timedelta(days=40)).isoformat()
         end_date = (max_analysis_date + timedelta(days=max(eval_window_days * 3, 80))).isoformat()
         frame, _ = self.fetcher.get_daily_data(code, start_date=start_date, end_date=end_date, days=800)
@@ -1040,6 +1079,7 @@ class BacktestService:
         analysis_date: date,
         eval_window_days: int,
     ) -> tuple[Optional[date], Optional[float], List[DailyBar]]:
+        """找到分析起点以及后续评估窗口的 bar 序列。"""
         start_candidates = [bar for bar in bars if bar.day <= analysis_date]
         if not start_candidates:
             return None, None, []
@@ -1049,6 +1089,7 @@ class BacktestService:
         return start_bar.day, start_bar.close, forward
 
     def _build_compare_bars_by_code(self, rows: List[Dict[str, Any]], eval_window_days: int) -> Dict[str, List[DailyBar]]:
+        """为策略对比一次性构建各股票的行情缓存。"""
         by_code_dates: Dict[str, List[date]] = {}
         for row in rows:
             code = self._normalize_code(row.get("code"))
@@ -1074,6 +1115,7 @@ class BacktestService:
         return bars_by_code
 
     def _normalize_compare_window(self, raw: Any) -> Optional[int]:
+        """规范化对比窗口天数，并限制在允许范围内。"""
         value = self._to_number(raw)
         if value is None:
             return None
@@ -1085,6 +1127,7 @@ class BacktestService:
         return window
 
     def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """执行批量回测，并返回逐条评估结果。"""
         eval_window_days = max(1, int(payload.get("eval_window_days") or 10))
         engine_version = str(payload.get("engine_version") or "v1")
         neutral_band_pct = float(payload.get("neutral_band_pct") or 2.0)
@@ -1094,6 +1137,7 @@ class BacktestService:
         candidate_rows: List[Dict[str, Any]] = []
         by_code_dates: Dict[str, List[date]] = {}
         for item in candidates:
+            # 先把候选记录规整成统一结构，后面才能按股票批量拉取行情。
             if not isinstance(item, dict):
                 continue
             code = self._normalize_code(item.get("code"))
@@ -1188,6 +1232,7 @@ class BacktestService:
         }
 
     def summary(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """计算回测结果的汇总统计。"""
         rows = payload.get("rows")
         return self.compute_summary(
             rows=rows if isinstance(rows, list) else [],
@@ -1199,6 +1244,7 @@ class BacktestService:
         )
 
     def curves(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """构建顺序曲线与组合曲线。"""
         rows = payload.get("rows")
         scope = str(payload.get("scope") or "overall")
         code = payload.get("code")
@@ -1221,6 +1267,7 @@ class BacktestService:
         }
 
     def distribution(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """构建仓位与结果分布统计。"""
         rows = payload.get("rows")
         scope = str(payload.get("scope") or "overall")
         code = payload.get("code")
@@ -1259,6 +1306,7 @@ class BacktestService:
         }
 
     def compare(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """比较多种策略模板在不同窗口下的表现。"""
         neutral_band_pct = abs(float(payload.get("neutral_band_pct") or 2.0))
 
         rows_by_window_raw = payload.get("rows_by_window")
@@ -1320,6 +1368,7 @@ _backtest_service: Optional[BacktestService] = None
 
 
 def get_backtest_service() -> BacktestService:
+    """返回回测服务单例。"""
     global _backtest_service
     if _backtest_service is None:
         _backtest_service = BacktestService()

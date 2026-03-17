@@ -1,14 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-A股自选股智能分析系统 - 搜索服务模块
-===================================
+"""搜索服务模块。
 
-职责：
-1. 提供统一的新闻搜索接口
-2. 支持 Tavily 和 SerpAPI 两种搜索引擎
-3. 多 Key 负载均衡和故障转移
-4. 搜索结果缓存和格式化
+本模块负责多搜索提供方的统一封装、API Key 轮换、失败降级、正文抓取和缓存。
+Signal/Analyzer 并不关心底层用的是哪家搜索服务，只消费这里产出的标准化结果。
 """
 
 import logging
@@ -17,8 +11,10 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
 from itertools import cycle
+from typing import List, Dict, Any, Optional, Tuple
+from urllib.parse import urlparse
+
 import requests
 from newspaper import Article, Config
 
@@ -27,10 +23,12 @@ logger = logging.getLogger(__name__)
 
 def fetch_url_content(url: str, timeout: int = 5) -> str:
     """
-    获取 URL 网页正文内容 (使用 newspaper3k)
+    获取 URL 网页正文内容。
+
+    这里只做轻量正文抽取，目标是给 AI 提供补充上下文，而不是完整网页镜像。
     """
     try:
-        # 配置 newspaper3k
+        # `newspaper3k` 对新闻正文抽取比较稳，且能跳过大部分导航和广告区域。
         config = Config()
         config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         config.request_timeout = timeout
@@ -41,10 +39,10 @@ def fetch_url_content(url: str, timeout: int = 5) -> str:
         article.download()
         article.parse()
 
-        # 获取正文
+        # 只保留正文文本，避免把过多网页噪声塞给 AI。
         text = article.text.strip()
 
-        # 简单的后处理，去除空行
+        # 简单的后处理，去掉空行并裁剪过长正文。
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         text = '\n'.join(lines)
 
@@ -57,7 +55,7 @@ def fetch_url_content(url: str, timeout: int = 5) -> str:
 
 @dataclass
 class SearchResult:
-    """搜索结果数据类"""
+    """单条标准化搜索结果。"""
     title: str
     snippet: str  # 摘要
     url: str
@@ -72,7 +70,7 @@ class SearchResult:
 
 @dataclass 
 class SearchResponse:
-    """搜索响应"""
+    """一次搜索调用的标准化响应。"""
     query: str
     results: List[SearchResult]
     provider: str  # 使用的搜索引擎
@@ -93,13 +91,13 @@ class SearchResponse:
 
 
 class BaseSearchProvider(ABC):
-    """搜索引擎基类"""
+    """搜索引擎基类。"""
     
     def __init__(self, api_keys: List[str], name: str):
         """
         初始化搜索引擎
         
-        Args:
+        参数：
             api_keys: API Key 列表（支持多个 key 负载均衡）
             name: 搜索引擎名称
         """
@@ -111,6 +109,7 @@ class BaseSearchProvider(ABC):
     
     @property
     def name(self) -> str:
+        """返回搜索引擎名称。"""
         return self._name
     
     @property
@@ -134,7 +133,7 @@ class BaseSearchProvider(ABC):
             if self._key_errors.get(key, 0) < 3:
                 return key
         
-        # 所有 key 都有问题，重置错误计数并返回第一个
+        # 所有 key 都有问题时，不立刻报废整个提供方，而是重置计数后再给一次机会。
         logger.warning(f"[{self._name}] 所有 API Key 都有错误记录，重置错误计数")
         self._key_errors = {key: 0 for key in self._api_keys}
         return self._api_keys[0] if self._api_keys else None
@@ -150,6 +149,56 @@ class BaseSearchProvider(ABC):
         """记录错误"""
         self._key_errors[key] = self._key_errors.get(key, 0) + 1
         logger.warning(f"[{self._name}] API Key {key[:8]}... 错误计数: {self._key_errors[key]}")
+
+    @staticmethod
+    def _extract_domain(url: str) -> str:
+        """从 URL 提取域名作为来源"""
+        try:
+            domain = urlparse(url).netloc.replace('www.', '')
+            return domain or '未知来源'
+        except Exception:
+            return '未知来源'
+
+    @classmethod
+    def _build_result(
+        cls,
+        *,
+        title: str,
+        snippet: str,
+        url: str,
+        source: Optional[str] = None,
+        published_date: Optional[str] = None,
+        snippet_limit: Optional[int] = None,
+    ) -> SearchResult:
+        """构造统一的搜索结果对象。"""
+        if snippet_limit is not None and snippet:
+            snippet = snippet[:snippet_limit]
+        return SearchResult(
+            title=title,
+            snippet=snippet,
+            url=url,
+            source=source or cls._extract_domain(url),
+            published_date=published_date,
+        )
+
+    def _success_response(self, query: str, results: List[SearchResult]) -> SearchResponse:
+        """构造成功响应。"""
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+    def _failure_response(self, query: str, error_message: str) -> SearchResponse:
+        """构造失败响应。"""
+        return SearchResponse(
+            query=query,
+            results=[],
+            provider=self.name,
+            success=False,
+            error_message=error_message,
+        )
     
     @abstractmethod
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -160,12 +209,12 @@ class BaseSearchProvider(ABC):
         """
         执行搜索
         
-        Args:
+        参数：
             query: 搜索关键词
             max_results: 最大返回结果数
             days: 搜索最近几天的时间范围（默认7天）
             
-        Returns:
+        返回：
             SearchResponse 对象
         """
         api_key = self._get_next_key()
@@ -218,6 +267,7 @@ class TavilySearchProvider(BaseSearchProvider):
     """
     
     def __init__(self, api_keys: List[str]):
+        """初始化 Tavily 搜索提供方。"""
         super().__init__(api_keys, "Tavily")
     
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -225,13 +275,7 @@ class TavilySearchProvider(BaseSearchProvider):
         try:
             from tavily import TavilyClient
         except ImportError:
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message="tavily-python 未安装，请运行: pip install tavily-python"
-            )
+            return self._failure_response(query, "tavily-python 未安装，请运行: pip install tavily-python")
         
         try:
             client = TavilyClient(api_key=api_key)
@@ -253,45 +297,23 @@ class TavilySearchProvider(BaseSearchProvider):
             # 解析结果
             results = []
             for item in response.get('results', []):
-                results.append(SearchResult(
+                results.append(self._build_result(
                     title=item.get('title', ''),
-                    snippet=item.get('content', '')[:500],  # 截取前500字
+                    snippet=item.get('content', ''),
                     url=item.get('url', ''),
-                    source=self._extract_domain(item.get('url', '')),
+                    snippet_limit=500,
                     published_date=item.get('published_date'),
                 ))
-            
-            return SearchResponse(
-                query=query,
-                results=results,
-                provider=self.name,
-                success=True,
-            )
+
+            return self._success_response(query, results)
             
         except Exception as e:
             error_msg = str(e)
             # 检查是否是配额问题
             if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
                 error_msg = f"API 配额已用尽: {error_msg}"
-            
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
-    
-    @staticmethod
-    def _extract_domain(url: str) -> str:
-        """从 URL 提取域名作为来源"""
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            domain = parsed.netloc.replace('www.', '')
-            return domain or '未知来源'
-        except:
-            return '未知来源'
+
+            return self._failure_response(query, error_msg)
 
 
 class SerpAPISearchProvider(BaseSearchProvider):
@@ -307,6 +329,7 @@ class SerpAPISearchProvider(BaseSearchProvider):
     """
     
     def __init__(self, api_keys: List[str]):
+        """初始化 SerpAPI 搜索提供方。"""
         super().__init__(api_keys, "SerpAPI")
     
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -314,13 +337,7 @@ class SerpAPISearchProvider(BaseSearchProvider):
         try:
             from serpapi import GoogleSearch
         except ImportError:
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message="google-search-results 未安装，请运行: pip install google-search-results"
-            )
+            return self._failure_response(query, "google-search-results 未安装，请运行: pip install google-search-results")
         
         try:
             # 确定时间范围参数 tbs
@@ -334,7 +351,7 @@ class SerpAPISearchProvider(BaseSearchProvider):
             else:
                 tbs = "qdr:y"  # 过去一年
 
-            # 使用 Google 搜索 (获取 Knowledge Graph, Answer Box 等)
+            # 使用 Google 搜索（获取 Knowledge Graph、Answer Box 等）
             params = {
                 "engine": "google",
                 "q": query,
@@ -355,7 +372,7 @@ class SerpAPISearchProvider(BaseSearchProvider):
             # 解析结果
             results = []
             
-            # 1. 解析 Knowledge Graph (知识图谱)
+            # 1. 解析 Knowledge Graph （知识图谱）
             kg = response.get('knowledge_graph', {})
             if kg:
                 title = kg.get('title', '知识图谱')
@@ -369,15 +386,15 @@ class SerpAPISearchProvider(BaseSearchProvider):
                         details.append(f"{key}: {val}")
                         
                 snippet = f"{desc}\n" + " | ".join(details) if details else desc
-                
-                results.append(SearchResult(
+
+                results.append(self._build_result(
                     title=f"[知识图谱] {title}",
                     snippet=snippet,
                     url=kg.get('source', {}).get('link', ''),
-                    source="Google Knowledge Graph"
+                    source="Google Knowledge Graph",
                 ))
                 
-            # 2. 解析 Answer Box (精选回答/行情卡片)
+            # 2. 解析 Answer Box （精选回答/行情卡片）
             ab = response.get('answer_box', {})
             if ab:
                 ab_title = ab.get('title', '精选回答')
@@ -413,31 +430,31 @@ class SerpAPISearchProvider(BaseSearchProvider):
                 
                 elif 'answer' in ab:
                     ab_snippet = ab.get('answer', '')
-                    
+
                 if ab_snippet:
-                    results.append(SearchResult(
+                    results.append(self._build_result(
                         title=f"[精选回答] {ab_title}",
                         snippet=ab_snippet,
                         url=ab.get('link', '') or ab.get('displayed_link', ''),
-                        source="Google Answer Box"
+                        source="Google Answer Box",
                     ))
 
-            # 3. 解析 Related Questions (相关问题)
+            # 3. 解析 Related Questions （相关问题）
             rqs = response.get('related_questions', [])
             for rq in rqs[:3]: # 取前3个
                 question = rq.get('question', '')
                 snippet = rq.get('snippet', '')
                 link = rq.get('link', '')
-                
+
                 if question and snippet:
-                     results.append(SearchResult(
+                     results.append(self._build_result(
                         title=f"[相关问题] {question}",
                         snippet=snippet,
                         url=link,
-                        source="Google Related Questions"
+                        source="Google Related Questions",
                      ))
 
-            # 4. 解析 Organic Results (自然搜索结果)
+            # 4. 解析 Organic Results （自然搜索结果）
             organic_results = response.get('organic_results', [])
 
             for item in organic_results[:max_results]:
@@ -462,40 +479,20 @@ class SerpAPISearchProvider(BaseSearchProvider):
                    except Exception as e:
                        logger.debug(f"[SerpAPI] Fetch content failed: {e}")
 
-                results.append(SearchResult(
+                results.append(self._build_result(
                     title=item.get('title', ''),
-                    snippet=snippet[:1000], # 限制总长度
+                    snippet=snippet,
                     url=link,
-                    source=item.get('source', self._extract_domain(link)),
+                    source=item.get('source'),
+                    snippet_limit=1000,
                     published_date=item.get('date'),
                 ))
 
-            return SearchResponse(
-                query=query,
-                results=results,
-                provider=self.name,
-                success=True,
-            )
+            return self._success_response(query, results)
             
         except Exception as e:
             error_msg = str(e)
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
-    
-    @staticmethod
-    def _extract_domain(url: str) -> str:
-        """从 URL 提取域名"""
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            return parsed.netloc.replace('www.', '') or '未知来源'
-        except:
-            return '未知来源'
+            return self._failure_response(query, error_msg)
 
 
 class BochaSearchProvider(BaseSearchProvider):
@@ -512,6 +509,7 @@ class BochaSearchProvider(BaseSearchProvider):
     """
     
     def __init__(self, api_keys: List[str]):
+        """初始化博查搜索提供方。"""
         super().__init__(api_keys, "Bocha")
     
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -519,13 +517,7 @@ class BochaSearchProvider(BaseSearchProvider):
         try:
             import requests
         except ImportError:
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message="requests 未安装，请运行: pip install requests"
-            )
+            return self._failure_response(query, "requests 未安装，请运行: pip install requests")
         
         try:
             # API 端点
@@ -582,16 +574,10 @@ class BochaSearchProvider(BaseSearchProvider):
                     error_msg = f"请求频率达到限制: {error_message}"
                 else:
                     error_msg = f"HTTP {response.status_code}: {error_message}"
-                
+
                 logger.warning(f"[Bocha] 搜索失败: {error_msg}")
-                
-                return SearchResponse(
-                    query=query,
-                    results=[],
-                    provider=self.name,
-                    success=False,
-                    error_message=error_msg
-                )
+
+                return self._failure_response(query, error_msg)
             
             # 解析响应
             try:
@@ -599,24 +585,12 @@ class BochaSearchProvider(BaseSearchProvider):
             except ValueError as e:
                 error_msg = f"响应JSON解析失败: {str(e)}"
                 logger.error(f"[Bocha] {error_msg}")
-                return SearchResponse(
-                    query=query,
-                    results=[],
-                    provider=self.name,
-                    success=False,
-                    error_message=error_msg
-                )
+                return self._failure_response(query, error_msg)
             
             # 检查响应code
             if data.get('code') != 200:
                 error_msg = data.get('msg') or f"API返回错误码: {data.get('code')}"
-                return SearchResponse(
-                    query=query,
-                    results=[],
-                    provider=self.name,
-                    success=False,
-                    error_message=error_msg
-                )
+                return self._failure_response(query, error_msg)
             
             # 记录原始响应到日志
             logger.info(f"[Bocha] 搜索完成，query='{query}'")
@@ -628,76 +602,39 @@ class BochaSearchProvider(BaseSearchProvider):
             value_list = web_pages.get('value', [])
             
             for item in value_list[:max_results]:
-                # 优先使用summary（AI摘要），fallback到snippet
+                # 优先使用summary（AI 摘要），回退到snippet
                 snippet = item.get('summary') or item.get('snippet', '')
-                
-                # 截取摘要长度
-                if snippet:
-                    snippet = snippet[:500]
-                
-                results.append(SearchResult(
+
+                results.append(self._build_result(
                     title=item.get('name', ''),
                     snippet=snippet,
                     url=item.get('url', ''),
-                    source=item.get('siteName') or self._extract_domain(item.get('url', '')),
+                    source=item.get('siteName') or None,
+                    snippet_limit=500,
                     published_date=item.get('datePublished'),  # UTC+8格式，无需转换
                 ))
-            
+
             logger.info(f"[Bocha] 成功解析 {len(results)} 条结果")
-            
-            return SearchResponse(
-                query=query,
-                results=results,
-                provider=self.name,
-                success=True,
-            )
+
+            return self._success_response(query, results)
             
         except requests.exceptions.Timeout:
             error_msg = "请求超时"
             logger.error(f"[Bocha] {error_msg}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
+            return self._failure_response(query, error_msg)
         except requests.exceptions.RequestException as e:
             error_msg = f"网络请求失败: {str(e)}"
             logger.error(f"[Bocha] {error_msg}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
+            return self._failure_response(query, error_msg)
         except Exception as e:
             error_msg = f"未知错误: {str(e)}"
             logger.error(f"[Bocha] {error_msg}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
-    
-    @staticmethod
-    def _extract_domain(url: str) -> str:
-        """从 URL 提取域名作为来源"""
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            domain = parsed.netloc.replace('www.', '')
-            return domain or '未知来源'
-        except:
-            return '未知来源'
+            return self._failure_response(query, error_msg)
 
 
 class BraveSearchProvider(BaseSearchProvider):
     """
-    Brave Search 搜索引擎
+    Brave 搜索引擎
 
     特点：
     - 隐私优先的独立搜索引擎
@@ -711,6 +648,7 @@ class BraveSearchProvider(BaseSearchProvider):
     API_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
     def __init__(self, api_keys: List[str]):
+        """初始化 Brave 搜索提供方。"""
         super().__init__(api_keys, "Brave")
 
     def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
@@ -724,13 +662,13 @@ class BraveSearchProvider(BaseSearchProvider):
 
             # 确定时间范围（freshness 参数）
             if days <= 1:
-                freshness = "pd"  # Past day (24小时)
+                freshness = "pd"  # 过去一天（24 小时）
             elif days <= 7:
-                freshness = "pw"  # Past week
+                freshness = "pw"  # 过去一周
             elif days <= 30:
-                freshness = "pm"  # Past month
+                freshness = "pm"  # 过去一个月
             else:
-                freshness = "py"  # Past year
+                freshness = "py"  # 过去一年
 
             # 请求参数
             params = {
@@ -750,17 +688,11 @@ class BraveSearchProvider(BaseSearchProvider):
                 timeout=10
             )
 
-            # 检查HTTP状态码
+            # 检查 HTTP 状态码
             if response.status_code != 200:
                 error_msg = self._parse_error(response)
                 logger.warning(f"[Brave] 搜索失败: {error_msg}")
-                return SearchResponse(
-                    query=query,
-                    results=[],
-                    provider=self.name,
-                    success=False,
-                    error_message=error_msg
-                )
+                return self._failure_response(query, error_msg)
 
             # 解析响应
             try:
@@ -768,13 +700,7 @@ class BraveSearchProvider(BaseSearchProvider):
             except ValueError as e:
                 error_msg = f"响应JSON解析失败: {str(e)}"
                 logger.error(f"[Brave] {error_msg}")
-                return SearchResponse(
-                    query=query,
-                    results=[],
-                    provider=self.name,
-                    success=False,
-                    error_message=error_msg
-                )
+                return self._failure_response(query, error_msg)
 
             logger.info(f"[Brave] 搜索完成，query='{query}'")
             logger.debug(f"[Brave] 原始响应: {data}")
@@ -796,53 +722,30 @@ class BraveSearchProvider(BaseSearchProvider):
                     except (ValueError, AttributeError):
                         published_date = age  # 解析失败时使用原始值
 
-                results.append(SearchResult(
+                results.append(self._build_result(
                     title=item.get('title', ''),
-                    snippet=item.get('description', '')[:500],  # 截取到500字符
+                    snippet=item.get('description', ''),
                     url=item.get('url', ''),
-                    source=self._extract_domain(item.get('url', '')),
-                    published_date=published_date
+                    snippet_limit=500,
+                    published_date=published_date,
                 ))
 
             logger.info(f"[Brave] 成功解析 {len(results)} 条结果")
 
-            return SearchResponse(
-                query=query,
-                results=results,
-                provider=self.name,
-                success=True
-            )
+            return self._success_response(query, results)
 
         except requests.exceptions.Timeout:
             error_msg = "请求超时"
             logger.error(f"[Brave] {error_msg}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
+            return self._failure_response(query, error_msg)
         except requests.exceptions.RequestException as e:
             error_msg = f"网络请求失败: {str(e)}"
             logger.error(f"[Brave] {error_msg}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
+            return self._failure_response(query, error_msg)
         except Exception as e:
             error_msg = f"未知错误: {str(e)}"
             logger.error(f"[Brave] {error_msg}")
-            return SearchResponse(
-                query=query,
-                results=[],
-                provider=self.name,
-                success=False,
-                error_message=error_msg
-            )
+            return self._failure_response(query, error_msg)
 
     def _parse_error(self, response) -> str:
         """解析错误响应"""
@@ -856,19 +759,8 @@ class BraveSearchProvider(BaseSearchProvider):
                     return error_data['error']
                 return str(error_data)
             return response.text[:200]
-        except:
+        except Exception:
             return f"HTTP {response.status_code}: {response.text[:200]}"
-
-    @staticmethod
-    def _extract_domain(url: str) -> str:
-        """从 URL 提取域名作为来源"""
-        try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            domain = parsed.netloc.replace('www.', '')
-            return domain or '未知来源'
-        except:
-            return '未知来源'
 
 
 class SearchService:
@@ -912,10 +804,10 @@ class SearchService:
         """
         初始化搜索服务
 
-        Args:
+        参数：
             bocha_keys: 博查搜索 API Key 列表
             tavily_keys: Tavily API Key 列表
-            brave_keys: Brave Search API Key 列表
+            brave_keys: Brave 搜索 API Key 列表
             serpapi_keys: SerpAPI Key 列表
             news_max_age_days: 新闻最大时效（天）
         """
@@ -923,7 +815,7 @@ class SearchService:
         self.news_max_age_days = max(1, news_max_age_days)
 
         # 初始化搜索引擎（按优先级排序）
-        # 1. Bocha 优先（中文搜索优化，AI摘要）
+        # 1. 优先使用 Bocha（中文搜索优化，AI 摘要）
         if bocha_keys:
             self._providers.append(BochaSearchProvider(bocha_keys))
             logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
@@ -933,7 +825,7 @@ class SearchService:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
 
-        # 3. Brave Search（隐私优先，全球覆盖）
+        # 3. Brave 搜索（隐私优先，全球覆盖）
         if brave_keys:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
@@ -946,9 +838,9 @@ class SearchService:
         if not self._providers:
             logger.warning("未配置任何搜索引擎 API Key，新闻搜索功能将不可用")
 
-        # In-memory search result cache: {cache_key: (timestamp, SearchResponse)}
+        # 内存搜索结果缓存：{cache_key: (timestamp, SearchResponse)}
         self._cache: Dict[str, Tuple[float, 'SearchResponse']] = {}
-        # Default cache TTL in seconds (10 minutes)
+        # 默认缓存 TTL（秒，10 分钟）
         self._cache_ttl: int = 600
     
     @staticmethod
@@ -973,11 +865,11 @@ class SearchService:
         return any(p.is_available for p in self._providers)
 
     def _cache_key(self, query: str, max_results: int, days: int) -> str:
-        """Build a cache key from query parameters."""
+        """根据查询参数构建缓存键。"""
         return f"{query}|{max_results}|{days}"
 
     def _get_cached(self, key: str) -> Optional['SearchResponse']:
-        """Return cached SearchResponse if still valid, else None."""
+        """若缓存的 `SearchResponse` 仍有效则返回，否则返回 `None`。"""
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -985,20 +877,20 @@ class SearchService:
         if time.time() - ts > self._cache_ttl:
             del self._cache[key]
             return None
-        logger.debug(f"Search cache hit: {key[:60]}...")
+        logger.debug(f"搜索缓存命中: {key[:60]}...")
         return response
 
     def _put_cache(self, key: str, response: 'SearchResponse') -> None:
-        """Store a successful SearchResponse in cache."""
-        # Hard cap: evict oldest entries when cache exceeds limit
+        """将成功的 `SearchResponse` 写入缓存。"""
+        # 硬上限：缓存超过限制时淘汰最早条目
         _MAX_CACHE_SIZE = 500
         if len(self._cache) >= _MAX_CACHE_SIZE:
             now = time.time()
-            # First pass: remove expired entries
+            # 第一轮：删除已过期条目
             expired = [k for k, (ts, _) in self._cache.items() if now - ts > self._cache_ttl]
             for k in expired:
                 del self._cache[k]
-            # Second pass: if still over limit, evict oldest entries (FIFO)
+            # 第二轮：若仍超限，则按先进先出淘汰最早条目
             if len(self._cache) >= _MAX_CACHE_SIZE:
                 excess = len(self._cache) - _MAX_CACHE_SIZE + 1
                 oldest = sorted(self._cache.keys(), key=lambda k: self._cache[k][0])[:excess]
@@ -1016,13 +908,13 @@ class SearchService:
         """
         搜索股票相关新闻
         
-        Args:
+        参数：
             stock_code: 股票代码
             stock_name: 股票名称
             max_results: 最大返回结果数
             focus_keywords: 重点关注的关键词列表
             
-        Returns:
+        返回：
             SearchResponse 对象
         """
         # 智能确定搜索时间范围
@@ -1054,7 +946,7 @@ class SearchService:
 
         logger.info(f"搜索股票新闻: {stock_name}({stock_code}), query='{query}', 时间范围: 近{search_days}天")
 
-        # Check cache first
+        # 先检查缓存
         cache_key = self._cache_key(query, max_results, search_days)
         cached = self._get_cached(cache_key)
         if cached is not None:
@@ -1095,12 +987,12 @@ class SearchService:
         
         专门针对交易决策相关的重要事件进行搜索
         
-        Args:
+        参数：
             stock_code: 股票代码
             stock_name: 股票名称
             event_types: 事件类型列表
             
-        Returns:
+        返回：
             SearchResponse 对象
         """
         if event_types is None:
@@ -1147,12 +1039,12 @@ class SearchService:
         2. 风险排查 - 减持、处罚、利空
         3. 业绩预期 - 年报预告、业绩快报
         
-        Args:
+        参数：
             stock_code: 股票代码
             stock_name: 股票名称
             max_searches: 最大搜索次数
             
-        Returns:
+        返回：
             {维度名称: SearchResponse} 字典
         """
         results = {}
@@ -1256,11 +1148,11 @@ class SearchService:
         """
         格式化情报搜索结果为报告
         
-        Args:
+        参数：
             intel_results: 多维度搜索结果
             stock_name: 股票名称
             
-        Returns:
+        返回：
             格式化的情报报告文本
         """
         lines = [f"【{stock_name} 情报搜索结果】"]
@@ -1303,14 +1195,14 @@ class SearchService:
         delay_between: float = 1.0
     ) -> Dict[str, SearchResponse]:
         """
-        Batch search news for multiple stocks.
+        为多只股票批量搜索新闻。
         
-        Args:
+        参数：
             stocks: List of stocks
             max_results_per_stock: Max results per stock
             delay_between: Delay between searches (seconds)
             
-        Returns:
+        返回：
             Dict of results
         """
         results = {}
@@ -1335,7 +1227,7 @@ class SearchService:
         max_results: int = 5
     ) -> SearchResponse:
         """
-        Enhance search when data sources fail.
+        在数据源失败时增强搜索兜底。
         
         When all data sources (efinance, akshare, tushare, baostock, etc.) fail to get
         stock data, use search engines to find stock trends and price info as supplemental data for AI analysis.
@@ -1345,13 +1237,13 @@ class SearchService:
         2. Try all available search engines for each keyword
         3. Aggregate and deduplicate results
         
-        Args:
+        参数：
             stock_code: Stock Code
             stock_name: Stock Name
             max_attempts: Max search attempts (using different keywords)
             max_results: Max results to return
             
-        Returns:
+        返回：
             SearchResponse object with aggregated results
         """
 
@@ -1447,14 +1339,14 @@ class SearchService:
         当 include_price=True 时，会同时搜索新闻和股价信息。
         主要用于数据源完全失败时的兜底方案。
         
-        Args:
+        参数：
             stock_code: 股票代码
             stock_name: 股票名称
             include_news: 是否搜索新闻
             include_price: 是否搜索股价/走势信息
             max_results: 每类搜索的最大结果数
             
-        Returns:
+        返回：
             {'news': SearchResponse, 'price': SearchResponse} 字典
         """
         results = {}
@@ -1480,10 +1372,10 @@ class SearchService:
         """
         将股价搜索结果格式化为 AI 分析上下文
         
-        Args:
+        参数：
             response: 搜索响应对象
             
-        Returns:
+        返回：
             格式化的文本，可直接用于 AI 分析
         """
         if not response.success or not response.results:
@@ -1513,7 +1405,7 @@ def get_search_service() -> SearchService:
     global _search_service
     
     if _search_service is None:
-        from src.config import get_config
+        from agent_stock.config import get_config
         config = get_config()
         
         _search_service = SearchService(

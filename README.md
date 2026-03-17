@@ -1,199 +1,15 @@
-# Agent_stock (Standalone Microservice)
+# Agent_stock
 
-Standalone Agent project extracted from `daily_stock_analysis`, now upgraded for independent microservice deployment.
+`Agent_stock` 是一个独立的 Python Agent 服务，负责股票分析、模拟交易、运行时账户管理，以及供 `Backend_stock` 调用的内部回测/运行时接口。
 
-## Scope
+## 项目定位
 
-This project keeps the multi-agent paper-trading workflow with service-friendly boundaries:
+- 这是一个“分析 + 编排 + 执行 + 回测”一体化服务，不是前端项目。
+- CLI 入口是 [`agent_main.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_main.py)，适合本地单次运行或实时轮询。
+- 微服务入口是 [`agent_server.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_server.py)，对外暴露 FastAPI 接口。
+- 核心业务命名空间是 `agent_stock.*`、`agent_api.*`、`data_provider.*`、`patch.*`。
 
-- Data -> Signal -> Risk -> Execution pipeline
-- Sync + Async run execution APIs
-- Polling-based async task lifecycle
-- PostgreSQL-first persistence in service mode
-- Backend-oriented integration contracts (no default direct notification)
-- Runtime-aware execution engine: `mode=paper` keeps intent-only semantics, while trusted Backend requests may use `mode=broker` to execute one local Backtrader-style simulated order inside the Execution Agent.
-- Backtest internal compute endpoints for Backend (`/internal/v1/backtest/*`), stateless and persistence-free.
-
-## Runtime Modes
-
-- CLI mode (compatibility): run one-off or realtime cycles from `agent_main.py`
-- Service mode (recommended for backend integration): run FastAPI via `agent_server.py`
-
-## Layout
-
-- `agent_main.py`: compatibility CLI entrypoint
-- `agent_server.py`: microservice ASGI entrypoint
-- `agent_api/`: API layer (routers, schemas, auth middleware)
-- `agent_stock/`: core agent domain logic and repositories
-- `scripts/migrate_agent_storage.py`: DB migration/bootstrap script
-- `docker/`: Dockerfile and compose example
-- `tests/`: regression and API tests
-
-## Core API Contract
-
-### 1) Create Run
-
-`POST /api/v1/runs`
-
-Request body:
-
-```json
-{
-  "stock_codes": ["600519", "000001"],
-  "async_mode": true,
-  "request_id": "optional-idempotency-key",
-  "account_name": "paper-default",
-  "runtime_config": {
-    "account": {
-      "account_name": "user-123",
-      "initial_cash": 100000,
-      "account_display_name": "User 123"
-    },
-    "llm": {
-      "provider": "openai",
-      "base_url": "https://api.openai.com/v1",
-      "model": "gpt-4o-mini",
-      "api_token": "optional-runtime-token",
-      "has_token": true
-    },
-    "strategy": {
-      "position_max_pct": 30,
-      "stop_loss_pct": 8,
-      "take_profit_pct": 15
-    },
-    "execution": {
-      "mode": "paper",
-      "has_ticket": false,
-      "broker_account_id": 88
-    },
-    "context": {
-      "account_snapshot": {
-        "cash": 100000,
-        "total_asset": 120000,
-        "total_market_value": 20000,
-        "positions": [{"code": "600519", "quantity": 100}]
-      },
-      "summary": {
-        "cash": 100000,
-        "total_asset": 120000
-      },
-      "positions": [{"code": "600519", "quantity": 100}]
-    }
-  }
-}
-```
-
-Behavior:
-
-- `async_mode=false`: returns run payload (`200`)
-- `async_mode=true`: returns task payload (`202`)
-- `runtime_config` is optional and applies only to the current request.
-- `runtime_config.account.account_name` is used as account isolation key when provided.
-- Account name length limit is `128` (top-level `account_name` and `runtime_config.account.account_name`).
-- Strategy bounds accept `0..100`:
-  - `position_max_pct=0`: disable opening new positions for this run.
-  - `stop_loss_pct=0`: disable stop-loss trigger for this run.
-  - `take_profit_pct=0`: disable take-profit trigger for this run.
-- Stage snapshots include request-scoped observability fields (`duration_ms`, `input`, `output`).
-- Risk/signal snapshots include compatibility fields:
-  - `risk_snapshot`: `effective_stop_loss`, `effective_take_profit`, `position_cap_pct`, `strategy_applied`.
-  - `signal_snapshot`: `resolved_stop_loss`, `resolved_take_profit`.
-- `runtime_config.execution` is optional:
-  - `mode=paper` keeps intent-only simulation semantics.
-  - `mode=broker` enables trusted Backend -> Agent internal simulated execution and requires `broker_account_id`.
-  - `has_ticket` is retained for backward-compatible payload shape only.
-- `runtime_config.context` is optional:
-  - accepted fields: `account_snapshot`, `summary`, `positions`
-  - used as the primary account input for risk/execution (light-state mode).
-- For end-to-end “analysis auto order”, Backend now requests `mode=broker` so Execution Agent itself submits the local simulation order.
-- Execution snapshots include compatibility fields:
-  - `execution_mode`, `backend_task_id`, `broker_requested`, `executed_via`, `broker_ticket_id`, `fallback_reason`.
-  - `mode=paper` keeps `execution_mode='paper'`, `broker_requested=false`, `executed_via='paper'`.
-  - `mode=broker` returns real local simulation execution results such as `executed_via='backtrader_internal'` and `broker_ticket_id='bt-order-*'`.
-- Runtime tokens are never persisted in DB snapshots/task rows and are redacted from logs/errors.
-
-### 2) Poll Task
-
-`GET /api/v1/tasks/{task_id}`
-
-Task status is one of: `pending | processing | completed | failed`.
-
-### 3) Get Run
-
-`GET /api/v1/runs/{run_id}`
-
-Returns persisted run snapshots: data/signal/risk/execution + account snapshot.
-
-### 4) List Runs
-
-`GET /api/v1/runs?limit=20&status=completed&trade_date=2026-02-23`
-
-### 5) Account Snapshot
-
-`GET /api/v1/accounts/{account_name}/snapshot`
-
-Returns the latest persisted run snapshot for the given account (compat path).  
-If no run snapshot exists yet, the endpoint returns `404`.
-
-### 6) Health
-
-- `GET /api/health/live`
-- `GET /api/health/ready`
-
-### 7) Internal Backtrader Runtime (Backend only)
-
-- `POST /internal/v1/backtrader/accounts/provision`
-- `POST /internal/v1/backtrader/account-summary`
-- `POST /internal/v1/backtrader/positions`
-- `POST /internal/v1/backtrader/orders`
-- `POST /internal/v1/backtrader/trades`
-- `POST /internal/v1/backtrader/place-order`
-- `POST /internal/v1/backtrader/cancel-order`
-
-These routes are authenticated with the same bearer token and are intended for `Backend_stock` only.
-
-### 8) Internal Backtest Compute (Backend only)
-
-- `POST /internal/v1/backtest/run`
-- `POST /internal/v1/backtest/summary`
-- `POST /internal/v1/backtest/curves`
-- `POST /internal/v1/backtest/distribution`
-- `POST /internal/v1/backtest/compare`
-
-These routes are authenticated with the same bearer token and return `{ ok, data }`.
-
-Date-range strategy backtest (`POST /internal/v1/backtest/strategy/run`) additionally requires `backtrader` to be installed in the active Python environment.  
-Quick readiness check:
-
-```bash
-python -c "import backtrader; print('ok')"
-```
-
-## Authentication
-
-All endpoints except health checks require:
-
-```http
-Authorization: Bearer <AGENT_SERVICE_AUTH_TOKEN>
-```
-
-## Configuration
-
-Service mode requires:
-
-- `AGENT_SERVICE_MODE=true`
-- `DATABASE_URL=postgresql+psycopg://...`
-- `AGENT_SERVICE_AUTH_TOKEN=<token>`
-
-Optional service knobs:
-
-- `AGENT_SERVICE_HOST` (default `0.0.0.0`)
-- `AGENT_SERVICE_PORT` (default `8001`)
-- `AGENT_TASK_MAX_WORKERS` (default `3`)
-- `AGENT_WRITE_LOCAL_REPORTS` (default `false`)
-- `AGENT_LLM_REQUEST_TIMEOUT_MS` (default `120000`, explicit per-request LLM timeout to avoid async task hangs)
-
-## Setup
+## 快速上手
 
 ```bash
 python -m venv .venv
@@ -202,41 +18,144 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-## Database Migration
+服务模式至少需要以下配置：
 
-```bash
-python scripts/migrate_agent_storage.py
-```
+- `AGENT_SERVICE_MODE=true`
+- `DATABASE_URL=postgresql+psycopg://...`
+- `AGENT_SERVICE_AUTH_TOKEN=<token>`
 
-## Run Service
+常用可选配置：
+
+- `AGENT_SERVICE_HOST`
+- `AGENT_SERVICE_PORT`
+- `AGENT_TASK_MAX_WORKERS`
+- `AGENT_WRITE_LOCAL_REPORTS`
+- `AGENT_LLM_REQUEST_TIMEOUT_MS`
+- `REALTIME_SOURCE_PRIORITY`
+
+## 运行方式
+
+启动服务：
 
 ```bash
 uvicorn agent_server:app --host 0.0.0.0 --port 8001
 ```
 
-## CLI Compatibility
+单次运行：
 
 ```bash
 python agent_main.py --mode once --stocks 600519
-python agent_main.py --mode realtime --stocks 600519,000001 --interval-minutes 5
-python agent_main.py --mode once --stocks 600519 --notify
 ```
 
-Notes:
-
-- CLI keeps compatibility with previous usage.
-- Notification is disabled by default; use `--notify` to enable legacy behavior explicitly.
-
-## Docker (Service + PostgreSQL)
+实时轮询：
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build
+python agent_main.py --mode realtime --stocks 600519,000001 --interval-minutes 5
 ```
 
-## Validation
+## 主执行链路
+
+一次典型运行会按下面顺序流转：
+
+1. `agent_main.py` 或 `agent_api` 接收请求，解析 CLI/API 参数与 `runtime_config`。
+2. `agent_stock.services.agent_service.AgentService` 负责组装运行上下文，并调用编排器。
+3. `agent_stock.agents.orchestrator.AgentOrchestrator` 按顺序执行：
+   `DataAgent -> SignalAgent -> RiskAgent -> ExecutionAgent`
+4. `agent_stock.repositories.execution_repo.ExecutionRepository` 和 `agent_stock.storage.DatabaseManager`
+   负责账户、持仓、任务、运行快照和搜索/分析结果落库。
+5. 根据配置，运行结果可以写入本地 Markdown/CSV 报表，也可以通过 API 查询。
+
+## 目录职责
+
+- [`agent_stock/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock)
+  核心业务目录，包含配置、分析器、多 Agent 编排、存储、报表、回测服务。
+- [`agent_api/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_api)
+  FastAPI 应用、路由、Schema、鉴权中间件和依赖注入。
+- [`data_provider/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/data_provider)
+  多数据源抓取层，统一封装 AkShare、Tushare、Baostock、Pytdx、Yfinance 等接口。
+- [`patch/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/patch)
+  对第三方请求行为的补丁，例如东方财富反爬请求头补丁。
+- [`scripts/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/scripts)
+  迁移脚本和工程检查脚本。
+- [`tests/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/tests)
+  覆盖 API、运行时、回测、异步任务与数据处理的回归测试。
+
+## 推荐阅读顺序
+
+第一次接手这个项目，建议按下面顺序阅读：
+
+1. [`agent_main.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_main.py)
+   先理解 CLI 如何启动一次运行或实时循环。
+2. [`agent_server.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_server.py) 和 [`agent_api/app.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_api/app.py)
+   看清服务模式如何启动和挂路由。
+3. [`agent_stock/config.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/config.py) 与 [`agent_stock/storage.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/storage.py)
+   理解配置来源、数据库连接和核心表结构。
+4. [`agent_stock/agents/contracts.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/agents/contracts.py)
+   先熟悉运行过程中各阶段产出的统一数据结构。
+5. [`agent_stock/agents/orchestrator.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/agents/orchestrator.py)
+   掌握数据、信号、风控、执行是怎样串起来的。
+6. `agent_stock/services/*`
+   重点看 `agent_service.py`、`agent_task_service.py`、`backtest_service.py`、`strategy_backtest_service.py`、`agent_historical_backtest_service.py`。
+7. [`data_provider/base.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/data_provider/base.py) 与各个 `*_fetcher.py`
+   理解多数据源优先级、降级策略和实时行情补齐逻辑。
+8. [`agent_api/v1/endpoints/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_api/v1/endpoints)
+   对照接口了解 Backend_stock 是如何调用本服务的。
+9. [`tests/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/tests)
+   从复杂测试场景反推业务边界和历史 bug。
+
+## 常见调试入口
+
+- 编排主链路：[`agent_stock/agents/orchestrator.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/agents/orchestrator.py)
+- AI 分析与 LLM 兜底：[`agent_stock/analyzer.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/analyzer.py)
+- 新闻搜索与缓存：[`agent_stock/search_service.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/search_service.py)
+- 账户、持仓、任务落库：[`agent_stock/repositories/execution_repo.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/repositories/execution_repo.py)
+- 历史回放与策略回测：[`agent_stock/services/agent_historical_backtest_service.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/services/agent_historical_backtest_service.py)、[`agent_stock/services/strategy_backtest_service.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/services/strategy_backtest_service.py)
+- 数据源切换：[`data_provider/base.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/data_provider/base.py)
+
+## API 概览
+
+对外运行接口：
+
+- `POST /api/v1/runs`
+- `GET /api/v1/runs/{run_id}`
+- `GET /api/v1/runs`
+- `GET /api/v1/tasks/{task_id}`
+- `GET /api/v1/accounts/{account_name}/snapshot`
+
+健康检查：
+
+- `GET /api/health/live`
+- `GET /api/health/ready`
+
+供 Backend_stock 调用的内部接口：
+
+- `POST /internal/v1/backtrader/accounts/provision`
+- `POST /internal/v1/backtrader/account-summary`
+- `POST /internal/v1/backtrader/positions`
+- `POST /internal/v1/backtrader/orders`
+- `POST /internal/v1/backtrader/trades`
+- `POST /internal/v1/backtrader/place-order`
+- `POST /internal/v1/backtrader/cancel-order`
+- `POST /internal/v1/backtest/run`
+- `POST /internal/v1/backtest/summary`
+- `POST /internal/v1/backtest/curves`
+- `POST /internal/v1/backtest/distribution`
+- `POST /internal/v1/backtest/compare`
+
+除健康检查外，所有接口默认都要求：
+
+```http
+Authorization: Bearer <AGENT_SERVICE_AUTH_TOKEN>
+```
+
+`runtime_config` 支持请求级覆盖 `account`、`llm`、`strategy`、`execution` 和 `context`。运行时密钥会在日志中脱敏，且不会持久化保存。
+
+## 验证命令
 
 ```bash
 python scripts/check_import_boundaries.py
-python -m py_compile agent_main.py agent_server.py agent_api/**/*.py agent_stock/**/*.py src/**/*.py data_provider/*.py
 python -m pytest tests -q
+python -c "import agent_main, agent_server, agent_api.app; print('imports ok')"
 ```
+
+当 `AGENT_WRITE_LOCAL_REPORTS=true` 时，Markdown 与 CSV 报表会落到 `logs/agent_reports/<trade-date>/`。

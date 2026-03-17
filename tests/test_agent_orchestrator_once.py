@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Integration-style test for one orchestrator cycle."""
+"""单次编排周期的集成式测试。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from src.agents.contracts import DataAgentOutput, ExecutionAgentOutput, RiskAgentOutput, SignalAgentOutput
-from src.agents.orchestrator import AgentOrchestrator, MarketSessionGuard
-from src.config import Config
-from src.storage import DatabaseManager
+from agent_stock.agents.contracts import DataAgentOutput, ExecutionAgentOutput, RiskAgentOutput, SignalAgentOutput
+from agent_stock.agents.orchestrator import AgentOrchestrator, MarketSessionGuard
+from agent_stock.config import Config
+from agent_stock.storage import DatabaseManager
 
 
 class _DummyRepo:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Runtime config isolation tests under concurrent requests."""
+"""并发请求下的运行时配置隔离测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import date, datetime
 from agent_stock.agents.contracts import AgentRunResult
 from agent_stock.services.agent_service import AgentService
 from agent_stock.storage import DatabaseManager
-from src.config import Config, get_config
+from agent_stock.config import Config, get_config
 
 
 class _CaptureRepo:
@@ -140,7 +140,7 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
         }
 
         def _run(payload):
-            self.service.run_once(["600519"], runtime_config=payload, notify_enabled=False, write_reports=False)
+            self.service.run_once(["600519"], runtime_config=payload, write_reports=False)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_a = executor.submit(_run, payload_a)
@@ -166,7 +166,7 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
         }
         self.assertEqual(execution_modes, {"paper"})
 
-        # Ensure singleton config remains unchanged after request-level overrides.
+        # 确保请求级覆盖后，全局单例配置保持不变。
         self.assertEqual(self.service.config.openai_model, "gpt-env-default")
         self.assertEqual(self.service.config.openai_api_key, "env-openai-token-1234567890")
 

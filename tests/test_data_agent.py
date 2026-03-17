@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for DataAgent."""
+"""DataAgent 单元测试。"""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from src.agents.data_agent import DataAgent
-from src.config import Config
-from src.storage import DatabaseManager
+from agent_stock.agents.data_agent import DataAgent
+from agent_stock.config import Config
+from agent_stock.storage import DatabaseManager
 
 
 class _FakeQuote:

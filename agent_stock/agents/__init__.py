@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Multi-agent orchestration package."""
+"""多智能体编排相关模块。"""
 
 from agent_stock.agents.contracts import (
     AgentRunResult,

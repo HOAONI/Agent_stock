@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Lazy service exports to avoid circular imports across agent modules."""
+"""延迟导出服务对象，避免智能体模块间循环导入。"""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    """按需导入服务实现，减少启动时耦合。"""
     if name == "AgentService":
         from agent_stock.services.agent_service import AgentService
 

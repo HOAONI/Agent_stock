@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Create or upgrade Agent_stock storage tables."""
+"""创建或升级 Agent_stock 的存储表结构。"""
 
 from __future__ import annotations
 
@@ -15,13 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_stock.storage import Base
-from src.config import get_config, setup_env
+from agent_stock.config import get_config, setup_env
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def main() -> int:
+    """执行数据库建表与兼容迁移。"""
     setup_env()
     config = get_config()
     db_url = config.get_db_url()

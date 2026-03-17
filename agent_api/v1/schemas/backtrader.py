@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Internal Backtrader API schemas."""
+"""内部 Backtrader 运行时接口的数据模型。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class BacktraderInternalRequest(BaseModel):
-    """Common request envelope used by Backend_stock."""
+    """`Backend_stock` 使用的通用请求包装。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -26,7 +26,7 @@ class BacktraderInternalRequest(BaseModel):
 
 
 class BacktraderInternalEnvelope(BaseModel):
-    """Internal response envelope."""
+    """内部响应包装。"""
 
     ok: bool = True
     data: dict[str, Any] = Field(default_factory=dict)

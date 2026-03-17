@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Asynchronous task service for Agent runs."""
+"""负责 Agent 运行异步化调度的任务服务。"""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from typing import Any, Dict, List, Optional
 from data_provider.base import canonical_stock_code
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.storage import DatabaseManager
-from src.config import Config, get_config, redact_sensitive_text
+from agent_stock.config import Config, get_config, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
 
 class AgentTaskService:
-    """Task lifecycle manager backed by DB + in-process thread pool."""
+    """基于数据库和进程内线程池的任务生命周期管理器。"""
 
     def __init__(
         self,
@@ -30,6 +30,7 @@ class AgentTaskService:
         execution_repo: Optional[ExecutionRepository] = None,
         agent_service=None,
     ) -> None:
+        """初始化任务服务和线程池。"""
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = execution_repo or ExecutionRepository(self.db)
@@ -41,6 +42,7 @@ class AgentTaskService:
 
     @property
     def agent_service(self):
+        """懒加载 AgentService，避免初始化时循环依赖。"""
         if self._agent_service is None:
             from agent_stock.services.agent_service import AgentService
 
@@ -52,7 +54,7 @@ class AgentTaskService:
         return self._agent_service
 
     def recover_inflight_tasks(self) -> int:
-        """Mark stale in-flight tasks as failed."""
+        """将上次进程异常中断的进行中任务标记为失败。"""
         return self.repo.mark_inflight_tasks_failed(reason="service_restarted")
 
     def run_sync(
@@ -63,7 +65,7 @@ class AgentTaskService:
         account_name: Optional[str] = None,
         runtime_config: Optional[Dict[str, Any]] = None,
     ) -> Dict:
-        """Run one cycle synchronously and return persisted run payload."""
+        """同步执行一次运行，并返回持久化结果。"""
         normalized_codes = self._normalize_codes(stock_codes)
         resolved_account = self._resolve_account_name(account_name=account_name, runtime_config=runtime_config)
 
@@ -81,7 +83,6 @@ class AgentTaskService:
             normalized_codes,
             account_name=resolved_account,
             request_id=request_id,
-            notify_enabled=False,
             write_reports=bool(getattr(self.config, "agent_write_local_reports", False)),
             runtime_config=runtime_config,
         )
@@ -114,7 +115,7 @@ class AgentTaskService:
         account_name: Optional[str] = None,
         runtime_config: Optional[Dict[str, Any]] = None,
     ) -> Dict:
-        """Submit one asynchronous run request."""
+        """提交一次异步运行请求。"""
         normalized_codes = self._normalize_codes(stock_codes)
         resolved_account = self._resolve_account_name(account_name=account_name, runtime_config=runtime_config)
 
@@ -154,7 +155,7 @@ class AgentTaskService:
         account_name: str,
         runtime_config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Worker body for asynchronous task execution."""
+        """线程池工作函数，负责实际执行异步任务。"""
         started_at = datetime.now()
         self.repo.update_agent_task(task_id, status="processing", started_at=started_at)
 
@@ -163,7 +164,6 @@ class AgentTaskService:
                 stock_codes,
                 account_name=account_name,
                 request_id=request_id,
-                notify_enabled=False,
                 write_reports=bool(getattr(self.config, "agent_write_local_reports", False)),
                 runtime_config=runtime_config,
             )
@@ -187,11 +187,11 @@ class AgentTaskService:
                 self._futures.pop(task_id, None)
 
     def get_task(self, task_id: str) -> Dict:
-        """Fetch task status by task_id."""
+        """按 `task_id` 查询任务状态。"""
         return self.repo.get_agent_task(task_id)
 
     def get_run(self, run_id: str) -> Dict:
-        """Fetch run payload by run_id."""
+        """按 `run_id` 查询运行结果。"""
         return self.repo.get_agent_run(run_id)
 
     def list_runs(
@@ -201,18 +201,19 @@ class AgentTaskService:
         status: Optional[str] = None,
         trade_date_value: Optional[str] = None,
     ) -> List[Dict]:
-        """List run payloads with optional filters."""
+        """按可选筛选条件列出运行记录。"""
         parsed_trade_date: Optional[date] = None
         if trade_date_value:
             parsed_trade_date = date.fromisoformat(trade_date_value)
         return self.repo.list_agent_runs(limit=limit, status=status, trade_date=parsed_trade_date)
 
     def get_account_snapshot(self, account_name: str) -> Dict:
-        """Fetch latest runtime snapshot by account name (compat endpoint)."""
+        """按账户名读取最新运行时快照，兼容旧接口。"""
         return self.repo.get_latest_runtime_account_snapshot(account_name)
 
     @staticmethod
     def _normalize_codes(stock_codes: List[str]) -> List[str]:
+        """标准化股票代码并去重。"""
         normalized = [canonical_stock_code(item) for item in stock_codes if item and str(item).strip()]
         unique = list(dict.fromkeys(normalized))
         if not unique:
@@ -225,7 +226,7 @@ class AgentTaskService:
         account_name: Optional[str],
         runtime_config: Optional[Dict[str, Any]],
     ) -> str:
-        """Resolve effective account name for sync/async task entrypoints."""
+        """解析同步/异步入口最终生效的账户名。"""
         top_level_account = str(account_name or "").strip() or None
         runtime_account = self._extract_runtime_account_name(runtime_config)
 
@@ -243,6 +244,7 @@ class AgentTaskService:
 
     @staticmethod
     def _extract_runtime_account_name(runtime_config: Optional[Dict[str, Any]]) -> Optional[str]:
+        """从运行时配置中提取账户名覆盖项。"""
         if not isinstance(runtime_config, dict):
             return None
         account = runtime_config.get("account")
@@ -263,7 +265,7 @@ def get_agent_task_service(
     execution_repo: Optional[ExecutionRepository] = None,
     agent_service=None,
 ) -> AgentTaskService:
-    """Get singleton task service."""
+    """返回任务服务单例。"""
     global _TASK_SERVICE
     if _TASK_SERVICE is None:
         with _TASK_SERVICE_LOCK:
@@ -278,7 +280,7 @@ def get_agent_task_service(
 
 
 def reset_agent_task_service() -> None:
-    """Reset singleton task service for tests."""
+    """重置任务服务单例，供测试使用。"""
     global _TASK_SERVICE
     with _TASK_SERVICE_LOCK:
         if _TASK_SERVICE is not None:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Integration-style test for realtime loop cycle control."""
+"""实时循环周期控制的集成式测试。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from src.agents.contracts import AgentRunResult
-from src.agents.orchestrator import AgentOrchestrator
-from src.config import Config
-from src.storage import DatabaseManager
+from agent_stock.agents.contracts import AgentRunResult
+from agent_stock.agents.orchestrator import AgentOrchestrator
+from agent_stock.config import Config
+from agent_stock.storage import DatabaseManager
 
 
 class _AlwaysOpenGuard:

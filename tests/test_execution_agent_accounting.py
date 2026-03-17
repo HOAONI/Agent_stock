@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for ExecutionAgent intent projection with runtime snapshots."""
+"""基于运行时快照的 ExecutionAgent 意图映射单元测试。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import tempfile
 import unittest
 from datetime import date
 
-from src.agents.contracts import RiskAgentOutput
-from src.agents.execution_agent import ExecutionAgent
-from src.config import Config
-from src.repositories.execution_repo import ExecutionRepository
-from src.storage import DatabaseManager
+from agent_stock.agents.contracts import RiskAgentOutput
+from agent_stock.agents.execution_agent import ExecutionAgent
+from agent_stock.config import Config
+from agent_stock.repositories.execution_repo import ExecutionRepository
+from agent_stock.storage import DatabaseManager
 
 
 class ExecutionAgentAccountingTestCase(unittest.TestCase):
@@ -69,7 +69,7 @@ class ExecutionAgentAccountingTestCase(unittest.TestCase):
         self.assertGreater(buy_out.traded_qty, 0)
         runtime_snapshot = buy_out.account_snapshot
 
-        # Keep same target and pass previous snapshot: should skip.
+        # 目标不变且传入上一份快照时，应跳过执行。
         hold_notional = float(buy_out.target_qty) * 10.0 * (1.0 + 5 / 10000.0)
         hold_risk = RiskAgentOutput(
             code="600519",
@@ -89,7 +89,7 @@ class ExecutionAgentAccountingTestCase(unittest.TestCase):
         self.assertEqual(hold_out.action, "none")
         runtime_snapshot = hold_out.account_snapshot
 
-        # Sell intent uses runtime snapshot and executes immediately in light-state mode.
+        # 卖出意图会使用运行时快照，并在轻量状态模式下立即执行。
         flat_risk = RiskAgentOutput(
             code="600519",
             trade_date=trade_date,

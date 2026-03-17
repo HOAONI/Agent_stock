@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Observability regression tests for per-stage duration/input/output snapshots."""
+"""分阶段耗时、输入与输出快照的可观测性回归测试。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from src.agents.contracts import DataAgentOutput, ExecutionAgentOutput, RiskAgentOutput, SignalAgentOutput
-from src.agents.orchestrator import AgentOrchestrator
-from src.config import Config
-from src.storage import DatabaseManager
+from agent_stock.agents.contracts import DataAgentOutput, ExecutionAgentOutput, RiskAgentOutput, SignalAgentOutput
+from agent_stock.agents.orchestrator import AgentOrchestrator
+from agent_stock.config import Config
+from agent_stock.storage import DatabaseManager
 
 
 class _DummyRepo:

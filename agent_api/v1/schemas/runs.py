@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Run schemas for Agent API."""
+"""Agent API 运行请求与响应的数据模型。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_stock.runtime_config import ALLOWED_EXECUTION_MODES, ALLOWED_LLM_PROVIDERS
+
 
 class RuntimeAccountRequest(BaseModel):
-    """Request-level account configuration."""
+    """请求级账户配置。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -21,6 +23,7 @@ class RuntimeAccountRequest(BaseModel):
     @field_validator("account_name")
     @classmethod
     def _normalize_account_name(cls, value: str) -> str:
+        """清理并校验账户名长度。"""
         text = value.strip()
         if not text:
             raise ValueError("account_name must not be empty")
@@ -28,11 +31,11 @@ class RuntimeAccountRequest(BaseModel):
 
 
 class RuntimeLlmRequest(BaseModel):
-    """Request-level LLM configuration."""
+    """请求级 LLM 配置。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["gemini", "anthropic", "openai", "deepseek", "custom"]
+    provider: Literal[*ALLOWED_LLM_PROVIDERS]
     base_url: str = Field(min_length=1, max_length=1024)
     model: str = Field(min_length=1, max_length=128)
     api_token: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -41,6 +44,7 @@ class RuntimeLlmRequest(BaseModel):
     @field_validator("base_url", "model")
     @classmethod
     def _trim_text(cls, value: str) -> str:
+        """去掉字符串字段两端空白。"""
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
@@ -48,13 +52,14 @@ class RuntimeLlmRequest(BaseModel):
 
     @model_validator(mode="after")
     def _derive_has_token(self) -> "RuntimeLlmRequest":
+        """根据 `api_token` 自动补全 `has_token` 语义。"""
         if self.api_token and not self.has_token:
             self.has_token = True
         return self
 
 
 class RuntimeStrategyRequest(BaseModel):
-    """Request-level strategy configuration."""
+    """请求级策略配置。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -64,25 +69,26 @@ class RuntimeStrategyRequest(BaseModel):
 
 
 class RuntimeExecutionRequest(BaseModel):
-    """Request-level execution configuration."""
+    """请求级执行配置。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["paper", "broker"]
+    mode: Literal[*ALLOWED_EXECUTION_MODES]
     has_ticket: bool = False
     broker_account_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _normalize_execution(self) -> "RuntimeExecutionRequest":
-        # Keep has_ticket for backward-compatible payload shape. `broker` is
-        # reserved for trusted Backend -> Agent internal simulation execution.
+        """规范执行模式并校验 broker 模式必填字段。"""
+        # 保留 `has_ticket` 字段以兼容旧载荷结构；`broker`
+        # 保留给受信任的 Backend -> Agent 内部模拟执行流程。
         if self.mode == "broker" and self.broker_account_id is None:
             raise ValueError("execution.broker_account_id is required when mode=broker")
         return self
 
 
 class RuntimeContextRequest(BaseModel):
-    """Request-level upstream account context from backend."""
+    """由 Backend 透传的请求级账户上下文。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -92,7 +98,7 @@ class RuntimeContextRequest(BaseModel):
 
 
 class RuntimeConfigRequest(BaseModel):
-    """Request-level runtime override payload."""
+    """请求级运行时覆盖配置。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -104,7 +110,7 @@ class RuntimeConfigRequest(BaseModel):
 
 
 class RunCreateRequest(BaseModel):
-    """Create run request payload."""
+    """创建运行任务的请求体。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -116,7 +122,7 @@ class RunCreateRequest(BaseModel):
 
 
 class RunPayload(BaseModel):
-    """Run payload from persistence."""
+    """持久化后的运行结果载荷。"""
 
     run_id: str
     mode: str | None = None
@@ -137,7 +143,7 @@ class RunPayload(BaseModel):
 
 
 class RunListResponse(BaseModel):
-    """Run list response payload."""
+    """运行记录列表响应。"""
 
     total: int
     runs: list[RunPayload]

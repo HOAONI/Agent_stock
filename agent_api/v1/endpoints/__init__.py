@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Endpoint modules for API v1."""
+"""API v1 的路由处理模块。"""

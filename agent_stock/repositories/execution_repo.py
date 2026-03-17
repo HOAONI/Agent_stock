@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Repository for paper-trading execution, snapshots, and async tasks."""
+"""执行链路仓储层。
+
+它位于 ORM 表结构之上，向 Agent/Service 暴露更贴近业务的读写接口。涉及账户、
+持仓、订单、成交、运行结果和异步任务的持久化时，通常都从这里进入。
+"""
 
 from __future__ import annotations
 
@@ -23,13 +27,14 @@ from agent_stock.storage import (
 
 
 class ExecutionRepository:
-    """Persistence layer used by Risk/Execution/Orchestrator agents."""
+    """供 Risk/Execution/Orchestrator 使用的持久化层。"""
 
     def __init__(self, db_manager: Optional[DatabaseManager] = None):
+        """初始化数据库管理器。"""
         self.db = db_manager or DatabaseManager.get_instance()
 
     def get_or_create_account(self, name: str, initial_cash: float) -> PaperAccount:
-        """Get account by name or create with initial cash."""
+        """按名称获取账户，若不存在则按初始资金创建。"""
         with self.db.get_session() as session:
             account = session.execute(
                 select(PaperAccount).where(PaperAccount.name == name).limit(1)
@@ -54,14 +59,14 @@ class ExecutionRepository:
             return account
 
     def get_account(self, name: str) -> Optional[PaperAccount]:
-        """Get account by name."""
+        """按名称获取账户。"""
         with self.db.get_session() as session:
             return session.execute(
                 select(PaperAccount).where(PaperAccount.name == name).limit(1)
             ).scalar_one_or_none()
 
     def get_account_snapshot(self, name: str) -> Dict[str, Any]:
-        """Get account aggregate values with current positions."""
+        """获取包含当前持仓的账户聚合值。"""
         with self.db.get_session() as session:
             account = session.execute(
                 select(PaperAccount).where(PaperAccount.name == name).limit(1)
@@ -97,7 +102,7 @@ class ExecutionRepository:
             }
 
     def get_latest_runtime_account_snapshot(self, name: str) -> Dict[str, Any]:
-        """Get latest persisted run snapshot for the account (light-state source)."""
+        """获取账户最新的持久化运行快照（轻量状态来源）。"""
         with self.db.get_session() as session:
             row = session.execute(
                 select(AgentRun)
@@ -110,6 +115,7 @@ class ExecutionRepository:
             snapshot = self._safe_loads(row.account_snapshot)
             if not snapshot:
                 return {}
+            # 运行时快照来自历史 AgentRun 记录，适合在轻量模式下快速恢复账户状态。
             payload = dict(snapshot)
             payload.setdefault("name", name)
             payload.setdefault(
@@ -119,7 +125,7 @@ class ExecutionRepository:
             return payload
 
     def get_position(self, account_id: int, code: str) -> Optional[PaperPosition]:
-        """Get one position by account/code."""
+        """按账户和代码获取单个持仓。"""
         with self.db.get_session() as session:
             return session.execute(
                 select(PaperPosition)
@@ -128,7 +134,7 @@ class ExecutionRepository:
             ).scalar_one_or_none()
 
     def list_positions(self, account_id: int) -> List[PaperPosition]:
-        """List all positions for account."""
+        """列出账户下的全部持仓。"""
         with self.db.get_session() as session:
             rows = session.execute(
                 select(PaperPosition)
@@ -138,7 +144,7 @@ class ExecutionRepository:
             return list(rows)
 
     def rollover_available_qty(self, account_id: int, trade_date: date) -> None:
-        """Apply T+1 rollover at most once per trade date."""
+        """在每个交易日内最多执行一次 T+1 结转。"""
         with self.db.get_session() as session:
             account = session.execute(
                 select(PaperAccount).where(PaperAccount.id == account_id).limit(1)
@@ -153,6 +159,7 @@ class ExecutionRepository:
                 select(PaperPosition).where(PaperPosition.account_id == account_id)
             ).scalars().all()
             for pos in positions:
+                # 本地模拟账户把“总持仓 -> 当日可卖”结转拆到日初统一完成，避免重复放量。
                 pos.available_qty = int(pos.quantity or 0)
                 pos.updated_at = datetime.now()
 
@@ -161,7 +168,7 @@ class ExecutionRepository:
             session.commit()
 
     def mark_position_price(self, account_id: int, code: str, price: float) -> None:
-        """Update last price for one position without changing quantity."""
+        """在不改变数量的前提下更新单个持仓的最新价格。"""
         with self.db.get_session() as session:
             pos = session.execute(
                 select(PaperPosition)
@@ -192,7 +199,7 @@ class ExecutionRepository:
         reason: str,
         trade_date: date,
     ) -> Dict[str, Any]:
-        """Persist one order/fill and update account+position atomically."""
+        """原子化持久化单笔订单/成交并更新账户与持仓。"""
         with self.db.get_session() as session:
             account = session.execute(
                 select(PaperAccount).where(PaperAccount.name == account_name).limit(1)
@@ -313,7 +320,7 @@ class ExecutionRepository:
             }
 
     def recompute_account_metrics(self, account_name: str, price_overrides: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-        """Recompute account market value and unrealized pnl."""
+        """重新计算账户市值与未实现盈亏。"""
         with self.db.get_session() as session:
             account = session.execute(
                 select(PaperAccount).where(PaperAccount.name == account_name).limit(1)
@@ -327,7 +334,7 @@ class ExecutionRepository:
         return self.get_account_snapshot(account_name)
 
     def add_funds(self, account_name: str, amount: float) -> Dict[str, Any]:
-        """Increase account cash and initial cash atomically."""
+        """原子化增加账户现金与初始资金。"""
         amount_num = float(amount)
         if amount_num <= 0:
             raise ValueError("amount must be > 0")
@@ -363,7 +370,7 @@ class ExecutionRepository:
         account: PaperAccount,
         price_overrides: Optional[Dict[str, float]] = None,
     ) -> None:
-        """Internal helper to recompute account totals inside an open session."""
+        """在打开会话中重新计算账户总计的内部辅助逻辑。"""
         price_overrides = price_overrides or {}
         positions = session.execute(
             select(PaperPosition).where(PaperPosition.account_id == account.id)
@@ -392,6 +399,7 @@ class ExecutionRepository:
 
     @staticmethod
     def _get_latest_close_price_in_session(session, code: str) -> Optional[float]:
+        """在当前会话内读取指定股票最近收盘价。"""
         row = session.execute(
             select(StockDaily)
             .where(StockDaily.code == code)
@@ -421,7 +429,7 @@ class ExecutionRepository:
         started_at: Optional[datetime] = None,
         ended_at: Optional[datetime] = None,
     ) -> None:
-        """Persist one orchestrator cycle."""
+        """持久化一次编排周期。"""
         payload = AgentRun(
             run_id=run_id,
             mode=mode,
@@ -466,7 +474,7 @@ class ExecutionRepository:
             session.commit()
 
     def get_agent_run(self, run_id: str) -> Dict[str, Any]:
-        """Get one persisted run by run_id."""
+        """按 `run_id` 获取单条持久化运行记录。"""
         with self.db.get_session() as session:
             row = session.execute(
                 select(AgentRun).where(AgentRun.run_id == run_id).limit(1)
@@ -482,7 +490,7 @@ class ExecutionRepository:
         status: Optional[str] = None,
         trade_date: Optional[date] = None,
     ) -> List[Dict[str, Any]]:
-        """List recent persisted runs."""
+        """列出最近的持久化运行记录。"""
         with self.db.get_session() as session:
             query = select(AgentRun)
             if status:
@@ -504,7 +512,7 @@ class ExecutionRepository:
         request_id: Optional[str] = None,
         status: str = "pending",
     ) -> None:
-        """Persist a new async task row."""
+        """持久化一条新的异步任务记录。"""
         with self.db.get_session() as session:
             row = AgentTask(
                 task_id=task_id,
@@ -521,7 +529,7 @@ class ExecutionRepository:
             session.commit()
 
     def get_agent_task(self, task_id: str) -> Dict[str, Any]:
-        """Get task by task_id."""
+        """按 `task_id` 获取任务。"""
         with self.db.get_session() as session:
             row = session.execute(
                 select(AgentTask).where(AgentTask.task_id == task_id).limit(1)
@@ -531,7 +539,7 @@ class ExecutionRepository:
             return self._task_to_dict(row)
 
     def get_agent_task_by_request_id(self, request_id: str) -> Dict[str, Any]:
-        """Get task by idempotency request_id."""
+        """按幂等 `request_id` 获取任务。"""
         if not request_id:
             return {}
         with self.db.get_session() as session:
@@ -552,7 +560,7 @@ class ExecutionRepository:
         started_at: Optional[datetime] = None,
         completed_at: Optional[datetime] = None,
     ) -> None:
-        """Update task state fields."""
+        """更新任务状态字段。"""
         with self.db.get_session() as session:
             row = session.execute(
                 select(AgentTask).where(AgentTask.task_id == task_id).limit(1)
@@ -574,7 +582,7 @@ class ExecutionRepository:
             session.commit()
 
     def mark_inflight_tasks_failed(self, reason: str = "service_restarted") -> int:
-        """Mark pending/processing tasks as failed."""
+        """将 pending/processing 任务标记为失败。"""
         with self.db.get_session() as session:
             rows = session.execute(
                 select(AgentTask).where(AgentTask.status.in_(["pending", "processing"]))
@@ -599,7 +607,7 @@ class ExecutionRepository:
         signal_payload: Dict[str, Any],
         ai_payload: Dict[str, Any],
     ) -> None:
-        """Upsert per-code daily signal cache."""
+        """按代码插入或更新每日信号缓存。"""
         with self.db.get_session() as session:
             row = session.execute(
                 select(AgentSignalSnapshot)
@@ -623,7 +631,7 @@ class ExecutionRepository:
             session.commit()
 
     def get_signal_snapshot(self, *, code: str, trade_date: date) -> Dict[str, Any]:
-        """Get per-code daily signal cache."""
+        """获取按代码划分的每日信号缓存。"""
         with self.db.get_session() as session:
             row = session.execute(
                 select(AgentSignalSnapshot)
@@ -640,6 +648,7 @@ class ExecutionRepository:
             }
 
     def _run_to_dict(self, row: AgentRun) -> Dict[str, Any]:
+        """将运行记录 ORM 对象转换为接口字典。"""
         return {
             "run_id": row.run_id,
             "mode": row.mode,
@@ -661,6 +670,7 @@ class ExecutionRepository:
 
     @staticmethod
     def _task_to_dict(row: AgentTask) -> Dict[str, Any]:
+        """将任务 ORM 对象转换为接口字典。"""
         return {
             "task_id": row.task_id,
             "request_id": row.request_id,
@@ -677,6 +687,7 @@ class ExecutionRepository:
 
     @staticmethod
     def _safe_json(payload: Any) -> str:
+        """安全序列化字典载荷。"""
         try:
             return json.dumps(payload or {}, ensure_ascii=False)
         except Exception:
@@ -684,6 +695,7 @@ class ExecutionRepository:
 
     @staticmethod
     def _safe_loads(raw: Optional[str]) -> Dict[str, Any]:
+        """安全反序列化字典载荷。"""
         if not raw:
             return {}
         try:

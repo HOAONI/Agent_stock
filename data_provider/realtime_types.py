@@ -40,11 +40,11 @@ def safe_float(val: Any, default: Optional[float] = None) -> Optional[float]:
     - 数值字符串 → float
     - 已是数值 → float
     
-    Args:
+    参数：
         val: 待转换的值
         default: 转换失败时的默认值
         
-    Returns:
+    返回：
         转换后的浮点数，或默认值
     """
     try:
@@ -77,11 +77,11 @@ def safe_int(val: Any, default: Optional[int] = None) -> Optional[int]:
     
     先转换为 float，再取整，处理 "123.0" 这类情况
     
-    Args:
+    参数：
         val: 待转换的值
         default: 转换失败时的默认值
         
-    Returns:
+    返回：
         转换后的整数，或默认值
     """
     f_val = safe_float(val, default=None)
@@ -217,10 +217,10 @@ class ChipDistribution:
         """
         获取筹码状态描述
         
-        Args:
+        参数：
             current_price: 当前股价
             
-        Returns:
+        返回：
             筹码状态描述
         """
         status_parts = []
@@ -289,6 +289,7 @@ class CircuitBreaker:
         cooldown_seconds: float = 300.0,  # 冷却时间（秒），默认5分钟
         half_open_max_calls: int = 1      # 半开状态最大尝试次数
     ):
+        """初始化失败阈值、冷却时间和半开状态尝试次数。"""
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
         self.half_open_max_calls = half_open_max_calls

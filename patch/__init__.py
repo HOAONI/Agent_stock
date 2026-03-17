@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Patch package for standalone Agent_stock project."""
+"""独立 Agent_stock 项目的补丁模块包。"""

@@ -1,17 +1,9 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-数据源基类与管理器
-===================================
+"""数据源抽象层与调度器。
 
-设计模式：策略模式 (Strategy Pattern)
-- BaseFetcher: 抽象基类，定义统一接口
-- DataFetcherManager: 策略管理器，实现自动切换
-
-防封禁策略：
-1. 每个 Fetcher 内置流控逻辑
-2. 失败自动切换到下一个数据源
-3. 指数退避重试机制
+这里定义了所有行情抓取器的统一接口，并由 `DataFetcherManager` 负责做优先级调度、
+失败切换、实时行情补齐和预取优化。排查“为什么这次走了某个数据源”时，优先看
+这个文件。
 """
 
 import logging
@@ -40,32 +32,32 @@ STANDARD_COLUMNS = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 
 
 def normalize_stock_code(stock_code: str) -> str:
     """
-    Normalize stock code by stripping exchange prefixes/suffixes.
+    规范化股票代码，去掉交易所前后缀。
 
-    Accepted formats and their normalized results:
-    - '600519'      -> '600519'   (already clean)
-    - 'SH600519'    -> '600519'   (strip SH prefix)
-    - 'SZ000001'    -> '000001'   (strip SZ prefix)
-    - 'sh600519'    -> '600519'   (case-insensitive)
-    - '600519.SH'   -> '600519'   (strip .SH suffix)
-    - '000001.SZ'   -> '000001'   (strip .SZ suffix)
-    - 'HK00700'     -> 'HK00700'  (keep HK prefix for HK stocks)
-    - 'AAPL'        -> 'AAPL'     (keep US stock ticker as-is)
+    支持的输入与输出示例：
+    - '600519' -> '600519'（本身已规范）
+    - 'SH600519' -> '600519'（去掉 SH 前缀）
+    - 'SZ000001' -> '000001'（去掉 SZ 前缀）
+    - 'sh600519' -> '600519'（大小写不敏感）
+    - '600519.SH' -> '600519'（去掉 .SH 后缀）
+    - '000001.SZ' -> '000001'（去掉 .SZ 后缀）
+    - 'HK00700' -> 'HK00700'（港股保留 HK 前缀）
+    - 'AAPL' -> 'AAPL'（美股代码保持不变）
 
-    This function is applied at the DataProviderManager layer so that
-    all individual fetchers receive a clean 6-digit code (for A-shares/ETFs).
+    该函数在 `DataFetcherManager` 层统一调用，确保各个 Fetcher
+    接收到的 A 股/ETF 代码是干净的 5 位或 6 位数字格式。
     """
     code = stock_code.strip()
     upper = code.upper()
 
-    # Strip SH/SZ prefix (e.g. SH600519 -> 600519)
+    # 去掉 SH/SZ 前缀（例如 SH600519 -> 600519）
     if upper.startswith(('SH', 'SZ')) and not upper.startswith('SH.') and not upper.startswith('SZ.'):
         candidate = code[2:]
-        # Only strip if the remainder looks like a valid numeric code
+        # 仅当剩余部分看起来是有效数字代码时才去掉前缀
         if candidate.isdigit() and len(candidate) in (5, 6):
             return candidate
 
-    # Strip .SH/.SZ suffix (e.g. 600519.SH -> 600519)
+    # 去掉 .SH/.SZ 后缀（例如 600519.SH -> 600519）
     if '.' in code:
         base, suffix = code.rsplit('.', 1)
         if suffix.upper() in ('SH', 'SZ', 'SS') and base.isdigit():
@@ -76,33 +68,33 @@ def normalize_stock_code(stock_code: str) -> str:
 
 def canonical_stock_code(code: str) -> str:
     """
-    Return the canonical (uppercase) form of a stock code.
+    返回股票代码的规范展示形式（统一大写）。
 
-    This is a display/storage layer concern, distinct from normalize_stock_code
-    which strips exchange prefixes. Apply at system input boundaries to ensure
-    consistent case across BOT, WEB UI, API, and CLI paths (Issue #355).
+    这与 `normalize_stock_code` 不同：`normalize_stock_code` 负责去掉
+    交易所前后缀，而本函数用于在展示和存储层统一大小写，确保
+    Bot、Web UI、API 和 CLI 等入口看到的代码格式一致（Issue #355）。
 
-    Examples:
-        'aapl'    -> 'AAPL'
-        'AAPL'    -> 'AAPL'
-        '600519'  -> '600519'  (digits are unchanged)
+    示例：
+        'aapl' -> 'AAPL'
+        'AAPL' -> 'AAPL'
+        '600519' -> '600519'（纯数字保持不变）
         'hk00700' -> 'HK00700'
     """
     return (code or "").strip().upper()
 
 
 class DataFetchError(Exception):
-    """数据获取异常基类"""
+    """数据获取异常基类。"""
     pass
 
 
 class RateLimitError(DataFetchError):
-    """API 速率限制异常"""
+    """API 速率限制异常。"""
     pass
 
 
 class DataSourceUnavailableError(DataFetchError):
-    """数据源不可用异常"""
+    """数据源不可用异常。"""
     pass
 
 
@@ -128,12 +120,12 @@ class BaseFetcher(ABC):
         """
         从数据源获取原始数据（子类必须实现）
         
-        Args:
+        参数：
             stock_code: 股票代码，如 '600519', '000001'
             start_date: 开始日期，格式 'YYYY-MM-DD'
             end_date: 结束日期，格式 'YYYY-MM-DD'
             
-        Returns:
+        返回：
             原始数据 DataFrame（列名因数据源而异）
         """
         pass
@@ -152,10 +144,10 @@ class BaseFetcher(ABC):
         """
         获取主要指数实时行情
 
-        Args:
+        参数：
             region: 市场区域，cn=A股 us=美股
 
-        Returns:
+        返回：
             List[Dict]: 指数列表，每个元素为字典，包含:
                 - code: 指数代码
                 - name: 指数名称
@@ -171,7 +163,7 @@ class BaseFetcher(ABC):
         """
         获取市场涨跌统计
 
-        Returns:
+        返回：
             Dict: 包含:
                 - up_count: 上涨家数
                 - down_count: 下跌家数
@@ -186,10 +178,10 @@ class BaseFetcher(ABC):
         """
         获取板块涨跌榜
 
-        Args:
+        参数：
             n: 返回前n个
 
-        Returns:
+        返回：
             Tuple: (领涨板块列表, 领跌板块列表)
         """
         return None
@@ -210,13 +202,13 @@ class BaseFetcher(ABC):
         3. 标准化列名
         4. 计算技术指标
         
-        Args:
+        参数：
             stock_code: 股票代码
             start_date: 开始日期（可选）
             end_date: 结束日期（可选，默认今天）
             days: 获取天数（当 start_date 未指定时使用）
             
-        Returns:
+        返回：
             标准化的 DataFrame，包含技术指标
         """
         # 计算日期范围
@@ -232,19 +224,19 @@ class BaseFetcher(ABC):
         logger.info(f"[{self.name}] 获取 {stock_code} 数据: {start_date} ~ {end_date}")
         
         try:
-            # Step 1: 获取原始数据
+            # 第 1 步：从具体数据源拉取原始行情。
             raw_df = self._fetch_raw_data(stock_code, start_date, end_date)
             
             if raw_df is None or raw_df.empty:
                 raise DataFetchError(f"[{self.name}] 未获取到 {stock_code} 的数据")
             
-            # Step 2: 标准化列名
+            # 第 2 步：标准化列名
             df = self._normalize_data(raw_df, stock_code)
             
-            # Step 3: 数据清洗
+            # 第 3 步：数据清洗
             df = self._clean_data(df)
             
-            # Step 4: 计算技术指标
+            # 第 4 步：补齐均线、量比等下游分析依赖的技术指标。
             df = self._calculate_indicators(df)
             
             logger.info(f"[{self.name}] {stock_code} 获取成功，共 {len(df)} 条数据")
@@ -343,7 +335,7 @@ class DataFetcherManager:
         """
         初始化管理器
         
-        Args:
+        参数：
             fetchers: 数据源列表（可选，默认按优先级自动创建）
         """
         self._fetchers: List[BaseFetcher] = []
@@ -362,12 +354,12 @@ class DataFetcherManager:
         优先级动态调整逻辑：
         - 如果配置了 TUSHARE_TOKEN：Tushare 优先级提升为 0（最高）
         - 否则按默认优先级：
-          0. EfinanceFetcher (Priority 0) - 最高优先级
-          1. AkshareFetcher (Priority 1)
-          2. PytdxFetcher (Priority 2) - 通达信
-          2. TushareFetcher (Priority 2)
-          3. BaostockFetcher (Priority 3)
-          4. YfinanceFetcher (Priority 4)
+          0. EfinanceFetcher（优先级 0） - 最高优先级
+          1. AkshareFetcher（优先级 1）
+          2. PytdxFetcher（优先级 2） - 通达信
+          2. TushareFetcher（优先级 2）
+          3. BaostockFetcher（优先级 3）
+          4. YfinanceFetcher（优先级 4）
         """
         from .efinance_fetcher import EfinanceFetcher
         from .akshare_fetcher import AkshareFetcher
@@ -375,7 +367,7 @@ class DataFetcherManager:
         from .pytdx_fetcher import PytdxFetcher
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
-        from src.config import get_config
+        from agent_stock.config import get_config
 
         config = get_config()
 
@@ -426,21 +418,21 @@ class DataFetcherManager:
         4. 记录每个数据源的失败原因
         5. 所有数据源失败后抛出详细异常
         
-        Args:
+        参数：
             stock_code: 股票代码
             start_date: 开始日期
             end_date: 结束日期
             days: 获取天数
             
-        Returns:
+        返回：
             Tuple[DataFrame, str]: (数据, 成功的数据源名称)
             
-        Raises:
+        异常：
             DataFetchError: 所有数据源都失败时抛出
         """
         from .us_index_mapping import is_us_index_code, is_us_stock_code
 
-        # Normalize code (strip SH/SZ prefix etc.)
+        # 规范化代码（去掉 SH/SZ 前缀等）
         stock_code = normalize_stock_code(stock_code)
 
         errors = []
@@ -465,7 +457,7 @@ class DataFetcherManager:
                         logger.warning(error_msg)
                         errors.append(error_msg)
                     break
-            # YfinanceFetcher failed or not found
+            # YfinanceFetcher 不存在或初始化失败时，统一走美股错误汇总逻辑。
             error_summary = f"美股/美股指数 {stock_code} 获取失败:\n" + "\n".join(errors)
             logger.error(error_summary)
             raise DataFetchError(error_summary)
@@ -514,16 +506,16 @@ class DataFetcherManager:
         - 使用新浪/腾讯时：每只股票独立查询，无全量拉取问题
         - 使用 efinance/东财时：预取一次，后续缓存命中
         
-        Args:
+        参数：
             stock_codes: 待分析的股票代码列表
             
-        Returns:
+        返回：
             预取的股票数量（0 表示跳过预取）
         """
-        # Normalize all codes
+        # 统一规范化所有代码
         stock_codes = [normalize_stock_code(c) for c in stock_codes]
 
-        from src.config import get_config
+        from agent_stock.config import get_config
         
         config = get_config()
         
@@ -584,24 +576,24 @@ class DataFetcherManager:
         故障切换策略（按配置的优先级）：
         1. 美股：使用 YfinanceFetcher.get_realtime_quote()
         2. EfinanceFetcher.get_realtime_quote()
-        3. AkshareFetcher.get_realtime_quote(source="em")  - 东财
+        3. AkshareFetcher.get_realtime_quote(source="em") - 东财
         4. AkshareFetcher.get_realtime_quote(source="sina") - 新浪
         5. AkshareFetcher.get_realtime_quote(source="tencent") - 腾讯
         6. 返回 None（降级兜底）
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，所有数据源都失败则返回 None
         """
-        # Normalize code (strip SH/SZ prefix etc.)
+        # 规范化代码（去掉 SH/SZ 前缀等）
         stock_code = normalize_stock_code(stock_code)
 
         from .realtime_types import get_realtime_circuit_breaker
         from .akshare_fetcher import _is_us_code
         from .us_index_mapping import is_us_index_code
-        from src.config import get_config
+        from agent_stock.config import get_config
 
         config = get_config()
 
@@ -646,8 +638,8 @@ class DataFetcherManager:
         source_priority = config.realtime_source_priority.split(',')
         
         errors = []
-        # primary_quote holds the first successful result; we may supplement
-        # missing fields (volume_ratio, turnover_rate, etc.) from later sources.
+        # `primary_quote` 保存首个成功结果；后续可以补齐
+        # 后续数据源返回的缺失字段（如 `volume_ratio`、`turnover_rate` 等）。
         primary_quote = None
         
         for source in source_priority:
@@ -698,17 +690,17 @@ class DataFetcherManager:
                 
                 if quote is not None and quote.has_basic_data():
                     if primary_quote is None:
-                        # First successful source becomes primary
+                        # 首个成功的数据源作为主结果
                         primary_quote = quote
                         logger.info(f"[实时行情] {stock_code} 成功获取 (来源: {source})")
-                        # If all key supplementary fields are present, return early
+                        # 若关键补充字段已齐全，则提前返回
                         if not self._quote_needs_supplement(primary_quote):
                             return primary_quote
-                        # Otherwise, continue to try later sources for missing fields
+                        # 否则继续尝试后续数据源补齐缺失字段
                         logger.debug(f"[实时行情] {stock_code} 部分字段缺失，尝试从后续数据源补充")
                         supplement_attempts = 0
                     else:
-                        # Supplement missing fields from this source (limit attempts)
+                        # 从当前数据源补齐缺失字段（限制尝试次数）
                         supplement_attempts += 1
                         if supplement_attempts > 1:
                             logger.debug(f"[实时行情] {stock_code} 补充尝试已达上限，停止继续")
@@ -716,7 +708,7 @@ class DataFetcherManager:
                         merged = self._merge_quote_fields(primary_quote, quote)
                         if merged:
                             logger.info(f"[实时行情] {stock_code} 从 {source} 补充了缺失字段: {merged}")
-                        # Stop supplementing once all key fields are filled
+                        # 关键字段全部补齐后停止继续补充
                         if not self._quote_needs_supplement(primary_quote):
                             break
                     
@@ -726,7 +718,7 @@ class DataFetcherManager:
                 errors.append(error_msg)
                 continue
         
-        # Return primary even if some fields are still missing
+        # 即使仍有少数字段缺失，也返回主结果
         if primary_quote is not None:
             return primary_quote
 
@@ -738,8 +730,8 @@ class DataFetcherManager:
         
         return None
 
-    # Fields worth supplementing from secondary sources when the primary
-    # source returns None for them. Ordered by importance.
+    # 当主数据源未返回时，可从次级数据源补齐的字段
+    # 按重要性排序，仅补齐值为 `None` 的字段。
     _SUPPLEMENT_FIELDS = [
         'volume_ratio', 'turnover_rate',
         'pe_ratio', 'pb_ratio', 'total_mv', 'circ_mv',
@@ -748,7 +740,7 @@ class DataFetcherManager:
 
     @classmethod
     def _quote_needs_supplement(cls, quote) -> bool:
-        """Check if any key supplementary field is still None."""
+        """检查关键补充字段中是否仍有 `None`。"""
         for f in cls._SUPPLEMENT_FIELDS:
             if getattr(quote, f, None) is None:
                 return True
@@ -757,8 +749,9 @@ class DataFetcherManager:
     @classmethod
     def _merge_quote_fields(cls, primary, secondary) -> list:
         """
-        Copy non-None fields from *secondary* into *primary* where
-        *primary* has None. Returns list of field names that were filled.
+        将 `secondary` 中非 `None` 的字段补到 `primary` 上。
+
+        仅当 `primary` 对应字段为 `None` 时才会覆盖，返回本次成功补齐的字段名列表。
         """
         filled = []
         for f in cls._SUPPLEMENT_FIELDS:
@@ -779,17 +772,17 @@ class DataFetcherManager:
         3. 依次尝试多个数据源：AkshareFetcher -> TushareFetcher -> EfinanceFetcher
         4. 所有数据源失败则返回 None（降级兜底）
 
-        Args:
+        参数：
             stock_code: 股票代码
 
-        Returns:
+        返回：
             ChipDistribution 对象，失败则返回 None
         """
-        # Normalize code (strip SH/SZ prefix etc.)
+        # 规范化代码（去掉 SH/SZ 前缀等）
         stock_code = normalize_stock_code(stock_code)
 
         from .realtime_types import get_chip_circuit_breaker
-        from src.config import get_config
+        from agent_stock.config import get_config
 
         config = get_config()
 
@@ -840,13 +833,13 @@ class DataFetcherManager:
         2. 依次尝试各个数据源的 get_stock_name 方法
         3. 最后尝试让大模型通过搜索获取（需要外部调用）
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             股票中文名称，所有数据源都失败则返回 None
         """
-        # Normalize code (strip SH/SZ prefix etc.)
+        # 规范化代码（去掉 SH/SZ 前缀等）
         stock_code = normalize_stock_code(stock_code)
 
         # 1. 先检查缓存
@@ -889,10 +882,10 @@ class DataFetcherManager:
         先尝试从支持批量查询的数据源获取股票列表，
         然后再逐个查询缺失的股票名称。
         
-        Args:
+        参数：
             stock_codes: 股票代码列表
             
-        Returns:
+        返回：
             {股票代码: 股票名称} 字典
         """
         result = {}

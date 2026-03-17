@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Backtrader-backed single-window replay engine for backtest service."""
+"""回测服务使用的单窗口交易回放引擎。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 @dataclass(frozen=True)
 class ReplayBar:
-    """Normalized daily OHLC bar used by replay engine."""
+    """回放引擎使用的标准化日线 OHLC 数据。"""
 
     day: date
     high: Optional[float]
@@ -27,6 +27,7 @@ class ReplayBar:
 
 
 def _to_float(value: Any) -> Optional[float]:
+    """安全地将输入转换为有限浮点数。"""
     if value is None:
         return None
     try:
@@ -39,10 +40,12 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 def _safe_bar_close(bar: ReplayBar) -> Optional[float]:
+    """读取收盘价，并统一做数值清洗。"""
     return _to_float(bar.close)
 
 
 def _safe_bar_high(bar: ReplayBar) -> Optional[float]:
+    """读取最高价；若缺失则回退到收盘价。"""
     high = _to_float(bar.high)
     if high is not None:
         return high
@@ -50,6 +53,7 @@ def _safe_bar_high(bar: ReplayBar) -> Optional[float]:
 
 
 def _safe_bar_low(bar: ReplayBar) -> Optional[float]:
+    """读取最低价；若缺失则回退到收盘价。"""
     low = _to_float(bar.low)
     if low is not None:
         return low
@@ -62,6 +66,7 @@ def _manual_target_exit(
     take_profit: Optional[float],
     fallback_close: Optional[float],
 ) -> tuple[Optional[float], str]:
+    """不用 Backtrader 时，按止盈止损规则手工推导离场价格。"""
     if stop_loss is None and take_profit is None:
         return fallback_close, "window_end"
 
@@ -70,6 +75,7 @@ def _manual_target_exit(
     for bar in forward_bars:
         low = _safe_bar_low(bar)
         high = _safe_bar_high(bar)
+        # 同一根 K 线同时命中止盈止损时，保守地按止损处理并标记为歧义。
         stop_hit = stop_loss is not None and low is not None and low <= stop_loss
         take_hit = take_profit is not None and high is not None and high >= take_profit
         if not stop_hit and not take_hit:
@@ -84,7 +90,7 @@ def _manual_target_exit(
 
 if bt is not None:
     class _SingleWindowStrategy(bt.Strategy):
-        """Replay one long-only trade from analysis day through eval window."""
+        """在评估窗口内回放一笔只做多交易。"""
 
         params = dict(
             stop_loss=None,
@@ -93,6 +99,7 @@ if bt is not None:
         )
 
         def __init__(self):
+            """初始化订单句柄和进出场记录。"""
             self.entry_order = None
             self.stop_order = None
             self.take_order = None
@@ -103,6 +110,7 @@ if bt is not None:
             self.exit_reason = "window_end"
 
         def next(self):
+            """在首根 bar 建仓，并在窗口结束时兜底平仓。"""
             bar_index = len(self) - 1
             if bar_index == 0 and self.entry_order is None and not self.position:
                 self.entry_order = self.buy(size=1)
@@ -121,6 +129,7 @@ if bt is not None:
                     self.final_close_order = self.close(size=1)
 
         def notify_order(self, order):
+            """记录成交后的进出场价格与离场原因。"""
             if order.status != order.Completed:
                 return
 
@@ -153,20 +162,23 @@ if bt is not None:
 
 
 class BacktraderBacktestEngine:
-    """Backtrader-first trade replay with deterministic fallback."""
+    """优先使用 Backtrader，失败时回退到确定性模拟的回放引擎。"""
 
     def __init__(self, *, commission_rate: float, slippage_bps: float):
+        """初始化手续费、滑点参数，并记录 Backtrader 可用性。"""
         self.commission_rate = max(0.0, float(commission_rate))
         self.slippage_bps = max(0.0, float(slippage_bps))
         self.available = bt is not None
 
     @staticmethod
     def _round(value: float, digits: int = 4) -> float:
+        """按传统四舍五入方式保留小数位。"""
         factor = 10 ** digits
         return math.floor(value * factor + 0.5) / factor
 
     @staticmethod
     def _normalize_forward(forward_bars: Iterable[Any]) -> list[ReplayBar]:
+        """将任意前瞻 bar 序列标准化并按日期排序。"""
         bars: list[ReplayBar] = []
         for item in forward_bars:
             day = getattr(item, "day", None)
@@ -191,6 +203,7 @@ class BacktraderBacktestEngine:
         stop_loss: Optional[float],
         take_profit: Optional[float],
     ) -> Dict[str, Any]:
+        """在没有 Backtrader 时，用纯规则模拟一笔交易。"""
         end_close = _safe_bar_close(forward_bars[-1]) if forward_bars else None
         exit_price, exit_reason = _manual_target_exit(forward_bars, stop_loss, take_profit, end_close)
         if exit_price is None:
@@ -202,6 +215,7 @@ class BacktraderBacktestEngine:
                 "used_backtrader": False,
             }
 
+        # 手工回放也要统一计入滑点与双边手续费，避免和引擎路径口径不一致。
         slip_ratio = self.slippage_bps / 10000.0
         buy_price = start_price * (1.0 + slip_ratio)
         sell_price = max(0.0, float(exit_price) * (1.0 - slip_ratio))
@@ -226,6 +240,7 @@ class BacktraderBacktestEngine:
         stop_loss: Optional[float],
         take_profit: Optional[float],
     ) -> Dict[str, Any]:
+        """使用 Backtrader 回放一笔交易，并在异常时回退到手工逻辑。"""
         if bt is None:
             return self._simulate_without_backtrader(
                 start_price=start_price,
@@ -234,6 +249,7 @@ class BacktraderBacktestEngine:
                 take_profit=take_profit,
             )
 
+        # 在分析日补一根 合成 bar，使首笔买入能严格对齐分析日收盘建仓。
         rows = [
             {
                 "date": pd.Timestamp(analysis_date),
@@ -289,7 +305,7 @@ class BacktraderBacktestEngine:
                 slip_match=True,
                 slip_limit=True,
             )
-        # Execute market orders on current bar close, aligning with analysis-day close entry.
+        # 强制在当前 bar 收盘执行市价单，和分析日收盘建仓的口径保持一致。
         cerebro.broker.set_coc(True)
 
         strategies = cerebro.run()
@@ -309,7 +325,7 @@ class BacktraderBacktestEngine:
         if entry_price is None:
             entry_price = start_price
         if exit_price is None:
-            # Fall back to deterministic target selection if broker did not close as expected.
+            # 如果 broker 没有按预期平仓，则回退到确定性目标选择逻辑。
             fallback = self._simulate_without_backtrader(
                 start_price=start_price,
                 forward_bars=forward_bars,
@@ -345,6 +361,7 @@ class BacktraderBacktestEngine:
         stop_loss: Optional[float],
         take_profit: Optional[float],
     ) -> Dict[str, Any]:
+        """统一入口：回放一笔只做多交易并返回标准化结果。"""
         start = _to_float(start_price)
         if start is None or start <= 0:
             return {

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""API router composition."""
+"""API 路由聚合与挂载定义。"""
 
 from __future__ import annotations
 

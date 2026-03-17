@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Unit test for agent execution notification formatter."""
+"""本地 Agent 报表渲染单元测试。"""
 
 from __future__ import annotations
 
 import unittest
 
-from src.notification import NotificationService
+from agent_stock.reporting import generate_agent_execution_report
 
 
-class AgentNotificationReportTestCase(unittest.TestCase):
+class AgentReportingTestCase(unittest.TestCase):
     def test_generate_agent_execution_report(self):
-        service = NotificationService()
         payload = {
             "run_id": "run-123",
             "mode": "once",
@@ -36,7 +35,7 @@ class AgentNotificationReportTestCase(unittest.TestCase):
             ],
         }
 
-        report = service.generate_agent_execution_report(payload)
+        report = generate_agent_execution_report(payload)
 
         self.assertIn("Multi-Agent Execution Report", report)
         self.assertIn("run-123", report)

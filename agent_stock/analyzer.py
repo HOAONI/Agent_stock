@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-A股自选股智能分析系统 - AI分析层
-===================================
+"""AI 分析层。
 
-职责：
-1. 封装 Gemini API 调用逻辑
-2. 利用 Google Search Grounding 获取实时新闻
-3. 结合技术面和消息面生成分析报告
+本模块负责把行情上下文、新闻检索结果和运行时账户信息整理成 LLM 可消费的提示，
+并对多家模型提供方做统一封装。阅读重点建议放在三处：
+1. `GeminiAnalyzer.__init__` 的提供方优先级与故障转移
+2. `analyze()` 的提示词拼装与响应解析
+3. `AnalysisResult` 的标准化结果结构
 """
 
 import json
@@ -19,15 +17,16 @@ from typing import Optional, Dict, Any, List
 import httpx
 from json_repair import repair_json
 
-from src.config import Config, RuntimeLlmConfig, get_config, redact_sensitive_text
+from agent_stock.config import Config, RuntimeLlmConfig, get_config, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
 
 class LlmRequestTimeoutError(RuntimeError):
-    """Raised when one provider request exceeds the configured timeout."""
+    """当某个提供方请求超过配置超时时间时抛出。"""
 
     def __init__(self, *, provider: str, timeout_ms: int):
+        """记录超时提供商与超时时间，便于上层统一处理。"""
         self.code = "llm_request_timeout"
         self.provider = provider
         self.timeout_ms = int(timeout_ms)
@@ -106,12 +105,12 @@ def get_stock_name_multi_source(
     3. 从 DataFetcherManager 获取（各数据源）
     4. 返回默认名称（股票+代码）
 
-    Args:
+    参数：
         stock_code: 股票代码
         context: 分析上下文（可选）
         data_manager: DataFetcherManager 实例（可选）
 
-    Returns:
+    返回：
         股票中文名称
     """
     # 1. 从上下文获取（实时行情数据）
@@ -293,15 +292,15 @@ class AnalysisResult:
             '强烈卖出': '❌',
         }
         advice = self.operation_advice or ''
-        # Direct match first
+        # 先进行直接匹配
         if advice in emoji_map:
             return emoji_map[advice]
-        # Handle compound advice like "卖出/观望" — use the first part
+        # 处理诸如“卖出/观望”的复合建议时，先取第一段
         for part in advice.replace('/', '|').split('|'):
             part = part.strip()
             if part in emoji_map:
                 return emoji_map[part]
-        # Score-based fallback
+        # 按评分结果回退
         score = self.sentiment_score
         if score >= 80:
             return '💚'
@@ -540,7 +539,7 @@ class GeminiAnalyzer:
 
         优先级：Gemini > Anthropic > OpenAI
 
-        Args:
+        参数：
             api_key: Gemini API Key（可选，默认从配置读取）
         """
         base_config = config or get_config()
@@ -581,6 +580,7 @@ class GeminiAnalyzer:
 
     @staticmethod
     def _safe_error(error: Any) -> str:
+        """对异常文本做敏感信息脱敏。"""
         return redact_sensitive_text(str(error))
 
     def _try_anthropic_then_openai(self) -> None:
@@ -700,7 +700,7 @@ class GeminiAnalyzer:
             model_name = config.gemini_model
             fallback_model = config.gemini_model_fallback
 
-            # 不再使用 Google Search Grounding（已知有兼容性问题）
+            # 不再使用 Google 搜索 Grounding（已知有兼容性问题）
             # 改为使用外部搜索服务（Tavily/SerpAPI）预先获取新闻
 
             # 尝试初始化主模型
@@ -736,7 +736,7 @@ class GeminiAnalyzer:
         """
         切换到备选模型
 
-        Returns:
+        返回：
             是否成功切换
         """
         try:
@@ -766,6 +766,7 @@ class GeminiAnalyzer:
         )
 
     def _openai_provider_label(self) -> str:
+        """根据 base_url 推断 OpenAI 兼容提供商名称。"""
         base_url = str(getattr(self._config, "openai_base_url", "") or "").strip().lower()
         if "deepseek" in base_url:
             return "DeepSeek"
@@ -774,10 +775,12 @@ class GeminiAnalyzer:
         return "OpenAI-compatible"
 
     def _raise_llm_timeout(self, provider: str) -> None:
+        """抛出统一的 LLM 超时异常。"""
         raise LlmRequestTimeoutError(provider=provider, timeout_ms=self._llm_timeout_ms)
 
     @staticmethod
     def _is_timeout_exception(error: Exception) -> bool:
+        """判断异常是否属于超时范畴。"""
         if isinstance(error, TimeoutError):
             return True
         if isinstance(error, httpx.TimeoutException):
@@ -792,11 +795,11 @@ class GeminiAnalyzer:
         """
         调用 Anthropic Claude Messages API。
 
-        Args:
-            prompt: 用户提示词
+        参数：
+            提示词: 用户提示词
             generation_config: 生成配置（temperature, max_output_tokens）
 
-        Returns:
+        返回：
             响应文本
         """
         config = self._config
@@ -864,11 +867,11 @@ class GeminiAnalyzer:
         """
         调用 OpenAI 兼容 API
 
-        Args:
-            prompt: 提示词
+        参数：
+            提示词: 提示词
             generation_config: 生成配置
 
-        Returns:
+        返回：
             响应文本
         """
         config = self._config
@@ -876,6 +879,7 @@ class GeminiAnalyzer:
         base_delay = config.gemini_retry_delay
 
         def _build_base_request_kwargs() -> dict:
+            """构造 OpenAI 兼容请求的基础参数。"""
             kwargs = {
                 "model": self._current_model_name,
                 "messages": [
@@ -887,6 +891,7 @@ class GeminiAnalyzer:
             return kwargs
 
         def _is_unsupported_param_error(error_message: str, param_name: str) -> bool:
+            """判断报错是否由不支持的参数名引起。"""
             lower_msg = error_message.lower()
             return ('400' in lower_msg or "unsupported parameter" in lower_msg or "unsupported param" in lower_msg) and param_name in lower_msg
 
@@ -898,6 +903,7 @@ class GeminiAnalyzer:
         mode = self._token_param_mode.get(model_name, "max_tokens")
 
         def _kwargs_with_mode(mode_value):
+            """在基础参数上附加当前 token 限制字段。"""
             kwargs = _build_base_request_kwargs()
             if mode_value is not None:
                 kwargs[mode_value] = max_output_tokens
@@ -963,11 +969,11 @@ class GeminiAnalyzer:
         2. 多次失败后切换到备选模型
         3. Gemini 完全失败后尝试 OpenAI
         
-        Args:
-            prompt: 提示词
+        参数：
+            提示词: 提示词
             generation_config: 生成配置
             
-        Returns:
+        返回：
             响应文本
         """
         # 若使用 Anthropic，调用 Anthropic（失败时回退到 OpenAI）
@@ -1111,11 +1117,11 @@ class GeminiAnalyzer:
         3. 解析 JSON 响应
         4. 返回结构化结果
         
-        Args:
+        参数：
             context: 从 storage.get_analysis_context() 获取的上下文数据
             news_context: 预先搜索的新闻内容（可选）
             
-        Returns:
+        返回：
             AnalysisResult 对象
         """
         code = context.get('code', 'Unknown')
@@ -1168,7 +1174,7 @@ class GeminiAnalyzer:
             logger.info(f"[LLM配置] Prompt 长度: {len(prompt)} 字符")
             logger.info(f"[LLM配置] 是否包含新闻: {'是' if news_context else '否'}")
             
-            # 记录完整 prompt 到日志（INFO级别记录摘要，DEBUG记录完整）
+            # 记录完整 提示词 到日志（INFO级别记录摘要，DEBUG记录完整）
             prompt_preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
             logger.info(f"[LLM Prompt 预览]\n{prompt_preview}")
             logger.debug(f"=== 完整 Prompt ({len(prompt)}字符) ===\n{prompt}\n=== End Prompt ===")
@@ -1240,7 +1246,7 @@ class GeminiAnalyzer:
         
         包含：技术指标、实时行情（量比/换手率）、筹码分布、趋势分析、新闻
         
-        Args:
+        参数：
             context: 技术面数据上下文（包含增强数据）
             name: 股票名称（默认值，可能被上下文覆盖）
             news_context: 预先搜索的新闻内容
@@ -1533,7 +1539,7 @@ class GeminiAnalyzer:
         """
         解析 Gemini 响应（决策仪表盘版）
         
-        尝试从响应中提取 JSON 格式的分析结果，包含 dashboard 字段
+        尝试从响应中提取 JSON 格式的分析结果，包含 仪表盘 字段
         如果解析失败，尝试智能提取或返回默认结果
         """
         try:
@@ -1556,7 +1562,7 @@ class GeminiAnalyzer:
                 
                 data = json.loads(json_str)
                 
-                # 提取 dashboard 数据
+                # 提取 仪表盘 数据
                 dashboard = data.get('dashboard', None)
 
                 # 优先使用 AI 返回的股票名称（如果原名称无效或包含代码）
@@ -1638,7 +1644,7 @@ class GeminiAnalyzer:
         # 确保布尔值是小写
         json_str = json_str.replace('True', 'true').replace('False', 'false')
         
-        # fix by json-repair
+        # 使用 `json-repair` 修复
         json_str = repair_json(json_str)
         
         return json_str
@@ -1705,11 +1711,11 @@ class GeminiAnalyzer:
         
         注意：为避免 API 速率限制，每次分析之间会有延迟
         
-        Args:
+        参数：
             contexts: 上下文数据列表
             delay_between: 每次分析之间的延迟（秒）
             
-        Returns:
+        返回：
             AnalysisResult 列表
         """
         results = []

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Task endpoints for Agent API."""
+"""Agent API 的异步任务接口。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ router = APIRouter()
 
 @router.get("/{task_id}", response_model=TaskStatusResponse, responses={404: {"model": ErrorResponse}}, summary="Get task status")
 def get_task(task_id: str, task_service: AgentTaskService = Depends(get_task_service_dep)) -> TaskStatusResponse:
-    """Get one async task status."""
+    """获取单个异步任务状态。"""
     payload = task_service.get_task(task_id)
     if not payload:
         raise HTTPException(

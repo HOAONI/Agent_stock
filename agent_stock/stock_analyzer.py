@@ -24,7 +24,7 @@ from enum import Enum
 import pandas as pd
 import numpy as np
 
-from src.config import get_config
+from agent_stock.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,7 @@ class TrendAnalysisResult:
     risk_factors: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict[str, Any]:
+        """将趋势分析结果转换为字典。"""
         return {
             'code': self.code,
             'trend_status': self.trend_status.value,
@@ -206,11 +207,11 @@ class StockTrendAnalyzer:
         """
         分析股票趋势
         
-        Args:
+        参数：
             df: 包含 OHLCV 数据的 DataFrame
             code: 股票代码
             
-        Returns:
+        返回：
             TrendAnalysisResult 分析结果
         """
         result = TrendAnalysisResult(code=code)
@@ -616,11 +617,11 @@ class StockTrendAnalyzer:
 
         # === 乖离率评分（20分，强势趋势补偿）===
         bias = result.bias_ma5
-        if bias != bias or bias is None:  # NaN or None defense
+        if bias != bias or bias is None:  # `NaN` 或 `None` 防御处理
             bias = 0.0
         base_threshold = get_config().bias_threshold
 
-        # Strong trend compensation: relax threshold for STRONG_BULL with high strength
+        # 强趋势补偿：对高强度 `STRONG_BULL` 放宽阈值
         trend_strength = result.trend_strength if result.trend_strength == result.trend_strength else 0.0
         if result.trend_status == TrendStatus.STRONG_BULL and (trend_strength or 0) >= 70:
             effective_threshold = base_threshold * 1.5
@@ -630,7 +631,7 @@ class StockTrendAnalyzer:
             is_strong_trend = False
 
         if bias < 0:
-            # Price below MA5 (pullback)
+            # 价格低于 MA5（回调）
             if bias > -3:
                 score += 20
                 reasons.append(f"✅ 价格略低于MA5({bias:.1f}%)，回踩买点")
@@ -747,10 +748,10 @@ class StockTrendAnalyzer:
         """
         格式化分析结果为文本
 
-        Args:
+        参数：
             result: 分析结果
 
-        Returns:
+        返回：
             格式化的分析文本
         """
         lines = [
@@ -805,11 +806,11 @@ def analyze_stock(df: pd.DataFrame, code: str) -> TrendAnalysisResult:
     """
     便捷函数：分析单只股票
     
-    Args:
+    参数：
         df: 包含 OHLCV 数据的 DataFrame
         code: 股票代码
         
-    Returns:
+    返回：
         TrendAnalysisResult 分析结果
     """
     analyzer = StockTrendAnalyzer()

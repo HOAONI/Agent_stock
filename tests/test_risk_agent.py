@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for RiskAgent."""
+"""RiskAgent 单元测试。"""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import os
 import unittest
 from datetime import date
 
-from src.agents.contracts import SignalAgentOutput
-from src.agents.risk_agent import RiskAgent
-from src.config import Config, RuntimeStrategyConfig
+from agent_stock.agents.contracts import SignalAgentOutput
+from agent_stock.agents.risk_agent import RiskAgent
+from agent_stock.config import Config, RuntimeStrategyConfig
 
 
 class RiskAgentTestCase(unittest.TestCase):

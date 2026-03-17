@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Account endpoints for Agent API."""
+"""Agent API 的账户查询接口。"""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def get_account_snapshot(
     account_name: str,
     task_service: AgentTaskService = Depends(get_task_service_dep),
 ) -> AccountSnapshotResponse:
-    """Get account cash/positions snapshot."""
+    """获取账户资金与持仓快照。"""
     payload = task_service.get_account_snapshot(account_name)
     if not payload:
         raise HTTPException(

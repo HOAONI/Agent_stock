@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tests for BacktraderRuntimeService add_funds support."""
+"""`BacktraderRuntimeService.add_funds` 支持能力测试。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from agent_api.deps import get_backtrader_runtime_service_dep
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class BacktraderRuntimeAddFundsServiceTestCase(unittest.TestCase):

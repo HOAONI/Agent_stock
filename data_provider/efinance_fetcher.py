@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-EfinanceFetcher - 优先数据源 (Priority 0)
+EfinanceFetcher - 优先数据源（优先级 0）
 ===================================
 
 数据来源：东方财富爬虫（通过 efinance 库）
@@ -40,7 +40,7 @@ from tenacity import (
 )
 
 from patch.eastmoney_patch import eastmoney_patch
-from src.config import get_config
+from agent_stock.config import get_config
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS
 from .realtime_types import (
     UnifiedRealtimeQuote, RealtimeSource,
@@ -129,10 +129,10 @@ def _is_etf_code(stock_code: str) -> bool:
     - 上交所 ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
     - 深交所 ETF: 15xxxx, 16xxxx, 18xxxx
     
-    Args:
+    参数：
         stock_code: 股票/基金代码
         
-    Returns:
+    返回：
         True 表示是 ETF 代码，False 表示是普通股票代码
     """
     etf_prefixes = ('51', '52', '56', '58', '15', '16', '18')
@@ -177,7 +177,7 @@ class EfinanceFetcher(BaseFetcher):
         """
         初始化 EfinanceFetcher
         
-        Args:
+        参数：
             sleep_min: 最小休眠时间（秒）
             sleep_max: 最大休眠时间（秒）
         """
@@ -333,12 +333,12 @@ class EfinanceFetcher(BaseFetcher):
         
         数据来源：ef.fund.get_quote_history()
         
-        Args:
+        参数：
             stock_code: ETF 代码，如 '512400', '159883'
             start_date: 开始日期，格式 'YYYY-MM-DD'
             end_date: 结束日期，格式 'YYYY-MM-DD'
             
-        Returns:
+        返回：
             ETF 历史数据 DataFrame
         """
         import efinance as ef
@@ -460,10 +460,10 @@ class EfinanceFetcher(BaseFetcher):
         数据来源：ef.stock.get_realtime_quotes()
         ETF 数据源：ef.stock.get_realtime_quotes(['ETF'])
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
         # ETF 需要单独请求 ETF 实时行情接口
@@ -833,10 +833,10 @@ class EfinanceFetcher(BaseFetcher):
         数据来源：ef.stock.get_base_info()
         包含：市盈率、市净率、所处行业、总市值、流通市值、ROE、净利率等
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             包含基本信息的字典，获取失败返回 None
         """
         import efinance as ef
@@ -878,10 +878,10 @@ class EfinanceFetcher(BaseFetcher):
         
         数据来源：ef.stock.get_belong_board()
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             所属板块 DataFrame，获取失败返回 None
         """
         import efinance as ef
@@ -914,11 +914,11 @@ class EfinanceFetcher(BaseFetcher):
         """
         获取增强数据（历史K线 + 实时行情 + 基本信息）
         
-        Args:
+        参数：
             stock_code: 股票代码
             days: 历史数据天数
             
-        Returns:
+        返回：
             包含所有数据的字典
         """
         result = {

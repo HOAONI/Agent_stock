@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for MarketSessionGuard."""
+"""`MarketSessionGuard` 单元测试。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src.agents.orchestrator import MarketSessionGuard
+from agent_stock.agents.orchestrator import MarketSessionGuard
 
 
 class MarketSessionGuardTestCase(unittest.TestCase):
@@ -16,7 +16,7 @@ class MarketSessionGuardTestCase(unittest.TestCase):
         self.guard = MarketSessionGuard("Asia/Shanghai", "09:30-11:30,13:00-15:00")
 
     def test_market_open_in_morning_session(self):
-        dt = datetime(2026, 2, 23, 10, 0, tzinfo=self.tz)  # Monday
+        dt = datetime(2026, 2, 23, 10, 0, tzinfo=self.tz)  # 周一
         self.assertTrue(self.guard.is_market_open(dt))
 
     def test_market_closed_at_noon_break(self):
@@ -24,7 +24,7 @@ class MarketSessionGuardTestCase(unittest.TestCase):
         self.assertFalse(self.guard.is_market_open(dt))
 
     def test_market_closed_on_weekend(self):
-        dt = datetime(2026, 2, 22, 10, 0, tzinfo=self.tz)  # Sunday
+        dt = datetime(2026, 2, 22, 10, 0, tzinfo=self.tz)  # 周日
         self.assertFalse(self.guard.is_market_open(dt))
 
 

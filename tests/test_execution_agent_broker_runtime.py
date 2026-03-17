@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ExecutionAgent broker runtime tests."""
+"""ExecutionAgent 券商运行时测试。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ import tempfile
 import unittest
 from datetime import date
 
-from src.agents.contracts import RiskAgentOutput
-from src.agents.execution_agent import ExecutionAgent
-from src.config import Config, RuntimeExecutionConfig
-from src.repositories.execution_repo import ExecutionRepository
-from src.storage import DatabaseManager
+from agent_stock.agents.contracts import RiskAgentOutput
+from agent_stock.agents.execution_agent import ExecutionAgent
+from agent_stock.config import Config, RuntimeExecutionConfig
+from agent_stock.repositories.execution_repo import ExecutionRepository
+from agent_stock.storage import DatabaseManager
 
 
 class _FakeBacktraderRuntimeService:

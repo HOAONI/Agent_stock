@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Internal backtest API schemas."""
+"""内部回测 API 使用的数据模型。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from agent_api.v1.schemas.runs import RuntimeLlmRequest
 
 
 class BacktestRunCandidate(BaseModel):
-    """Candidate analysis record for backtest evaluation."""
+    """用于回测评估的候选分析记录。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -26,7 +26,7 @@ class BacktestRunCandidate(BaseModel):
 
 
 class BacktestRunRequest(BaseModel):
-    """Run request payload."""
+    """运行请求载荷。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -41,7 +41,7 @@ class BacktestRunRequest(BaseModel):
 
 
 class BacktestSummaryRow(BaseModel):
-    """Summary input row."""
+    """汇总输入行。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -59,7 +59,7 @@ class BacktestSummaryRow(BaseModel):
 
 
 class BacktestSummaryRequest(BaseModel):
-    """Summary request payload."""
+    """汇总请求载荷。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -71,7 +71,7 @@ class BacktestSummaryRequest(BaseModel):
 
 
 class BacktestCurveRow(BaseModel):
-    """Curve input row."""
+    """曲线输入行。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -83,7 +83,7 @@ class BacktestCurveRow(BaseModel):
 
 
 class BacktestCurvesRequest(BaseModel):
-    """Curves request payload."""
+    """曲线请求载荷。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -94,7 +94,7 @@ class BacktestCurvesRequest(BaseModel):
 
 
 class BacktestDistributionRequest(BaseModel):
-    """Distribution request payload."""
+    """分布请求载荷。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -106,7 +106,7 @@ class BacktestDistributionRequest(BaseModel):
 
 
 class BacktestCompareRow(BaseModel):
-    """Compare input row."""
+    """对比输入行。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -124,7 +124,7 @@ class BacktestCompareRow(BaseModel):
 
 
 class BacktestCompareRequest(BaseModel):
-    """Compare request payload."""
+    """对比请求载荷。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -135,14 +135,14 @@ class BacktestCompareRequest(BaseModel):
 
 
 class BacktestInternalEnvelope(BaseModel):
-    """Standard internal response envelope."""
+    """标准内部响应包装。"""
 
     ok: bool = True
     data: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyTemplateRunDefinition(BaseModel):
-    """Concrete strategy definition resolved by Backend."""
+    """由 Backend 解析后的具体策略定义。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -153,7 +153,7 @@ class StrategyTemplateRunDefinition(BaseModel):
 
 
 class StrategyRangeRunRequest(BaseModel):
-    """Date-range strategy backtest request."""
+    """区间策略回测请求。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -168,7 +168,7 @@ class StrategyRangeRunRequest(BaseModel):
 
 
 class AgentHistoricalRuntimeStrategy(BaseModel):
-    """Runtime strategy overrides for historical replay."""
+    """历史回放的运行时策略覆盖项。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -178,7 +178,7 @@ class AgentHistoricalRuntimeStrategy(BaseModel):
 
 
 class AgentHistoricalCachedSnapshot(BaseModel):
-    """Cached signal snapshot passed from Backend."""
+    """由 Backend 传入的缓存信号快照。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -193,7 +193,7 @@ class AgentHistoricalCachedSnapshot(BaseModel):
 
 
 class AgentHistoricalRunRequest(BaseModel):
-    """Agent historical replay backtest request."""
+    """Agent 历史回放回测请求。"""
 
     model_config = ConfigDict(extra="allow")
 

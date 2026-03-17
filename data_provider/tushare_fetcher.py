@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-TushareFetcher - 备用数据源 1 (Priority 2)
+TushareFetcher - 备用数据源 1（优先级 2）
 ===================================
 
 数据来源：Tushare Pro API（挖地兔）
@@ -33,15 +33,15 @@ from tenacity import (
 
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS
 from .realtime_types import UnifiedRealtimeQuote
-from src.config import get_config
+from agent_stock.config import get_config
 import os
 
 logger = logging.getLogger(__name__)
 
 
-# ETF code prefixes by exchange
-# Shanghai: 51xxxx, 52xxxx, 56xxxx, 58xxxx
-# Shenzhen: 15xxxx, 16xxxx, 18xxxx
+# 按交易所区分的 ETF 代码前缀
+# 上海：51xxxx、52xxxx、56xxxx、58xxxx
+# 深圳：15xxxx、16xxxx、18xxxx
 _ETF_SH_PREFIXES = ('51', '52', '56', '58')
 _ETF_SZ_PREFIXES = ('15', '16', '18')
 _ETF_ALL_PREFIXES = _ETF_SH_PREFIXES + _ETF_SZ_PREFIXES
@@ -49,11 +49,11 @@ _ETF_ALL_PREFIXES = _ETF_SH_PREFIXES + _ETF_SZ_PREFIXES
 
 def _is_etf_code(stock_code: str) -> bool:
     """
-    Check if the code is an ETF fund code.
+    判断代码是否为 ETF 基金代码。
 
-    ETF code ranges:
-    - Shanghai ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
-    - Shenzhen ETF: 15xxxx, 16xxxx, 18xxxx
+    ETF 代码区间：
+    - 上海 ETF：51xxxx、52xxxx、56xxxx、58xxxx
+    - 深圳 ETF：15xxxx、16xxxx、18xxxx
     """
     code = stock_code.strip().split('.')[0]
     return code.startswith(_ETF_ALL_PREFIXES) and len(code) == 6
@@ -95,7 +95,7 @@ class TushareFetcher(BaseFetcher):
         """
         初始化 TushareFetcher
 
-        Args:
+        参数：
             rate_limit_per_minute: 每分钟最大请求数（默认80，Tushare免费配额）
         """
         self.rate_limit_per_minute = rate_limit_per_minute
@@ -124,15 +124,15 @@ class TushareFetcher(BaseFetcher):
         try:
             import tushare as ts
             
-            # Set Token
+            # 设置 Token
             ts.set_token(config.tushare_token)
             
-            # Get API instance
+            # 获取 API 实例
             self._api = ts.pro_api()
             
-            # Fix: tushare SDK 1.4.x hardcodes api.waditu.com/dataapi which may
-            # be unavailable (503). Monkey-patch the query method to use the
-            # official api.tushare.pro endpoint which posts to root URL.
+            # 修复：tushare SDK 1.4.x 将 `api.waditu.com/dataapi` 写死，可能
+            # 不可用（503），因此通过 monkey patch 改写查询方法，改为使用
+            # 官方 `api.tushare.pro` 端点，并向根 URL 发起 POST 请求。
             self._patch_api_endpoint(config.tushare_token)
 
             logger.info("Tushare API 初始化成功")
@@ -143,12 +143,12 @@ class TushareFetcher(BaseFetcher):
 
     def _patch_api_endpoint(self, token: str) -> None:
         """
-        Patch tushare SDK to use the official api.tushare.pro endpoint.
+        修补 tushare SDK，改为使用官方 `api.tushare.pro` 端点。
 
-        The SDK (v1.4.x) hardcodes http://api.waditu.com/dataapi and appends
-        /{api_name} to the URL. That endpoint may return 503, causing silent
-        empty-DataFrame failures. This method replaces the query method to
-        POST directly to http://api.tushare.pro (root URL, no path suffix).
+        SDK（v1.4.x）会把 `http://api.waditu.com/dataapi` 写死，并在 URL
+        后追加 `/{api_name}`。该端点可能返回 503，导致静默的空 DataFrame
+        失败。本方法会替换查询方法，直接向 `http://api.tushare.pro`
+        根 URL 发起 POST 请求。
         """
         import types
 
@@ -157,6 +157,7 @@ class TushareFetcher(BaseFetcher):
         _timeout = getattr(self._api, '_DataApi__timeout', 30)
 
         def patched_query(self_api, api_name, fields='', **kwargs):
+            """改写 SDK 查询入口，直连官方根接口。"""
             req_params = {
                 'api_name': api_name,
                 'token': _token,
@@ -185,7 +186,7 @@ class TushareFetcher(BaseFetcher):
         - Token 配置且 API 初始化成功：优先级 -1（绝对最高，优于 efinance）
         - 其他情况：优先级 2（默认）
 
-        Returns:
+        返回：
             优先级数字（0=最高，数字越大优先级越低）
         """
         config = get_config()
@@ -202,7 +203,7 @@ class TushareFetcher(BaseFetcher):
         """
         检查数据源是否可用
 
-        Returns:
+        返回：
             True 表示可用，False 表示不可用
         """
         return self._api is not None
@@ -259,27 +260,27 @@ class TushareFetcher(BaseFetcher):
         - 沪市 ETF：510050.SH, 563230.SH
         - 深市 ETF：159919.SZ
         
-        Args:
+        参数：
             stock_code: 原始代码，如 '600519', '000001', '563230'
             
-        Returns:
+        返回：
             Tushare 格式代码，如 '600519.SH', '000001.SZ', '563230.SH'
         """
         code = stock_code.strip()
         
-        # Already has suffix
+        # 已带后缀
         if '.' in code:
             return code.upper()
         
-        # ETF: determine exchange by prefix
+        # ETF：根据前缀判断所属交易所
         if code.startswith(_ETF_SH_PREFIXES) and len(code) == 6:
             return f"{code}.SH"
         if code.startswith(_ETF_SZ_PREFIXES) and len(code) == 6:
             return f"{code}.SZ"
         
-        # Regular stocks
-        # Shanghai: 600xxx, 601xxx, 603xxx, 688xxx (STAR Market)
-        # Shenzhen: 000xxx, 002xxx, 300xxx (ChiNext)
+        # 普通股票按代码前缀判断交易所：
+        # 上海：600xxx、601xxx、603xxx、688xxx（含科创板）
+        # 深圳：000xxx、002xxx、300xxx（含创业板）
         if code.startswith(('600', '601', '603', '688')):
             return f"{code}.SH"
         elif code.startswith(('000', '002', '300')):
@@ -312,17 +313,17 @@ class TushareFetcher(BaseFetcher):
         if self._api is None:
             raise DataFetchError("Tushare API 未初始化，请检查 Token 配置")
         
-        # US stocks not supported
+        # 不支持美股
         if _is_us_code(stock_code):
             raise DataFetchError(f"TushareFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
         
-        # Rate-limit check
+        # 速率限制检查
         self._check_rate_limit()
         
-        # Convert code format
+        # 转换代码格式
         ts_code = self._convert_stock_code(stock_code)
         
-        # Convert date format (Tushare requires YYYYMMDD)
+        # 转换日期格式（Tushare 要求 `YYYYMMDD`）
         ts_start = start_date.replace('-', '')
         ts_end = end_date.replace('-', '')
         
@@ -332,14 +333,14 @@ class TushareFetcher(BaseFetcher):
         
         try:
             if is_etf:
-                # ETF uses fund_daily interface
+                # ETF 使用 `fund_daily` 接口
                 df = self._api.fund_daily(
                     ts_code=ts_code,
                     start_date=ts_start,
                     end_date=ts_end,
                 )
             else:
-                # Regular stocks use daily interface
+                # 普通股票使用 `daily` 接口
                 df = self._api.daily(
                     ts_code=ts_code,
                     start_date=ts_start,
@@ -407,10 +408,10 @@ class TushareFetcher(BaseFetcher):
         
         使用 Tushare 的 stock_basic 接口获取股票基本信息
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             股票名称，失败返回 None
         """
         if self._api is None:
@@ -432,7 +433,7 @@ class TushareFetcher(BaseFetcher):
             # 转换代码格式
             ts_code = self._convert_stock_code(stock_code)
             
-            # ETF uses fund_basic, regular stocks use stock_basic
+            # ETF 使用 `fund_basic`，普通股票使用 `stock_basic`
             if _is_etf_code(stock_code):
                 df = self._api.fund_basic(
                     ts_code=ts_code,
@@ -461,7 +462,7 @@ class TushareFetcher(BaseFetcher):
         
         使用 Tushare 的 stock_basic 接口获取全部股票列表
         
-        Returns:
+        返回：
             包含 code, name 列的 DataFrame，失败返回 None
         """
         if self._api is None:
@@ -505,10 +506,10 @@ class TushareFetcher(BaseFetcher):
         1. 优先尝试 Pro 接口（需要2000积分）：数据全，稳定性高
         2. 失败降级到旧版接口：门槛低，数据较少
 
-        Args:
+        参数：
             stock_code: 股票代码
 
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，失败返回 None
         """
         if self._api is None:

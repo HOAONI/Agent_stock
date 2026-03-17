@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""CLI entrypoint for multi-agent paper trading workflow."""
+"""命令行入口。
+
+建议新同学从本文件开始阅读，再顺着 `AgentService -> AgentOrchestrator`
+进入核心链路。CLI 本身只负责解析参数、补齐配置并调用应用服务。
+"""
 
 from __future__ import annotations
 
@@ -9,23 +13,24 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-# Ensure project root is importable when running as `python agent_main.py`.
+# 确保以 `python agent_main.py` 运行时可以导入项目根目录。
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from data_provider.base import canonical_stock_code
-from src.config import Config, get_config, setup_env
-from src.logging_config import setup_logging
+from agent_stock.config import Config, get_config, setup_env
+from agent_stock.logging_config import setup_logging
 from agent_stock.services.agent_service import AgentService
 
+# 先加载 `.env`，再导入/实例化配置对象，避免入口参数和环境变量脱节。
 setup_env()
 
 logger = logging.getLogger(__name__)
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse CLI arguments for agent runner."""
+    """解析 Agent 运行器的命令行参数。"""
     parser = argparse.ArgumentParser(description="Multi-agent stock paper trading runner")
     parser.add_argument("--mode", choices=["once", "realtime"], default=None, help="Run once or realtime loop")
     parser.add_argument("--stocks", type=str, default=None, help="Comma-separated stock list override")
@@ -41,17 +46,12 @@ def parse_arguments() -> argparse.Namespace:
         default=None,
         help="Optional max cycles for realtime mode (useful for tests)",
     )
-    parser.add_argument(
-        "--notify",
-        action="store_true",
-        help="Enable legacy notification sending for CLI runs",
-    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     return parser.parse_args()
 
 
 def resolve_stock_codes(config: Config, stocks_arg: Optional[str]) -> List[str]:
-    """Resolve stock list from args or config."""
+    """从参数或配置中解析股票列表。"""
     if stocks_arg:
         return [canonical_stock_code(item) for item in stocks_arg.split(",") if item.strip()]
 
@@ -59,12 +59,9 @@ def resolve_stock_codes(config: Config, stocks_arg: Optional[str]) -> List[str]:
     return [canonical_stock_code(item) for item in config.stock_list if item]
 
 
-def run_once(service: AgentService, stock_codes: List[str], *, notify_enabled: bool) -> int:
-    """Run one agent cycle."""
-    result = service.run_once(
-        stock_codes,
-        notify_enabled=notify_enabled,
-    )
+def run_once(service: AgentService, stock_codes: List[str]) -> int:
+    """执行一次 Agent 运行周期。"""
+    result = service.run_once(stock_codes)
     logger.info(
         "Agent once cycle finished: run_id=%s stocks=%s total_asset=%.2f",
         result.run_id,
@@ -79,21 +76,19 @@ def run_realtime(
     stock_codes: List[str],
     interval_minutes: int,
     max_cycles: Optional[int],
-    notify_enabled: bool,
 ) -> int:
-    """Run realtime loop with market-session guard."""
+    """在交易时段守卫控制下运行实时循环。"""
     results = service.run_realtime(
         stock_codes,
         interval_minutes=interval_minutes,
         max_cycles=max_cycles,
-        notify_enabled=notify_enabled,
     )
     logger.info("Agent realtime finished: cycles=%s", len(results))
     return 0
 
 
 def main() -> int:
-    """Main function."""
+    """主函数。"""
     args = parse_arguments()
     config = get_config()
 
@@ -102,13 +97,11 @@ def main() -> int:
     mode = args.mode or str(getattr(config, "agent_run_mode", "once") or "once").lower()
     interval_minutes = int(args.interval_minutes or getattr(config, "agent_poll_interval_minutes", 5))
 
+    # CLI 只解析股票列表，不直接参与交易决策，后续状态都交给应用服务统一处理。
     stock_codes = resolve_stock_codes(config, args.stocks)
     if not stock_codes:
         logger.error("No stock codes configured. Set STOCK_LIST or pass --stocks.")
         return 1
-
-    if not getattr(config, "agent_enabled", False):
-        logger.warning("AGENT_ENABLED is false; running agent CLI anyway because explicit entrypoint was used.")
 
     service = AgentService(config=config)
 
@@ -119,9 +112,8 @@ def main() -> int:
                 stock_codes,
                 interval_minutes=interval_minutes,
                 max_cycles=args.max_cycles,
-                notify_enabled=args.notify,
             )
-        return run_once(service, stock_codes, notify_enabled=args.notify)
+        return run_once(service, stock_codes)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         return 130

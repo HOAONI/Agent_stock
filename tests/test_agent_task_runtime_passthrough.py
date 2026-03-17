@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Task service runtime_config passthrough tests."""
+"""任务服务的 `runtime_config` 透传测试。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 from agent_stock.services.agent_task_service import AgentTaskService
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class _FakeRunResult:
@@ -51,7 +51,6 @@ class _CaptureAgentService:
         *,
         account_name=None,
         request_id=None,
-        notify_enabled=None,
         write_reports=None,
         runtime_config=None,
     ):

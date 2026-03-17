@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Middlewares for Agent API."""
+"""Agent API 的中间件集合。"""

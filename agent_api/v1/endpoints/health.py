@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Health endpoints for Agent API."""
+"""Agent API 的健康检查接口。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ router = APIRouter()
 
 @router.get("/live", response_model=HealthResponse, summary="Liveness probe")
 def liveness() -> HealthResponse:
-    """Liveness probe for container orchestrators."""
+    """供容器编排器使用的存活探针。"""
     return HealthResponse(
         status="ok",
         timestamp=datetime.utcnow().isoformat(),
@@ -26,7 +26,7 @@ def liveness() -> HealthResponse:
 
 @router.get("/ready", response_model=HealthResponse, summary="Readiness probe")
 def readiness(task_service: AgentTaskService = Depends(get_task_service_dep)) -> HealthResponse:
-    """Readiness probe validating DB connectivity."""
+    """用于校验数据库连接的就绪探针。"""
     if not task_service.db.ping():
         raise HTTPException(
             status_code=503,

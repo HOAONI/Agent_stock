@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Internal Backtrader-like runtime service built on paper ledger tables."""
+"""基于本地账本表实现的模拟交易运行时服务。"""
 
 from __future__ import annotations
 
@@ -18,12 +18,14 @@ from data_provider.base import canonical_stock_code, normalize_stock_code
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
+    """将任意值安全转换为字典，不可转换时返回空字典。"""
     if isinstance(value, dict):
         return value
     return {}
 
 
 def _as_positive_float(value: Any) -> Optional[float]:
+    """将输入解析为大于 0 的浮点数。"""
     try:
         num = float(value)
     except Exception:
@@ -34,6 +36,7 @@ def _as_positive_float(value: Any) -> Optional[float]:
 
 
 def _as_non_negative_float(value: Any) -> Optional[float]:
+    """将输入解析为大于等于 0 的浮点数。"""
     try:
         num = float(value)
     except Exception:
@@ -44,6 +47,7 @@ def _as_non_negative_float(value: Any) -> Optional[float]:
 
 
 def _extract_price(quote: Any) -> Optional[float]:
+    """从字典或对象形式的实时行情中提取价格。"""
     if quote is None:
         return None
     if isinstance(quote, dict):
@@ -57,7 +61,7 @@ def _extract_price(quote: Any) -> Optional[float]:
 
 
 class BacktraderRuntimeService:
-    """Serve local simulation account operations for Backend_stock."""
+    """为 Backend_stock 提供本地模拟账户的运行时操作。"""
 
     def __init__(
         self,
@@ -65,6 +69,7 @@ class BacktraderRuntimeService:
         db_manager: Optional[DatabaseManager] = None,
         fetcher_manager: Optional[DataFetcherManager] = None,
     ):
+        """初始化仓储、数据库和默认交易参数。"""
         self.repo = repo or ExecutionRepository()
         self.db = db_manager or DatabaseManager.get_instance()
         self.fetcher = fetcher_manager or DataFetcherManager()
@@ -75,9 +80,11 @@ class BacktraderRuntimeService:
 
     @staticmethod
     def account_name_from_broker_id(broker_account_id: int) -> str:
+        """将 Backend 的 broker_account_id 映射为本地账户名。"""
         return f"bt-{int(broker_account_id)}"
 
     def _resolve_initial_capital(self, req: Dict[str, Any]) -> float:
+        """从多种兼容字段中解析初始资金。"""
         payload = _as_dict(req.get("payload"))
         credentials = _as_dict(req.get("credentials"))
         value = (
@@ -94,6 +101,7 @@ class BacktraderRuntimeService:
         return float(round(initial_capital, 2))
 
     def _resolve_commission_rate(self, req: Dict[str, Any]) -> float:
+        """解析手续费率，缺省时回退到服务默认值。"""
         payload = _as_dict(req.get("payload"))
         credentials = _as_dict(req.get("credentials"))
         value = (
@@ -107,6 +115,7 @@ class BacktraderRuntimeService:
         return float(rate if rate is not None else self.default_commission)
 
     def _resolve_slippage_bps(self, req: Dict[str, Any]) -> float:
+        """解析滑点基点数，缺省时回退到服务默认值。"""
         payload = _as_dict(req.get("payload"))
         credentials = _as_dict(req.get("credentials"))
         value = (
@@ -120,6 +129,7 @@ class BacktraderRuntimeService:
         return float(bps if bps is not None else self.default_slippage_bps)
 
     def _resolve_add_funds_amount(self, req: Dict[str, Any]) -> float:
+        """解析入金金额。"""
         payload = _as_dict(req.get("payload"))
         value = payload.get("amount") or req.get("amount")
         amount = _as_positive_float(value)
@@ -128,6 +138,7 @@ class BacktraderRuntimeService:
         return float(round(amount, 2))
 
     def _resolve_account(self, req: Dict[str, Any]) -> PaperAccount:
+        """按请求中的 broker_account_id 获取或创建本地账户。"""
         broker_account_id = int(req.get("broker_account_id") or 0)
         if broker_account_id <= 0:
             raise ValueError("broker_account_id must be >= 1")
@@ -136,6 +147,7 @@ class BacktraderRuntimeService:
         return self.repo.get_or_create_account(account_name, initial_capital)
 
     def _summary_payload(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """构造账户汇总响应，必要时先重算账户指标。"""
         broker_account_id = int(req.get("broker_account_id") or 0)
         account_name = self.account_name_from_broker_id(broker_account_id)
         snapshot = self.repo.recompute_account_metrics(account_name)
@@ -163,6 +175,7 @@ class BacktraderRuntimeService:
         }
 
     def provision_account(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """为请求中的账户准备本地模拟账户。"""
         account = self._resolve_account(req)
         return {
             "verified": True,
@@ -174,9 +187,11 @@ class BacktraderRuntimeService:
         }
 
     def get_account_summary(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """返回账户汇总信息。"""
         return self._summary_payload(req)
 
     def add_funds(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """向本地模拟账户追加资金。"""
         account = self._resolve_account(req)
         payload = _as_dict(req.get("payload"))
         amount = self._resolve_add_funds_amount(req)
@@ -196,6 +211,7 @@ class BacktraderRuntimeService:
         }
 
     def get_positions(self, req: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """读取账户当前持仓列表。"""
         broker_account_id = int(req.get("broker_account_id") or 0)
         account_name = self.account_name_from_broker_id(broker_account_id)
         snapshot = self.repo.recompute_account_metrics(account_name) or self.repo.get_account_snapshot(account_name)
@@ -218,6 +234,7 @@ class BacktraderRuntimeService:
         return items
 
     def get_orders(self, req: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """读取账户最近的订单记录。"""
         account = self._resolve_account(req)
         with self.db.get_session() as session:
             rows = session.execute(
@@ -243,6 +260,7 @@ class BacktraderRuntimeService:
         ]
 
     def get_trades(self, req: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """读取账户最近的成交记录。"""
         account = self._resolve_account(req)
         with self.db.get_session() as session:
             rows = session.execute(
@@ -268,6 +286,7 @@ class BacktraderRuntimeService:
         ]
 
     def _resolve_price(self, stock_code: str, req: Dict[str, Any], order_payload: Dict[str, Any]) -> float:
+        """优先使用显式价格；缺失时回退到实时行情。"""
         price = _as_positive_float(order_payload.get("price"))
         if price is not None:
             return price
@@ -283,6 +302,7 @@ class BacktraderRuntimeService:
         return float(quote_price)
 
     def place_order(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """在本地账本中模拟一次立即成交的市价单。"""
         account = self._resolve_account(req)
         order_payload = _as_dict(req.get("payload"))
         stock_code_raw = str(order_payload.get("stock_code") or "").strip()
@@ -302,6 +322,7 @@ class BacktraderRuntimeService:
         base_price = self._resolve_price(stock_code, req, order_payload)
         slippage_bps = self._resolve_slippage_bps(req)
         slip_ratio = slippage_bps / 10000.0
+        # 统一在撮合价上施加滑点，确保和回测侧成本模型一致。
         fill_price = base_price * (1.0 + slip_ratio) if side == "buy" else max(0.01, base_price * (1.0 - slip_ratio))
         fill_price = float(round(fill_price, 4))
 
@@ -320,6 +341,7 @@ class BacktraderRuntimeService:
         }
 
         if side == "buy":
+            # 本地模拟账户按资金足额校验买入，不做融资融券。
             if cash + 1e-6 < gross_amount + fee:
                 return {
                     "order_id": None,
@@ -334,6 +356,7 @@ class BacktraderRuntimeService:
                     "message": "可用资金不足",
                 }
         else:
+            # 卖出必须校验可用持仓，避免把总持仓误当成 T+0 可卖数量。
             available_qty = pos_map.get(stock_code, 0)
             if available_qty < qty:
                 return {
@@ -385,6 +408,7 @@ class BacktraderRuntimeService:
         }
 
     def cancel_order(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        """尝试取消未成交的本地模拟订单。"""
         account = self._resolve_account(req)
         payload = _as_dict(req.get("payload"))
         order_id_raw = str(payload.get("order_id") or "").strip()
@@ -439,6 +463,7 @@ _backtrader_runtime_service: Optional[BacktraderRuntimeService] = None
 
 
 def get_backtrader_runtime_service() -> BacktraderRuntimeService:
+    """返回运行时服务单例。"""
     global _backtrader_runtime_service
     if _backtrader_runtime_service is None:
         _backtrader_runtime_service = BacktraderRuntimeService()

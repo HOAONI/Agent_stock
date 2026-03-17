@@ -1,26 +1,10 @@
 # -*- coding: utf-8 -*-
-"""
-===================================
-AkshareFetcher - 主数据源 (Priority 1)
-===================================
+"""AkShare 主数据源实现。
 
-数据来源：
-1. 东方财富爬虫（通过 akshare 库） - 默认数据源
-2. 新浪财经接口 - 备选数据源
-3. 腾讯财经接口 - 备选数据源
-
-特点：免费、无需 Token、数据全面
-风险：爬虫机制易被反爬封禁
-
-防封禁策略：
-1. 每次请求前随机休眠 2-5 秒
-2. 随机轮换 User-Agent
-3. 使用 tenacity 实现指数退避重试
-4. 熔断器机制：连续失败后自动冷却
-
-增强数据：
-- 实时行情：量比、换手率、市盈率、市净率、总市值、流通市值
-- 筹码分布：获利比例、平均成本、筹码集中度
+这个抓取器承担了 A 股和部分港股场景下的大部分默认请求，因此注释重点放在：
+1. 如何做反爬和节流
+2. 如何在东财/新浪/腾讯之间切换
+3. 如何把各家接口的原始字段规整成统一行情结构
 """
 
 import logging
@@ -41,7 +25,7 @@ from tenacity import (
 )
 
 from patch.eastmoney_patch import eastmoney_patch
-from src.config import get_config
+from agent_stock.config import get_config
 from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS
 from .realtime_types import (
     UnifiedRealtimeQuote, ChipDistribution, RealtimeSource,
@@ -58,7 +42,7 @@ RealtimeQuote = UnifiedRealtimeQuote
 logger = logging.getLogger(__name__)
 
 
-# User-Agent 池，用于随机轮换
+# 请求伪装时使用的 User-Agent 池，用于降低高频抓取被识别的概率。
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -68,18 +52,15 @@ USER_AGENTS = [
 ]
 
 
-# 缓存实时行情数据（避免重复请求）
-# TTL 设为 20 分钟 (1200秒)：
-# - 批量分析场景：通常 30 只股票在 5 分钟内分析完，20 分钟足够覆盖
-# - 实时性要求：股票分析不需要秒级实时数据，20 分钟延迟可接受
-# - 防封禁：减少 API 调用频率
+# 缓存实时行情数据，核心目的是降低重复访问东财接口的频率。
+# TTL 设为 20 分钟，是在“实时性可接受”和“反爬压力可控”之间取折中。
 _realtime_cache: Dict[str, Any] = {
     'data': None,
     'timestamp': 0,
     'ttl': 1200  # 20分钟缓存有效期
 }
 
-# ETF 实时行情缓存
+# ETF 与股票接口不同，单独维护缓存，避免两个数据口径互相污染。
 _etf_realtime_cache: Dict[str, Any] = {
     'data': None,
     'timestamp': 0,
@@ -95,10 +76,10 @@ def _is_etf_code(stock_code: str) -> bool:
     - 上交所 ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
     - 深交所 ETF: 15xxxx, 16xxxx, 18xxxx
     
-    Args:
+    参数：
         stock_code: 股票/基金代码
         
-    Returns:
+    返回：
         True 表示是 ETF 代码，False 表示是普通股票代码
     """
     etf_prefixes = ('51', '52', '56', '58', '15', '16', '18')
@@ -114,10 +95,10 @@ def _is_hk_code(stock_code: str) -> bool:
     - 5位数字代码，如 '00700' (腾讯控股)
     - 部分港股代码可能带有前缀，如 'hk00700', 'hk1810'
 
-    Args:
+    参数：
         stock_code: 股票代码
 
-    Returns:
+    返回：
         True 表示是港股代码，False 表示不是港股代码
     """
     # 去除可能的 'hk' 前缀并检查是否为纯数字
@@ -136,13 +117,13 @@ def _is_us_code(stock_code: str) -> bool:
 
     委托给 us_index_mapping 模块的 is_us_stock_code()。
 
-    Args:
+    参数：
         stock_code: 股票代码
 
-    Returns:
+    返回：
         True 表示是美股代码，False 表示不是美股代码
 
-    Examples:
+    示例：
         >>> _is_us_code('AAPL')
         True
         >>> _is_us_code('TSLA')
@@ -159,13 +140,10 @@ class AkshareFetcher(BaseFetcher):
     """
     Akshare 数据源实现
     
-    优先级：1（最高）
-    数据来源：东方财富网爬虫
-    
-    关键策略：
-    - 每次请求前随机休眠 2.0-5.0 秒
-    - 随机 User-Agent 轮换
-    - 失败后指数退避重试（最多3次）
+    优先级：1（默认主数据源）。
+
+    和其他抓取器相比，它的优势是免费、字段全、覆盖面广；代价是更容易受反爬影响。
+    因此这里既有数据转换逻辑，也有较多节流、重试和熔断处理。
     """
     
     name = "AkshareFetcher"
@@ -175,14 +153,14 @@ class AkshareFetcher(BaseFetcher):
         """
         初始化 AkshareFetcher
         
-        Args:
+        参数：
             sleep_min: 最小休眠时间（秒）
             sleep_max: 最大休眠时间（秒）
         """
         self.sleep_min = sleep_min
         self.sleep_max = sleep_max
         self._last_request_time: Optional[float] = None
-        # 东财补丁开启才执行打补丁操作
+        # 只有在配置显式开启时才接管 requests，避免对别的第三方请求造成副作用。
         if get_config().enable_eastmoney_patch:
             eastmoney_patch()
     
@@ -190,8 +168,9 @@ class AkshareFetcher(BaseFetcher):
         """
         设置随机 User-Agent
         
-        通过修改 requests Session 的 headers 实现
-        这是关键的反爬策略之一
+        通过修改 requests 相关行为实现。
+
+        这是整个抓取器的关键防封禁手段之一，但不会改变对外暴露的数据结构。
         """
         try:
             import akshare as ak
@@ -437,12 +416,12 @@ class AkshareFetcher(BaseFetcher):
         
         数据来源：ak.fund_etf_hist_em()
         
-        Args:
+        参数：
             stock_code: ETF 代码，如 '512400', '159883'
             start_date: 开始日期，格式 'YYYY-MM-DD'
             end_date: 结束日期，格式 'YYYY-MM-DD'
             
-        Returns:
+        返回：
             ETF 历史数据 DataFrame
         """
         import akshare as ak
@@ -498,12 +477,12 @@ class AkshareFetcher(BaseFetcher):
         
         数据来源：ak.stock_us_daily()（新浪财经接口）
         
-        Args:
+        参数：
             stock_code: 美股代码，如 'AMD', 'AAPL', 'TSLA'
             start_date: 开始日期，格式 'YYYY-MM-DD'
             end_date: 结束日期，格式 'YYYY-MM-DD'
             
-        Returns:
+        返回：
             美股历史数据 DataFrame
         """
         import akshare as ak
@@ -593,12 +572,12 @@ class AkshareFetcher(BaseFetcher):
         
         数据来源：ak.stock_hk_hist()
         
-        Args:
+        参数：
             stock_code: 港股代码，如 '00700', '01810'
             start_date: 开始日期，格式 'YYYY-MM-DD'
             end_date: 结束日期，格式 'YYYY-MM-DD'
             
-        Returns:
+        返回：
             港股历史数据 DataFrame
         """
         import akshare as ak
@@ -697,11 +676,11 @@ class AkshareFetcher(BaseFetcher):
         2. sina: 新浪财经（akshare ak.stock_zh_a_spot）- 轻量级，基本行情
         3. tencent: 腾讯直连接口 - 单股票查询，负载小
 
-        Args:
+        参数：
             stock_code: 股票/ETF代码
             source: 数据源类型，可选 "em", "sina", "tencent"
 
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
         # 检查熔断器状态
@@ -1033,10 +1012,10 @@ class AkshareFetcher(BaseFetcher):
         数据来源：ak.fund_etf_spot_em()
         包含：最新价、涨跌幅、成交量、成交额、换手率等
         
-        Args:
+        参数：
             stock_code: ETF 代码
             
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
         import akshare as ak
@@ -1132,10 +1111,10 @@ class AkshareFetcher(BaseFetcher):
         数据来源：ak.stock_hk_spot_em()
         包含：最新价、涨跌幅、成交量、成交额等
         
-        Args:
+        参数：
             stock_code: 港股代码
             
-        Returns:
+        返回：
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
         import akshare as ak
@@ -1208,10 +1187,10 @@ class AkshareFetcher(BaseFetcher):
         
         注意：ETF/指数没有筹码分布数据，会直接返回 None
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             ChipDistribution 对象（最新一天的数据），获取失败返回 None
         """
         import akshare as ak
@@ -1276,11 +1255,11 @@ class AkshareFetcher(BaseFetcher):
         """
         获取增强数据（历史K线 + 实时行情 + 筹码分布）
         
-        Args:
+        参数：
             stock_code: 股票代码
             days: 历史数据天数
             
-        Returns:
+        返回：
             包含所有数据的字典
         """
         result = {

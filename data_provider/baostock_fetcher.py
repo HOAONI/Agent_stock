@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-BaostockFetcher - 备用数据源 2 (Priority 3)
+BaostockFetcher - 备用数据源 2（优先级 3）
 ===================================
 
 数据来源：证券宝（Baostock）
@@ -130,10 +130,10 @@ class BaostockFetcher(BaseFetcher):
         - 沪市：sh.600519
         - 深市：sz.000001
         
-        Args:
+        参数：
             stock_code: 原始代码，如 '600519', '000001'
             
-        Returns:
+        返回：
             Baostock 格式代码，如 'sh.600519', 'sz.000001'
         """
         code = stock_code.strip()
@@ -145,7 +145,7 @@ class BaostockFetcher(BaseFetcher):
         # 去除可能的后缀
         code = code.replace('.SH', '').replace('.SZ', '').replace('.sh', '').replace('.sz', '')
         
-        # ETF: Shanghai ETF (51xx, 52xx, 56xx, 58xx) -> sh; Shenzhen ETF (15xx, 16xx, 18xx) -> sz
+        # ETF 根据代码前缀映射交易所：上交所走 `sh.`，深交所走 `sz.`。
         if len(code) == 6:
             if code.startswith(('51', '52', '56', '58')):
                 return f"sh.{code}"
@@ -263,10 +263,10 @@ class BaostockFetcher(BaseFetcher):
         
         使用 Baostock 的 query_stock_basic 接口获取股票基本信息
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             股票名称，失败返回 None
         """
         # 检查缓存
@@ -310,7 +310,7 @@ class BaostockFetcher(BaseFetcher):
         
         使用 Baostock 的 query_stock_basic 接口获取全部股票列表
         
-        Returns:
+        返回：
             包含 code, name 列的 DataFrame，失败返回 None
         """
         try:

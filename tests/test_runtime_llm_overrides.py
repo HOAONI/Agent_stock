@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for request-scoped runtime LLM overrides."""
+"""请求级运行时 LLM 覆盖项单元测试。"""
 
 from __future__ import annotations
 
 import unittest
 
-from src.config import Config, RuntimeLlmConfig
+from agent_stock.config import Config, RuntimeLlmConfig
 
 
 class RuntimeLlmOverrideTestCase(unittest.TestCase):

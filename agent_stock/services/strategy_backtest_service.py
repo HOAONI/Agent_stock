@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Date-range strategy backtest service based on backtrader."""
+"""模板化区间策略回测服务。
+
+与 `agent_historical_backtest_service` 不同，这里更偏向策略模板回放：给定一段区间、
+一组策略模板和参数，输出标准化的权益曲线、成交记录和绩效指标。
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ try:
 except Exception:  # pragma: no cover
     bt = None
 
+# 兼容旧接口仍在使用的策略编码，进入服务后会统一映射为新的模板编码。
 LEGACY_STRATEGY_CODES = ["ma20_trend", "rsi14_mean_reversion"]
 LEGACY_STRATEGY_NAMES: Dict[str, str] = {
     "ma20_trend": "MA20 Trend",
@@ -50,6 +55,8 @@ WARMUP_CALENDAR_DAYS = 120
 
 @dataclass(frozen=True)
 class StrategyRunParams:
+    """一次区间回测所需的基础运行参数。"""
+
     code: str
     start_date: date
     end_date: date
@@ -60,6 +67,8 @@ class StrategyRunParams:
 
 @dataclass(frozen=True)
 class StrategyDefinition:
+    """归一化后的策略模板定义。"""
+
     strategy_id: Optional[int]
     strategy_name: str
     template_code: str
@@ -68,12 +77,13 @@ class StrategyDefinition:
 
 
 class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
-    """Common tracking for deterministic strategy output."""
+    """为策略回测输出提供统一跟踪能力。"""
 
     params = dict(initial_capital=100000.0, trade_start=None, trade_end=None)
     _BUY_RATIOS: tuple[float, ...] = (0.95, 0.85, 0.75, 0.65)
 
     def __init__(self):  # type: ignore[override]
+        """初始化订单状态、权益曲线和成交记录缓存。"""
         self.pending_order = None
         self.pending_exit_reason = None
         self.current_entry = None
@@ -85,12 +95,14 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         self._buy_ratio_index = 0
 
     def _next_open_price(self) -> float:
+        """读取下一次下单参考价，优先开盘价。"""
         value = float(self.data.open[0])
         if not math.isfinite(value) or value <= 0:
             value = float(self.data.close[0])
         return max(0.01, value)
 
     def _track_equity(self) -> None:
+        """在交易窗口内记录每日权益。"""
         if not self._is_in_trade_window():
             return
         current_date = bt.num2date(self.data.datetime[0]).date().isoformat()
@@ -102,9 +114,11 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         )
 
     def _current_trade_day(self) -> date:
+        """返回当前 bar 对应的交易日。"""
         return bt.num2date(self.data.datetime[0]).date()
 
     def _trade_window_bounds(self) -> tuple[Optional[date], Optional[date]]:
+        """解析策略参数中的交易窗口起止日期。"""
         trade_start = getattr(self.p, "trade_start", None)
         trade_end = getattr(self.p, "trade_end", None)
         if isinstance(trade_start, datetime):
@@ -117,6 +131,7 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         )
 
     def _is_in_trade_window(self) -> bool:
+        """判断当前 bar 是否落在允许交易的窗口内。"""
         day = self._current_trade_day()
         trade_start, trade_end = self._trade_window_bounds()
         if trade_start is not None and day < trade_start:
@@ -126,12 +141,14 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         return True
 
     def _is_window_start_bar(self) -> bool:
+        """判断当前是否为交易窗口首日。"""
         trade_start, _ = self._trade_window_bounds()
         if trade_start is None:
             return False
         return self._current_trade_day() == trade_start
 
     def _estimate_order_unit_cost(self, open_price: float) -> float:
+        """估算单股买入成本，计入手续费与滑点。"""
         commission_rate = 0.0
         try:
             commission_info = self.broker.getcommissioninfo(self.data)
@@ -147,6 +164,7 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         return estimated
 
     def _submit_full_position_buy(self) -> None:
+        """按当前可用资金尽量满仓买入。"""
         if self._buy_ratio_index >= len(self._BUY_RATIOS):
             return
 
@@ -162,27 +180,33 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
             self.pending_order = self.buy(size=size)
 
     def _submit_full_position_sell(self, reason: str) -> None:
+        """按给定原因提交全仓卖出订单。"""
         if not self.position:
             return
         self.pending_exit_reason = reason
         self.pending_order = self.sell(size=self.position.size)
 
     def _should_force_window_end_close(self) -> bool:
+        """判断是否需要在窗口最后一根 bar 强制平仓。"""
         if not self._is_in_trade_window():
             return False
         last_close_trigger_index = max(1, int(self.data.buflen()) - 1)
         return len(self.data) >= last_close_trigger_index
 
     def _should_buy(self) -> bool:
+        """由子类实现具体入场信号。"""
         raise NotImplementedError
 
     def _should_sell(self) -> bool:
+        """由子类实现具体离场信号。"""
         raise NotImplementedError
 
     def _signal_exit_reason(self) -> str:
+        """返回策略信号离场时的原因编码。"""
         return "signal_exit"
 
     def next(self):  # type: ignore[override]
+        """驱动每根 bar 上的策略执行逻辑。"""
         self._track_equity()
 
         if self.pending_order is not None:
@@ -203,11 +227,12 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
             return
 
         if self._should_force_window_end_close():
-            # last bar safeguard
+            # 到窗口末尾还未离场时，强制平仓，避免收益落在窗口外。
             self.pending_exit_reason = "window_end"
             self.pending_order = self.close(exectype=bt.Order.Close)
 
     def notify_order(self, order):  # type: ignore[override]
+        """在订单状态变化时记录成交与失败信息。"""
         if order.status in [order.Submitted, order.Accepted]:
             return
 
@@ -270,11 +295,12 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
 
 
 class _MACrossStrategy(_BaseTrackedStrategy):
-    """Moving-average cross strategy with configurable window."""
+    """可配置均线窗口的均线穿越策略。"""
 
     params = dict(initial_capital=100000.0, trade_start=None, trade_end=None, ma_window=20)
 
     def __init__(self):  # type: ignore[override]
+        """初始化均线指标与上下穿信号。"""
         super().__init__()
         self.ma_window = max(5, int(getattr(self.p, "ma_window", 20) or 20))
         self.moving_average = bt.indicators.SimpleMovingAverage(self.data.close, period=self.ma_window)
@@ -282,6 +308,7 @@ class _MACrossStrategy(_BaseTrackedStrategy):
         self.cross_down = bt.indicators.CrossDown(self.data.close, self.moving_average)
 
     def _should_buy(self) -> bool:
+        """判断是否满足均线上穿买入条件。"""
         if len(self) < self.ma_window:
             return False
 
@@ -296,14 +323,16 @@ class _MACrossStrategy(_BaseTrackedStrategy):
         return len(self) >= self.ma_window + 1 and float(self.cross_up[0]) > 0
 
     def _should_sell(self) -> bool:
+        """判断是否满足均线下穿卖出条件。"""
         return len(self) >= self.ma_window + 1 and float(self.cross_down[0]) > 0
 
     def _signal_exit_reason(self) -> str:
+        """返回均线策略离场原因。"""
         return f"ma{self.ma_window}_cross_down"
 
 
 class _RSIThresholdStrategy(_BaseTrackedStrategy):
-    """RSI threshold strategy with configurable period and thresholds."""
+    """可配置周期和阈值的 RSI 策略。"""
 
     params = dict(
         initial_capital=100000.0,
@@ -315,6 +344,7 @@ class _RSIThresholdStrategy(_BaseTrackedStrategy):
     )
 
     def __init__(self):  # type: ignore[override]
+        """初始化 RSI 指标与阈值配置。"""
         super().__init__()
         self.rsi_period = max(5, int(getattr(self.p, "rsi_period", 14) or 14))
         self.oversold_threshold = float(getattr(self.p, "oversold_threshold", 30) or 30)
@@ -322,34 +352,40 @@ class _RSIThresholdStrategy(_BaseTrackedStrategy):
         self.rsi = bt.indicators.RSI_Safe(self.data.close, period=self.rsi_period)
 
     def _should_buy(self) -> bool:
+        """判断是否满足 RSI 超卖买入条件。"""
         if len(self) < self.rsi_period + 1:
             return False
         value = float(self.rsi[0])
         return math.isfinite(value) and value < self.oversold_threshold
 
     def _should_sell(self) -> bool:
+        """判断是否满足 RSI 超买卖出条件。"""
         if len(self) < self.rsi_period + 1:
             return False
         value = float(self.rsi[0])
         return math.isfinite(value) and value > self.overbought_threshold
 
     def _signal_exit_reason(self) -> str:
+        """返回 RSI 策略离场原因。"""
         return f"rsi_gt_{int(self.overbought_threshold)}"
 
 
 class StrategyBacktestService:
-    """Run MA20/RSI14 date-range backtests with strict backtrader dependency."""
+    """执行模板化策略的区间回测，并输出标准指标。"""
 
     def __init__(self, fetcher_manager: Optional[DataFetcherManager] = None):
+        """初始化数据获取器。"""
         self.fetcher = fetcher_manager or DataFetcherManager()
 
     @staticmethod
     def _round(value: float, digits: int = 4) -> float:
+        """按传统四舍五入方式保留小数位。"""
         factor = 10 ** digits
         return math.floor(value * factor + 0.5) / factor
 
     @staticmethod
     def _to_date(value: Any) -> Optional[date]:
+        """将输入安全解析为日期。"""
         if value is None:
             return None
         if isinstance(value, date) and not isinstance(value, datetime):
@@ -366,6 +402,7 @@ class StrategyBacktestService:
 
     @staticmethod
     def _to_float(value: Any, fallback: float) -> float:
+        """将输入解析为浮点数，失败时回退到默认值。"""
         try:
             number = float(value)
         except Exception:
@@ -376,11 +413,13 @@ class StrategyBacktestService:
 
     @staticmethod
     def _normalize_code(raw: Any) -> str:
+        """规范化股票代码格式。"""
         code = canonical_stock_code(str(raw or ""))
         return normalize_stock_code(code)
 
     @staticmethod
     def _normalize_template_params(template_code: str, raw_params: Any) -> Dict[str, float]:
+        """按模板类型归一化策略参数。"""
         source = raw_params if isinstance(raw_params, dict) else {}
 
         if template_code == "ma_cross":
@@ -414,6 +453,7 @@ class StrategyBacktestService:
         raise ValueError(f"validation_error: unsupported template_code={template_code}")
 
     def _normalize_strategy_definitions(self, payload: Dict[str, Any]) -> List[StrategyDefinition]:
+        """从新旧两种请求格式中解析策略定义。"""
         raw_strategies = payload.get("strategies")
         if isinstance(raw_strategies, list) and raw_strategies:
             definitions: List[StrategyDefinition] = []
@@ -469,6 +509,7 @@ class StrategyBacktestService:
         return definitions
 
     def _validate_params(self, payload: Dict[str, Any]) -> StrategyRunParams:
+        """校验回测请求并提取基础运行参数。"""
         if bt is None:
             raise ValueError("backtrader_not_available: install backtrader to run strategy backtest")
 
@@ -497,6 +538,7 @@ class StrategyBacktestService:
         )
 
     def _load_daily_frame(self, params: StrategyRunParams) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """加载行情数据，并拆分预热区间与交易区间。"""
         warmup_start = params.start_date - timedelta(days=WARMUP_CALENDAR_DAYS)
         frame, _ = self.fetcher.get_daily_data(
             params.code,
@@ -559,6 +601,7 @@ class StrategyBacktestService:
 
     @staticmethod
     def _compute_benchmark_equity(frame: pd.DataFrame, initial_capital: float) -> Dict[str, Any]:
+        """计算买入持有基准曲线。"""
         first_close = float(frame["close"].iloc[0])
         shares = int(initial_capital // first_close) if first_close > 0 else 0
         cash = initial_capital - shares * first_close
@@ -584,6 +627,7 @@ class StrategyBacktestService:
         benchmark_points: Iterable[Dict[str, Any]],
         initial_capital: float,
     ) -> List[Dict[str, Any]]:
+        """将策略权益曲线与基准曲线按交易日对齐。"""
         benchmark_rows = [
             {
                 "trade_date": str(point.get("trade_date") or ""),
@@ -621,6 +665,7 @@ class StrategyBacktestService:
 
     @staticmethod
     def _compute_sharpe(equity_points: List[Dict[str, Any]]) -> Optional[float]:
+        """根据权益点序列估算年化夏普比率。"""
         if len(equity_points) < 3:
             return None
 
@@ -651,6 +696,7 @@ class StrategyBacktestService:
         params: StrategyRunParams,
         benchmark: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """执行单个策略模板的回测，并输出标准结果。"""
         if strategy.template_code == "ma_cross":
             strategy_cls = _MACrossStrategy
             strategy_kwargs = {
@@ -688,8 +734,7 @@ class StrategyBacktestService:
                 slip_limit=True,
             )
 
-        # Run in step mode to avoid backtrader runonce short-sample index errors
-        # when indicator period is longer than available bars.
+        # 用逐步执行模式规避样本过短时的指标越界问题。
         result = cerebro.run(runonce=False)
         if not result:
             raise ValueError(f"backtest_failed: empty result for template={strategy.template_code}")
@@ -815,6 +860,7 @@ class StrategyBacktestService:
         }
 
     def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """执行区间策略回测入口。"""
         strategy_definitions = self._normalize_strategy_definitions(payload)
         params = self._validate_params(payload)
         frame, trade_window = self._load_daily_frame(params)
@@ -844,6 +890,7 @@ _strategy_backtest_service: Optional[StrategyBacktestService] = None
 
 
 def get_strategy_backtest_service() -> StrategyBacktestService:
+    """返回策略回测服务单例。"""
     global _strategy_backtest_service
     if _strategy_backtest_service is None:
         _strategy_backtest_service = StrategyBacktestService()

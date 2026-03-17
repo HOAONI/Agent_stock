@@ -35,10 +35,11 @@ DEFAULT_QUIET_LOGGERS = [
 
 def setup_logging(
     log_prefix: str = "app",
-    log_dir: str = "./logs",
+    log_dir: Optional[str] = "./logs",
     console_level: Optional[int] = None,
     debug: bool = False,
     extra_quiet_loggers: Optional[List[str]] = None,
+    write_files: bool = True,
 ) -> None:
     """
     统一的日志系统初始化
@@ -48,12 +49,13 @@ def setup_logging(
     2. 常规日志文件：INFO 级别，10MB 轮转，保留 5 个备份
     3. 调试日志文件：DEBUG 级别，50MB 轮转，保留 3 个备份
 
-    Args:
+    参数：
         log_prefix: 日志文件名前缀（如 "api_server" -> api_server_20240101.log）
-        log_dir: 日志文件目录，默认 ./logs
+        log_dir: 日志文件目录，默认。/logs
         console_level: 控制台日志级别（可选，优先于 debug 参数）
         debug: 是否启用调试模式（控制台输出 DEBUG 级别）
         extra_quiet_loggers: 额外需要降低日志级别的第三方库列表
+        write_files: 是否写入本地日志文件
     """
     # 确定控制台日志级别
     if console_level is not None:
@@ -61,50 +63,47 @@ def setup_logging(
     else:
         level = logging.DEBUG if debug else logging.INFO
 
-    # 创建日志目录
-    log_path = Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
-
-    # 日志文件路径（按日期分文件）
-    today_str = datetime.now().strftime('%Y%m%d')
-    log_file = log_path / f"{log_prefix}_{today_str}.log"
-    debug_log_file = log_path / f"{log_prefix}_debug_{today_str}.log"
-
-    # 配置根 logger
+    # 配置根日志记录器
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)  # 根 logger 设为 DEBUG，由 handler 控制输出级别
+    root_logger.setLevel(logging.DEBUG)  # 根日志记录器设为 DEBUG，由各 handler 控制输出级别
 
     # 清除已有 handler，避免重复添加
     if root_logger.handlers:
         root_logger.handlers.clear()
 
-    # Handler 1: 控制台输出
+    # 处理器 1：控制台输出
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
     console_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
     root_logger.addHandler(console_handler)
 
-    # Handler 2: 常规日志文件（INFO 级别，10MB 轮转）
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
-    root_logger.addHandler(file_handler)
+    if write_files and log_dir:
+        log_path = Path(log_dir)
+        log_path.mkdir(parents=True, exist_ok=True)
 
-    # Handler 3: 调试日志文件（DEBUG 级别，包含所有详细信息）
-    debug_handler = RotatingFileHandler(
-        debug_log_file,
-        maxBytes=50 * 1024 * 1024,  # 50MB
-        backupCount=3,
-        encoding='utf-8'
-    )
-    debug_handler.setLevel(logging.DEBUG)
-    debug_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
-    root_logger.addHandler(debug_handler)
+        today_str = datetime.now().strftime('%Y%m%d')
+        log_file = log_path / f"{log_prefix}_{today_str}.log"
+        debug_log_file = log_path / f"{log_prefix}_debug_{today_str}.log"
+
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=5,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+        root_logger.addHandler(file_handler)
+
+        debug_handler = RotatingFileHandler(
+            debug_log_file,
+            maxBytes=50 * 1024 * 1024,  # 50MB
+            backupCount=3,
+            encoding='utf-8'
+        )
+        debug_handler.setLevel(logging.DEBUG)
+        debug_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+        root_logger.addHandler(debug_handler)
 
     # 降低第三方库的日志级别
     quiet_loggers = DEFAULT_QUIET_LOGGERS.copy()
@@ -114,7 +113,7 @@ def setup_logging(
     for logger_name in quiet_loggers:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-    # 输出初始化完成信息
-    logging.info(f"日志系统初始化完成，日志目录: {log_path.absolute()}")
-    logging.info(f"常规日志: {log_file}")
-    logging.info(f"调试日志: {debug_log_file}")
+    if write_files and log_dir:
+        logging.info(f"日志系统初始化完成，日志目录: {Path(log_dir).absolute()}")
+    else:
+        logging.info("日志系统初始化完成，仅输出到控制台")

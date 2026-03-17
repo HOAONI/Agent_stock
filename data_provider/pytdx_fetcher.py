@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-PytdxFetcher - 通达信数据源 (Priority 2)
+PytdxFetcher - 通达信数据源（优先级 2）
 ===================================
 
 数据来源：通达信行情服务器（pytdx 库）
@@ -122,8 +122,8 @@ class PytdxFetcher(BaseFetcher):
         """
         初始化 PytdxFetcher
 
-        Args:
-            hosts: 服务器列表 [(host, port), ...]。若未传入，优先使用环境变量
+        参数：
+            hosts: 服务器列表 [(host, port),。..]。若未传入，优先使用环境变量
                    PYTDX_SERVERS（ip:port,ip:port）或 PYTDX_HOST+PYTDX_PORT，
                    否则使用内置 DEFAULT_HOSTS。
         """
@@ -209,10 +209,10 @@ class PytdxFetcher(BaseFetcher):
         - 0: 深圳
         - 1: 上海
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             (market, code) 元组
         """
         code = stock_code.strip()
@@ -331,10 +331,10 @@ class PytdxFetcher(BaseFetcher):
         """
         获取股票名称
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             股票名称，失败返回 None
         """
         # 先检查缓存
@@ -377,10 +377,10 @@ class PytdxFetcher(BaseFetcher):
         """
         获取实时行情
         
-        Args:
+        参数：
             stock_code: 股票代码
             
-        Returns:
+        返回：
             实时行情数据字典，失败返回 None
         """
         try:

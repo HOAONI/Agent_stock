@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Dependency providers for Agent API."""
+"""Agent API 的依赖注入提供器。"""
 
 from __future__ import annotations
 
@@ -13,34 +13,34 @@ from agent_stock.services.agent_historical_backtest_service import (
 from agent_stock.services.strategy_backtest_service import StrategyBacktestService, get_strategy_backtest_service
 from agent_stock.services.agent_task_service import AgentTaskService, get_agent_task_service
 from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
-from src.config import Config, get_config
+from agent_stock.config import Config, get_config
 
 
 def get_config_dep() -> Config:
-    """Get config singleton."""
+    """返回配置单例。"""
     return get_config()
 
 
 def get_task_service_dep(config: Config = Depends(get_config_dep)) -> AgentTaskService:
-    """Get task service singleton."""
+    """返回任务服务单例。"""
     return get_agent_task_service(config=config)
 
 
 def get_backtrader_runtime_service_dep() -> BacktraderRuntimeService:
-    """Get Backtrader runtime singleton."""
+    """返回本地模拟交易运行时服务单例。"""
     return get_backtrader_runtime_service()
 
 
 def get_backtest_service_dep() -> BacktestService:
-    """Get Backtest service singleton."""
+    """返回内部回测服务单例。"""
     return get_backtest_service()
 
 
 def get_strategy_backtest_service_dep() -> StrategyBacktestService:
-    """Get strategy date-range backtest service singleton."""
+    """返回区间策略回测服务单例。"""
     return get_strategy_backtest_service()
 
 
 def get_agent_historical_backtest_service_dep() -> AgentHistoricalBacktestService:
-    """Get agent historical replay backtest singleton."""
+    """返回 Agent 历史回放回测服务单例。"""
     return get_agent_historical_backtest_service()

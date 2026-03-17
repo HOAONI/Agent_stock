@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Runtime config validation tests for run endpoint."""
+"""运行端点的运行时配置校验测试。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from agent_api.app import create_app
 from agent_api.deps import get_task_service_dep
 from agent_stock.services.agent_task_service import reset_agent_task_service
 from agent_stock.storage import DatabaseManager
-from src.config import Config
+from agent_stock.config import Config
 
 
 class _NoopTaskService:
@@ -122,7 +122,7 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
         response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
         self.assertEqual(response.status_code, 200)
 
-    def test_broker_execution_is_rejected(self):
+    def test_broker_execution_is_accepted(self):
         payload = {
             "stock_codes": ["600519"],
             "async_mode": False,
@@ -131,6 +131,20 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
                     "mode": "broker",
                     "has_ticket": True,
                     "broker_account_id": 88,
+                }
+            },
+        }
+        response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
+        self.assertEqual(response.status_code, 200)
+
+    def test_broker_execution_requires_account_id(self):
+        payload = {
+            "stock_codes": ["600519"],
+            "async_mode": False,
+            "runtime_config": {
+                "execution": {
+                    "mode": "broker",
+                    "has_ticket": True,
                 }
             },
         }
