@@ -141,6 +141,41 @@ class BacktestInternalEnvelope(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class BacktestInterpretationDateRange(BaseModel):
+    """回测解释用的日期区间。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    start_date: str | None = Field(default=None, max_length=32)
+    end_date: str | None = Field(default=None, max_length=32)
+
+
+class BacktestInterpretationItemRequest(BaseModel):
+    """单条回测解释请求。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    item_key: str = Field(min_length=1, max_length=128)
+    item_type: Literal["strategy", "agent"] = "strategy"
+    label: str = Field(min_length=1, max_length=128)
+    code: str = Field(min_length=1, max_length=32)
+    requested_range: BacktestInterpretationDateRange = Field(default_factory=BacktestInterpretationDateRange)
+    effective_range: BacktestInterpretationDateRange = Field(default_factory=BacktestInterpretationDateRange)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    benchmark: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class BacktestInterpretRequest(BaseModel):
+    """批量回测解释请求。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    language: Literal["zh-CN"] = "zh-CN"
+    runtime_llm: RuntimeLlmRequest | None = None
+    items: list[BacktestInterpretationItemRequest] = Field(default_factory=list)
+
+
 class StrategyTemplateRunDefinition(BaseModel):
     """由 Backend 解析后的具体策略定义。"""
 

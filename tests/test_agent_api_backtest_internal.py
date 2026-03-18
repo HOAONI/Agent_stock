@@ -13,6 +13,7 @@ from agent_api.app import create_app
 from agent_api.deps import (
     get_agent_historical_backtest_service_dep,
     get_backtest_service_dep,
+    get_backtest_interpretation_service_dep,
     get_strategy_backtest_service_dep,
 )
 from agent_stock.services.agent_task_service import reset_agent_task_service
@@ -106,6 +107,23 @@ class _FakeAgentHistoricalBacktestService:
         }
 
 
+class _FakeBacktestInterpretationService:
+    def interpret(self, payload):
+        items = payload.get("items", [])
+        return {
+            "items": [
+                {
+                    "item_key": item.get("item_key"),
+                    "status": "ready",
+                    "verdict": "表现中等",
+                    "summary": f"{item.get('label')} 在样本区间内整体表现中等。",
+                    "error_message": None,
+                }
+                for item in items
+            ],
+        }
+
+
 class AgentApiBacktestInternalTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -119,6 +137,7 @@ class AgentApiBacktestInternalTestCase(unittest.TestCase):
 
         self.app = create_app()
         self.app.dependency_overrides[get_backtest_service_dep] = lambda: _FakeBacktestService()
+        self.app.dependency_overrides[get_backtest_interpretation_service_dep] = lambda: _FakeBacktestInterpretationService()
         self.app.dependency_overrides[get_strategy_backtest_service_dep] = lambda: _FakeStrategyBacktestService()
         self.app.dependency_overrides[get_agent_historical_backtest_service_dep] = lambda: _FakeAgentHistoricalBacktestService()
         self.client = TestClient(self.app)
@@ -198,6 +217,31 @@ class AgentApiBacktestInternalTestCase(unittest.TestCase):
         detail = response.json()["detail"]
         self.assertEqual(detail["error"], "validation_error")
         self.assertIn("compare_fetch_failed", detail["message"])
+
+    def test_internal_backtest_interpret_envelope(self):
+        response = self.client.post(
+            "/internal/v1/backtest/interpret",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "items": [
+                    {
+                        "item_key": "strategy-1",
+                        "item_type": "strategy",
+                        "label": "Fast MA",
+                        "code": "600519",
+                        "requested_range": {"start_date": "2024-01-01", "end_date": "2024-12-31"},
+                        "effective_range": {"start_date": "2024-01-02", "end_date": "2024-12-31"},
+                        "metrics": {"total_return_pct": 12.3},
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["data"]["items"][0]["item_key"], "strategy-1")
+        self.assertEqual(data["data"]["items"][0]["status"], "ready")
 
 
 if __name__ == "__main__":

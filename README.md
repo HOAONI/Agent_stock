@@ -38,7 +38,13 @@ cp .env.example .env
 启动服务：
 
 ```bash
-uvicorn agent_server:app --host 0.0.0.0 --port 8001
+bash scripts/system/start.sh
+```
+
+停止服务：
+
+```bash
+bash scripts/system/stop.sh
 ```
 
 单次运行：
@@ -51,6 +57,22 @@ python agent_main.py --mode once --stocks 600519
 
 ```bash
 python agent_main.py --mode realtime --stocks 600519,000001 --interval-minutes 5
+```
+
+本地服务脚本约定：
+
+- `scripts/system/start.sh` 会以仓库根目录的 `.env` 为准加载配置，并强制 `AGENT_SERVICE_MODE=true`
+- 脚本优先使用 `.venv/bin/python`，否则回退 `python3`
+- 服务日志与脚本输出写入 `logs/system/agent_service.out`
+- 运行中的 PID 记录在 `logs/system/agent_service.pid`
+- 重复执行 `start.sh` 不会启动第二个实例；重复执行 `stop.sh` 会安全返回“未运行”
+- 启动成功前会自动轮询 `GET /api/health/live` 与 `GET /api/health/ready`
+
+如需容器方式运行，请继续使用 Docker Compose；它是独立于本地脚本的容器模式入口：
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml down
 ```
 
 ## 主执行链路

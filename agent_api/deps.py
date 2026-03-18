@@ -10,6 +10,10 @@ from agent_stock.services.agent_historical_backtest_service import (
     AgentHistoricalBacktestService,
     get_agent_historical_backtest_service,
 )
+from agent_stock.services.backtest_interpretation_service import (
+    BacktestInterpretationService,
+    get_backtest_interpretation_service,
+)
 from agent_stock.services.strategy_backtest_service import StrategyBacktestService, get_strategy_backtest_service
 from agent_stock.services.agent_task_service import AgentTaskService, get_agent_task_service
 from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
@@ -34,6 +38,11 @@ def get_backtrader_runtime_service_dep() -> BacktraderRuntimeService:
 def get_backtest_service_dep() -> BacktestService:
     """返回内部回测服务单例。"""
     return get_backtest_service()
+
+
+def get_backtest_interpretation_service_dep() -> BacktestInterpretationService:
+    """返回回测自然语言解读服务单例。"""
+    return get_backtest_interpretation_service()
 
 
 def get_strategy_backtest_service_dep() -> StrategyBacktestService:

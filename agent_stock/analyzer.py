@@ -765,6 +765,28 @@ class GeminiAnalyzer:
             or self._openai_client is not None
         )
 
+    def generate_text(
+        self,
+        prompt: str,
+        *,
+        temperature: Optional[float] = None,
+        max_output_tokens: int = 4096,
+    ) -> str:
+        """执行一次通用文本生成，复用现有 provider 选路、重试与超时逻辑。"""
+        if not self.is_available():
+            raise ValueError("AI generation unavailable: no configured provider")
+
+        config = self._config
+        generation_config = {
+            "temperature": (
+                config.gemini_temperature
+                if temperature is None
+                else float(temperature)
+            ),
+            "max_output_tokens": max(128, int(max_output_tokens)),
+        }
+        return self._call_api_with_retry(prompt, generation_config)
+
     def _openai_provider_label(self) -> str:
         """根据 base_url 推断 OpenAI 兼容提供商名称。"""
         base_url = str(getattr(self._config, "openai_base_url", "") or "").strip().lower()

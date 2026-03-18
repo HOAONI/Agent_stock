@@ -8,11 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from agent_api.deps import (
     get_agent_historical_backtest_service_dep,
     get_backtest_service_dep,
+    get_backtest_interpretation_service_dep,
     get_strategy_backtest_service_dep,
 )
 from agent_api.v1.schemas.backtest import (
     AgentHistoricalRunRequest,
     BacktestCompareRequest,
+    BacktestInterpretRequest,
     BacktestCurvesRequest,
     BacktestDistributionRequest,
     BacktestInternalEnvelope,
@@ -22,6 +24,7 @@ from agent_api.v1.schemas.backtest import (
 )
 from agent_stock.services.agent_historical_backtest_service import AgentHistoricalBacktestService
 from agent_stock.services.backtest_service import BacktestService
+from agent_stock.services.backtest_interpretation_service import BacktestInterpretationService
 from agent_stock.services.strategy_backtest_service import StrategyBacktestService
 from agent_stock.config import redact_sensitive_text
 
@@ -102,6 +105,19 @@ def compare_backtest(
     """比较多种策略模板在不同窗口下的表现。"""
     try:
         data = service.compare(request.model_dump(exclude_none=True))
+        return BacktestInternalEnvelope(ok=True, data=data)
+    except Exception as exc:
+        raise _handle_error(exc) from exc
+
+
+@router.post("/interpret", response_model=BacktestInternalEnvelope)
+def interpret_backtest(
+    request: BacktestInterpretRequest,
+    service: BacktestInterpretationService = Depends(get_backtest_interpretation_service_dep),
+) -> BacktestInternalEnvelope:
+    """把结构化回测结果翻译成中文自然语言说明。"""
+    try:
+        data = service.interpret(request.model_dump(exclude_none=True))
         return BacktestInternalEnvelope(ok=True, data=data)
     except Exception as exc:
         raise _handle_error(exc) from exc
