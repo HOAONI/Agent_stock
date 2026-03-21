@@ -6,9 +6,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from agent_stock.config import (
+    ALLOWED_MARKET_SOURCES,
     AgentRuntimeConfig,
     RuntimeAccountConfig,
     RuntimeContextConfig,
+    RuntimeDataSourceConfig,
     RuntimeExecutionConfig,
     RuntimeLlmConfig,
     RuntimeStrategyConfig,
@@ -17,6 +19,7 @@ from agent_stock.config import (
 ALLOWED_LLM_PROVIDERS = ("gemini", "anthropic", "openai", "deepseek", "custom")
 ALLOWED_EXECUTION_MODES = ("paper", "broker")
 ALLOWED_EXECUTION_FIELDS = frozenset({"mode", "has_ticket", "broker_account_id"})
+ALLOWED_DATA_SOURCE_FIELDS = frozenset({"market_source"})
 ALLOWED_CONTEXT_FIELDS = frozenset({"account_snapshot", "summary", "positions"})
 
 
@@ -32,6 +35,7 @@ def parse_runtime_config(runtime_config: Optional[dict[str, Any]]) -> Optional[A
         llm=_parse_llm_config(runtime_config.get("llm")),
         strategy=_parse_strategy_config(runtime_config.get("strategy")),
         execution=_parse_execution_config(runtime_config.get("execution")),
+        data_source=_parse_data_source_config(runtime_config.get("data_source")),
         context=_parse_context_config(runtime_config.get("context")),
     )
 
@@ -154,6 +158,25 @@ def _parse_execution_config(execution_raw: Any) -> Optional[RuntimeExecutionConf
         has_ticket=bool(execution_raw.get("has_ticket")),
         broker_account_id=broker_account_id,
     )
+
+
+def _parse_data_source_config(data_source_raw: Any) -> Optional[RuntimeDataSourceConfig]:
+    """解析请求级行情源固定选择。"""
+    data_source_raw = _ensure_object("runtime_config.data_source", data_source_raw)
+    if data_source_raw is None:
+        return None
+
+    unknown_fields = set(data_source_raw.keys()) - ALLOWED_DATA_SOURCE_FIELDS
+    if unknown_fields:
+        field_list = ", ".join(sorted(unknown_fields))
+        raise ValueError(f"runtime_config.data_source contains unsupported fields: {field_list}")
+
+    market_source = str(data_source_raw.get("market_source") or "").strip().lower()
+    if market_source not in ALLOWED_MARKET_SOURCES:
+        allowed = "|".join(ALLOWED_MARKET_SOURCES)
+        raise ValueError(f"runtime_config.data_source.market_source must be one of {allowed}")
+
+    return RuntimeDataSourceConfig(market_source=market_source)
 
 
 def _parse_context_config(context_raw: Any) -> Optional[RuntimeContextConfig]:

@@ -29,6 +29,7 @@ class StockAnalysisPipeline:
         query_source: Optional[str] = None,
         save_context_snapshot: Optional[bool] = None,
         runtime_llm: Optional[RuntimeLlmConfig] = None,
+        runtime_market_source: Optional[str] = None,
     ) -> None:
         """初始化分析管线依赖。"""
         self.config = config or get_config()
@@ -39,6 +40,7 @@ class StockAnalysisPipeline:
         )
         self.db = get_db()
         self.fetcher_manager = DataFetcherManager()
+        self.runtime_market_source = str(runtime_market_source or "").strip().lower() or None
         self.trend_analyzer = StockTrendAnalyzer()
         self.analyzer = GeminiAnalyzer(config=self.config, runtime_llm=runtime_llm)
         self.search_service = SearchService(
@@ -63,7 +65,10 @@ class StockAnalysisPipeline:
 
             realtime_quote = None
             try:
-                realtime_quote = self.fetcher_manager.get_realtime_quote(code)
+                if self.runtime_market_source:
+                    realtime_quote = self.fetcher_manager.get_realtime_quote(code, fixed_source=self.runtime_market_source)
+                else:
+                    realtime_quote = self.fetcher_manager.get_realtime_quote(code)
                 if realtime_quote and getattr(realtime_quote, "name", None):
                     stock_name = realtime_quote.name
             except Exception as exc:
@@ -73,10 +78,11 @@ class StockAnalysisPipeline:
                 stock_name = f"股票{code}"
 
             chip_data = None
-            try:
-                chip_data = self.fetcher_manager.get_chip_distribution(code)
-            except Exception as exc:
-                logger.warning("[%s] chip distribution failed: %s", code, exc)
+            if self.runtime_market_source is None:
+                try:
+                    chip_data = self.fetcher_manager.get_chip_distribution(code)
+                except Exception as exc:
+                    logger.warning("[%s] chip distribution failed: %s", code, exc)
 
             trend_result = self._resolve_trend_result(code)
 

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # === 标准化列名定义 ===
 STANDARD_COLUMNS = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
+FIXED_MARKET_SOURCES = ('tencent', 'sina', 'efinance', 'eastmoney', 'tushare')
 
 
 def normalize_stock_code(stock_code: str) -> str:
@@ -400,13 +401,79 @@ class DataFetcherManager:
         """添加数据源并重新排序"""
         self._fetchers.append(fetcher)
         self._fetchers.sort(key=lambda f: f.priority)
+
+    @staticmethod
+    def _normalize_market_source(source: str) -> str:
+        normalized = str(source or "").strip().lower()
+        if normalized not in FIXED_MARKET_SOURCES:
+            allowed = ", ".join(FIXED_MARKET_SOURCES)
+            raise DataSourceUnavailableError(f"unsupported market source: {normalized or '<empty>'}. allowed={allowed}")
+        return normalized
+
+    def _find_fetcher(self, fetcher_name: str) -> Optional[BaseFetcher]:
+        for fetcher in self._fetchers:
+            if fetcher.name == fetcher_name:
+                return fetcher
+        return None
+
+    def _get_daily_data_fixed_source(
+        self,
+        stock_code: str,
+        *,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        days: int = 30,
+        fixed_source: str,
+    ) -> Tuple[pd.DataFrame, str]:
+        source = self._normalize_market_source(fixed_source)
+
+        if source == "efinance":
+            fetcher = self._find_fetcher("EfinanceFetcher")
+            if fetcher is None:
+                raise DataSourceUnavailableError("efinance fetcher is not available")
+            try:
+                df = fetcher.get_daily_data(stock_code=stock_code, start_date=start_date, end_date=end_date, days=days)
+            except Exception as exc:
+                raise DataSourceUnavailableError(f"efinance daily data failed: {exc}") from exc
+        elif source == "tushare":
+            from agent_stock.config import get_config
+
+            if not str(get_config().tushare_token or "").strip():
+                raise DataSourceUnavailableError("tushare is unavailable: TUSHARE_TOKEN is not configured")
+            fetcher = self._find_fetcher("TushareFetcher")
+            if fetcher is None:
+                raise DataSourceUnavailableError("tushare fetcher is not available")
+            try:
+                df = fetcher.get_daily_data(stock_code=stock_code, start_date=start_date, end_date=end_date, days=days)
+            except Exception as exc:
+                raise DataSourceUnavailableError(f"tushare daily data failed: {exc}") from exc
+        else:
+            fetcher = self._find_fetcher("AkshareFetcher")
+            if fetcher is None or not hasattr(fetcher, "get_daily_data_by_source"):
+                raise DataSourceUnavailableError("akshare fixed-source daily data is not available")
+            sub_source = "em" if source == "eastmoney" else source
+            try:
+                df = fetcher.get_daily_data_by_source(
+                    stock_code=stock_code,
+                    source=sub_source,
+                    start_date=start_date,
+                    end_date=end_date,
+                    days=days,
+                )
+            except Exception as exc:
+                raise DataSourceUnavailableError(f"{source} daily data failed: {exc}") from exc
+
+        if df is None or df.empty:
+            raise DataSourceUnavailableError(f"{source} daily data returned no rows for {stock_code}")
+        return df, source
     
     def get_daily_data(
         self, 
         stock_code: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        days: int = 30
+        days: int = 30,
+        fixed_source: Optional[str] = None,
     ) -> Tuple[pd.DataFrame, str]:
         """
         获取日线数据（自动切换数据源）
@@ -434,6 +501,15 @@ class DataFetcherManager:
 
         # 规范化代码（去掉 SH/SZ 前缀等）
         stock_code = normalize_stock_code(stock_code)
+
+        if fixed_source:
+            return self._get_daily_data_fixed_source(
+                stock_code,
+                start_date=start_date,
+                end_date=end_date,
+                days=days,
+                fixed_source=fixed_source,
+            )
 
         errors = []
 
@@ -568,8 +644,45 @@ class DataFetcherManager:
         except Exception as e:
             logger.error(f"[预取] 批量预取异常: {e}")
             return 0
-    
-    def get_realtime_quote(self, stock_code: str):
+
+    def _get_realtime_quote_fixed_source(self, stock_code: str, *, fixed_source: str):
+        source = self._normalize_market_source(fixed_source)
+
+        if source == "efinance":
+            fetcher = self._find_fetcher("EfinanceFetcher")
+            if fetcher is None or not hasattr(fetcher, "get_realtime_quote"):
+                raise DataSourceUnavailableError("efinance realtime fetcher is not available")
+            try:
+                quote = fetcher.get_realtime_quote(stock_code)
+            except Exception as exc:
+                raise DataSourceUnavailableError(f"efinance realtime quote failed: {exc}") from exc
+        elif source == "tushare":
+            from agent_stock.config import get_config
+
+            if not str(get_config().tushare_token or "").strip():
+                raise DataSourceUnavailableError("tushare is unavailable: TUSHARE_TOKEN is not configured")
+            fetcher = self._find_fetcher("TushareFetcher")
+            if fetcher is None or not hasattr(fetcher, "get_realtime_quote"):
+                raise DataSourceUnavailableError("tushare realtime fetcher is not available")
+            try:
+                quote = fetcher.get_realtime_quote(stock_code)
+            except Exception as exc:
+                raise DataSourceUnavailableError(f"tushare realtime quote failed: {exc}") from exc
+        else:
+            fetcher = self._find_fetcher("AkshareFetcher")
+            if fetcher is None or not hasattr(fetcher, "get_realtime_quote"):
+                raise DataSourceUnavailableError("akshare realtime fetcher is not available")
+            sub_source = "em" if source == "eastmoney" else source
+            try:
+                quote = fetcher.get_realtime_quote(stock_code, source=sub_source)
+            except Exception as exc:
+                raise DataSourceUnavailableError(f"{source} realtime quote failed: {exc}") from exc
+
+        if quote is None or not quote.has_basic_data():
+            raise DataSourceUnavailableError(f"{source} realtime quote returned no usable data for {stock_code}")
+        return quote
+
+    def get_realtime_quote(self, stock_code: str, fixed_source: Optional[str] = None):
         """
         获取实时行情数据（自动故障切换）
         
@@ -596,6 +709,9 @@ class DataFetcherManager:
         from agent_stock.config import get_config
 
         config = get_config()
+
+        if fixed_source:
+            return self._get_realtime_quote_fixed_source(stock_code, fixed_source=fixed_source)
 
         # 如果实时行情功能被禁用，直接返回 None
         if not config.enable_realtime_quote:

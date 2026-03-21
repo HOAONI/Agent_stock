@@ -273,6 +273,51 @@ class AkshareFetcher(BaseFetcher):
         # 所有都失败
         raise DataFetchError(f"Akshare 所有渠道获取失败: {last_error}")
 
+    def get_daily_data_by_source(
+        self,
+        stock_code: str,
+        *,
+        source: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        days: int = 30,
+    ) -> pd.DataFrame:
+        """
+        使用指定 Akshare 子通道获取历史行情，不做 EM/Sina/Tencent 之间的自动切换。
+
+        该入口服务于 Backend/Agent 的“固定行情源”模式，确保同一次请求中
+        的日线数据始终来自用户明确选中的单一来源。
+        """
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source not in {"em", "sina", "tencent"}:
+            raise DataFetchError(f"unsupported akshare source: {normalized_source or '<empty>'}")
+
+        if _is_us_code(stock_code) or _is_hk_code(stock_code) or _is_etf_code(stock_code):
+            raise DataFetchError(f"Akshare fixed source {normalized_source} only supports A-share stocks")
+
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        if start_date is None:
+            from datetime import timedelta
+
+            start_dt = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=days * 2)
+            start_date = start_dt.strftime("%Y-%m-%d")
+
+        if normalized_source == "em":
+            raw_df = self._fetch_stock_data_em(stock_code, start_date, end_date)
+        elif normalized_source == "sina":
+            raw_df = self._fetch_stock_data_sina(stock_code, start_date, end_date)
+        else:
+            raw_df = self._fetch_stock_data_tx(stock_code, start_date, end_date)
+
+        if raw_df is None or raw_df.empty:
+            raise DataFetchError(f"Akshare {normalized_source} returned no history data for {stock_code}")
+
+        df = self._normalize_data(raw_df, stock_code)
+        df = self._clean_data(df)
+        df = self._calculate_indicators(df)
+        return df
+
     def _fetch_stock_data_em(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取普通 A 股历史数据 (东方财富)

@@ -30,3 +30,19 @@ class RuntimeLlmDefaultResponse(BaseModel):
     model: str | None = None
     base_url: str | None = None
     has_token: bool = False
+
+
+class RuntimeMarketSourceOptionResponse(BaseModel):
+    """内部市场源候选项。"""
+
+    code: str
+    label: str
+    description: str
+    available: bool
+    reason: str | None = None
+
+
+class RuntimeMarketSourcesResponse(BaseModel):
+    """内部市场源候选列表。"""
+
+    options: list[RuntimeMarketSourceOptionResponse]

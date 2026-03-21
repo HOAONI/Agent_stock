@@ -14,6 +14,7 @@ from dotenv import dotenv_values, load_dotenv
 
 DEFAULT_STOCK_LIST = ["600519", "000001", "300750"]
 DEFAULT_REALTIME_SOURCE_PRIORITY = "tencent,akshare_sina,efinance,akshare_em"
+ALLOWED_MARKET_SOURCES = ("tencent", "sina", "efinance", "eastmoney", "tushare")
 ALLOWED_AGENT_RUN_MODES = {"once", "realtime"}
 ALLOWED_AI_REFRESH_POLICIES = {"daily_once", "always"}
 
@@ -150,6 +151,13 @@ class RuntimeExecutionConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeDataSourceConfig:
+    """请求级行情源覆盖配置。"""
+
+    market_source: str
+
+
+@dataclass(frozen=True)
 class RuntimeContextConfig:
     """请求级上游账户上下文。"""
 
@@ -166,6 +174,7 @@ class AgentRuntimeConfig:
     llm: Optional[RuntimeLlmConfig] = None
     strategy: Optional[RuntimeStrategyConfig] = None
     execution: Optional[RuntimeExecutionConfig] = None
+    data_source: Optional[RuntimeDataSourceConfig] = None
     context: Optional[RuntimeContextConfig] = None
 
 

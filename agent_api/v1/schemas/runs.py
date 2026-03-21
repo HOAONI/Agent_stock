@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_stock.config import ALLOWED_MARKET_SOURCES
 from agent_stock.runtime_config import ALLOWED_EXECUTION_MODES, ALLOWED_LLM_PROVIDERS
 
 
@@ -87,6 +88,14 @@ class RuntimeExecutionRequest(BaseModel):
         return self
 
 
+class RuntimeDataSourceRequest(BaseModel):
+    """请求级行情源配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    market_source: Literal[*ALLOWED_MARKET_SOURCES]
+
+
 class RuntimeContextRequest(BaseModel):
     """由 Backend 透传的请求级账户上下文。"""
 
@@ -106,6 +115,7 @@ class RuntimeConfigRequest(BaseModel):
     llm: RuntimeLlmRequest | None = None
     strategy: RuntimeStrategyRequest | None = None
     execution: RuntimeExecutionRequest | None = None
+    data_source: RuntimeDataSourceRequest | None = None
     context: RuntimeContextRequest | None = None
 
 

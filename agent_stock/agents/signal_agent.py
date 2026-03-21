@@ -131,12 +131,14 @@ class SignalAgent:
                 return None
 
         runtime_llm = runtime_config.llm if runtime_config else None
-        if runtime_llm is not None:
+        runtime_market_source = runtime_config.data_source.market_source if runtime_config and runtime_config.data_source else None
+        if runtime_llm is not None or runtime_market_source is not None:
             pipeline = StockAnalysisPipeline(
                 config=self.config,
                 query_id=uuid.uuid4().hex,
                 query_source="agent",
                 runtime_llm=runtime_llm,
+                runtime_market_source=runtime_market_source,
             )
         else:
             if self._pipeline is None:

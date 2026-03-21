@@ -20,6 +20,7 @@ from agent_api.v1.router import (
     internal_backtest_router,
     internal_backtrader_router,
     internal_runtime_router,
+    internal_stocks_router,
 )
 from agent_stock.services.agent_task_service import get_agent_task_service
 
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(internal_backtrader_router)
     app.include_router(internal_backtest_router)
     app.include_router(internal_runtime_router)
+    app.include_router(internal_stocks_router)
     return app
 
 

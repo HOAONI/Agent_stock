@@ -113,6 +113,9 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
                 "has_ticket": True,
                 "broker_account_id": 501,
             },
+            "data_source": {
+                "market_source": "sina",
+            },
         }
         payload_b = {
             "account": {
@@ -136,6 +139,9 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
                 "mode": "paper",
                 "has_ticket": False,
                 "broker_account_id": 502,
+            },
+            "data_source": {
+                "market_source": "efinance",
             },
         }
 
@@ -165,6 +171,13 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
             if item["runtime_config"] and item["runtime_config"].execution
         }
         self.assertEqual(execution_modes, {"paper"})
+
+        market_sources = {
+            item["runtime_config"].data_source.market_source
+            for item in self.capture_orchestrator.calls
+            if item["runtime_config"] and item["runtime_config"].data_source
+        }
+        self.assertEqual(market_sources, {"sina", "efinance"})
 
         # 确保请求级覆盖后，全局单例配置保持不变。
         self.assertEqual(self.service.config.openai_model, "gpt-env-default")

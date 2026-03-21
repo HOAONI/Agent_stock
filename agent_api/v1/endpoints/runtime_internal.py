@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from agent_api.v1.schemas.common import RuntimeLlmDefaultResponse
+from agent_api.deps import get_runtime_market_service_dep
+from agent_api.v1.schemas.common import RuntimeLlmDefaultResponse, RuntimeMarketSourcesResponse
 from agent_stock.config import get_config
+from agent_stock.services.runtime_market_service import RuntimeMarketService
 
 router = APIRouter()
 
@@ -25,3 +27,11 @@ def get_runtime_llm_default() -> RuntimeLlmDefaultResponse:
         base_url=resolved.base_url,
         has_token=resolved.has_token,
     )
+
+
+@router.get("/market-sources", response_model=RuntimeMarketSourcesResponse)
+def get_runtime_market_sources(
+    service: RuntimeMarketService = Depends(get_runtime_market_service_dep),
+) -> RuntimeMarketSourcesResponse:
+    """返回 Agent 当前支持的市场源候选列表与可用性。"""
+    return RuntimeMarketSourcesResponse(**service.get_market_source_options())

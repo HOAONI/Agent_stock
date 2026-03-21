@@ -133,12 +133,13 @@ class AgentOrchestrator:
 
         # 这份账户快照会在同一轮多股票执行过程中不断递推，模拟同一账户连续处理多只股票。
         per_stock: List[StockAgentResult] = []
+        fixed_market_source = runtime_config.data_source.market_source if runtime_config and runtime_config.data_source else None
 
         for raw_code in stock_codes:
             # 每只股票都走同一条四阶段链路，并把阶段快照写进最终运行结果。
             logger.info("[run:%s][%s] data stage start", run_id, raw_code)
             data_started = time.perf_counter()
-            data_out = self.data_agent.run(raw_code)
+            data_out = self.data_agent.run(raw_code, runtime_config=runtime_config)
             data_out.duration_ms = int((time.perf_counter() - data_started) * 1000)
             data_out.input = {"code": raw_code}
             data_out.output = {
@@ -154,6 +155,10 @@ class AgentOrchestrator:
                 data_out.duration_ms,
                 data_out.state.value,
             )
+            if fixed_market_source and data_out.state.value == "failed":
+                raise RuntimeError(
+                    f"[market_source_unavailable] {data_out.error_message or f'{fixed_market_source} data fetch failed'}"
+                )
 
             logger.info("[run:%s][%s] signal stage start", run_id, data_out.code)
             signal_started = time.perf_counter()

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from agent_api.app import create_app
 from agent_api.deps import get_task_service_dep
 from agent_stock.services.agent_task_service import reset_agent_task_service
+from agent_stock.services.runtime_market_service import reset_runtime_market_service
 from agent_stock.storage import DatabaseManager
 from agent_stock.config import Config
 
@@ -46,6 +47,7 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
         Config.reset_instance()
         DatabaseManager.reset_instance()
         reset_agent_task_service()
+        reset_runtime_market_service()
 
         self.app = create_app()
         self.app.dependency_overrides[get_task_service_dep] = lambda: _NoopTaskService()
@@ -55,6 +57,7 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
         self.client.close()
         self.app.dependency_overrides.clear()
         reset_agent_task_service()
+        reset_runtime_market_service()
         DatabaseManager.reset_instance()
         Config.reset_instance()
         self.temp_dir.cleanup()
@@ -192,6 +195,32 @@ class AgentRuntimeConfigValidationTestCase(unittest.TestCase):
         }
         response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
         self.assertEqual(response.status_code, 200)
+
+    def test_runtime_market_source_is_accepted(self):
+        payload = {
+            "stock_codes": ["600519"],
+            "async_mode": False,
+            "runtime_config": {
+                "data_source": {
+                    "market_source": "sina",
+                },
+            },
+        }
+        response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
+        self.assertEqual(response.status_code, 200)
+
+    def test_runtime_market_source_rejects_invalid_value(self):
+        payload = {
+            "stock_codes": ["600519"],
+            "async_mode": False,
+            "runtime_config": {
+                "data_source": {
+                    "market_source": "unknown-source",
+                },
+            },
+        }
+        response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

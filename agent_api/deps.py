@@ -17,6 +17,7 @@ from agent_stock.services.backtest_interpretation_service import (
 from agent_stock.services.strategy_backtest_service import StrategyBacktestService, get_strategy_backtest_service
 from agent_stock.services.agent_task_service import AgentTaskService, get_agent_task_service
 from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
+from agent_stock.services.runtime_market_service import RuntimeMarketService, get_runtime_market_service
 from agent_stock.config import Config, get_config
 
 
@@ -33,6 +34,11 @@ def get_task_service_dep(config: Config = Depends(get_config_dep)) -> AgentTaskS
 def get_backtrader_runtime_service_dep() -> BacktraderRuntimeService:
     """返回本地模拟交易运行时服务单例。"""
     return get_backtrader_runtime_service()
+
+
+def get_runtime_market_service_dep(config: Config = Depends(get_config_dep)) -> RuntimeMarketService:
+    """返回内部市场服务单例。"""
+    return get_runtime_market_service(config=config)
 
 
 def get_backtest_service_dep() -> BacktestService:

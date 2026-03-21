@@ -97,6 +97,9 @@ class AgentTaskRuntimePassthroughTestCase(unittest.TestCase):
                 "stop_loss_pct": 7,
                 "take_profit_pct": 12,
             },
+            "data_source": {
+                "market_source": "sina",
+            },
             "execution": {
                 "mode": "paper",
                 "has_ticket": False,
@@ -111,6 +114,7 @@ class AgentTaskRuntimePassthroughTestCase(unittest.TestCase):
         self.assertEqual(self.capture_service.calls[0]["account_name"], "user-sync")
         self.assertEqual(self.capture_service.calls[0]["request_id"], "req-sync-runtime")
         self.assertEqual(self.capture_service.calls[0]["runtime_config"]["strategy"]["position_max_pct"], 35)
+        self.assertEqual(self.capture_service.calls[0]["runtime_config"]["data_source"]["market_source"], "sina")
         self.assertEqual(self.capture_service.calls[0]["runtime_config"]["execution"]["mode"], "paper")
 
     def test_async_worker_runtime_config_passthrough(self):
@@ -131,6 +135,9 @@ class AgentTaskRuntimePassthroughTestCase(unittest.TestCase):
                 "position_max_pct": 25,
                 "stop_loss_pct": 6,
                 "take_profit_pct": 10,
+            },
+            "data_source": {
+                "market_source": "eastmoney",
             },
             "execution": {
                 "mode": "paper",
@@ -168,6 +175,7 @@ class AgentTaskRuntimePassthroughTestCase(unittest.TestCase):
         self.assertEqual(self.capture_service.calls[-1]["request_id"], "req-async-runtime")
         self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["llm"]["model"], "gpt-4o-mini")
         self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["execution"]["mode"], "paper")
+        self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["data_source"]["market_source"], "eastmoney")
         self.assertEqual(self.capture_service.calls[-1]["runtime_config"]["context"]["summary"]["cash"], 80000.0)
 
 

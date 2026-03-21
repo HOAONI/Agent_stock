@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from agent_api.app import create_app
 from agent_stock.services.agent_task_service import reset_agent_task_service
+from agent_stock.services.runtime_market_service import reset_runtime_market_service
 from agent_stock.storage import DatabaseManager
 from agent_stock.config import Config
 
@@ -28,12 +29,14 @@ class AgentApiAuthTestCase(unittest.TestCase):
         Config.reset_instance()
         DatabaseManager.reset_instance()
         reset_agent_task_service()
+        reset_runtime_market_service()
 
         self.client = TestClient(create_app())
 
     def tearDown(self) -> None:
         self.client.close()
         reset_agent_task_service()
+        reset_runtime_market_service()
         DatabaseManager.reset_instance()
         Config.reset_instance()
         os.environ.pop("OPENAI_API_KEY", None)
@@ -56,6 +59,10 @@ class AgentApiAuthTestCase(unittest.TestCase):
         response = self.client.get("/internal/v1/runtime/llm-default")
         self.assertEqual(response.status_code, 401)
 
+    def test_runtime_market_sources_endpoint_requires_auth(self):
+        response = self.client.get("/internal/v1/runtime/market-sources")
+        self.assertEqual(response.status_code, 401)
+
     def test_runtime_default_endpoint_reports_builtin_llm(self):
         response = self.client.get(
             "/internal/v1/runtime/llm-default",
@@ -68,6 +75,20 @@ class AgentApiAuthTestCase(unittest.TestCase):
         self.assertEqual(payload["model"], "deepseek-chat")
         self.assertEqual(payload["base_url"], "https://api.deepseek.com/v1")
         self.assertTrue(payload["has_token"])
+
+    def test_runtime_market_sources_endpoint_reports_options(self):
+        response = self.client.get(
+            "/internal/v1/runtime/market-sources",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("options", payload)
+        codes = {item["code"] for item in payload["options"]}
+        self.assertIn("tencent", codes)
+        self.assertIn("sina", codes)
+        self.assertIn("eastmoney", codes)
+        self.assertIn("efinance", codes)
 
 
 if __name__ == "__main__":
