@@ -3,6 +3,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agent_stock.services.agent_historical_backtest_service import (
+        AgentHistoricalBacktestService,
+        get_agent_historical_backtest_service,
+    )
+    from agent_stock.services.agent_service import AgentService
+    from agent_stock.services.agent_task_service import AgentTaskService, get_agent_task_service, reset_agent_task_service
+    from agent_stock.services.backtest_service import BacktestService, get_backtest_service
+    from agent_stock.services.strategy_backtest_service import StrategyBacktestService, get_strategy_backtest_service
+
 __all__ = [
     "AgentService",
     "AgentHistoricalBacktestService",
@@ -17,7 +29,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """按需导入服务实现，减少启动时耦合。"""
     if name == "AgentService":
         from agent_stock.services.agent_service import AgentService

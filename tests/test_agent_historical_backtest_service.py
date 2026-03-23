@@ -6,9 +6,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 import unittest
 import warnings
+from typing import cast
 
 import pandas as pd
 
+from agent_stock.protocols import SupportsDailyDataFetcher, SupportsTrendAnalyzer
 from agent_stock.services.agent_historical_backtest_service import AgentHistoricalBacktestService
 from agent_stock.stock_analyzer import BuySignal, TrendAnalysisResult
 
@@ -28,7 +30,13 @@ class _FakeFetcher:
     def __init__(self, frame: pd.DataFrame) -> None:
         self.frame = frame
 
-    def get_daily_data(self, code, start_date=None, end_date=None, days=5000):  # noqa: ARG002
+    def get_daily_data(
+        self,
+        code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        days: int = 5000,
+    ) -> tuple[pd.DataFrame | None, str | None]:  # noqa: ARG002
         return self.frame.copy(), "fake"
 
 
@@ -36,7 +44,7 @@ class _RecordingTrendAnalyzer:
     def __init__(self) -> None:
         self.max_dates: list[str] = []
 
-    def analyze(self, df: pd.DataFrame, code: str):  # noqa: ARG002
+    def analyze(self, df: pd.DataFrame, code: str) -> TrendAnalysisResult:  # noqa: ARG002
         self.max_dates.append(str(pd.to_datetime(df["date"]).max().date()))
         return TrendAnalysisResult(code=code, buy_signal=BuySignal.WAIT, signal_score=50)
 
@@ -78,7 +86,9 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
                 for index, day in enumerate(days)
             ]
         )
-        service = AgentHistoricalBacktestService(fetcher_manager=_FakeFetcher(frame))
+        service = AgentHistoricalBacktestService(
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame))
+        )
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", FutureWarning)
@@ -119,8 +129,8 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
         )
         trend = _RecordingTrendAnalyzer()
         service = AgentHistoricalBacktestService(
-            fetcher_manager=_FakeFetcher(frame),
-            trend_analyzer=trend,
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
+            trend_analyzer=cast(SupportsTrendAnalyzer, trend),
         )
 
         result = service.run(
@@ -163,7 +173,9 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
                 "ai_overlay": {},
             },
         ]
-        service = AgentHistoricalBacktestService(fetcher_manager=_FakeFetcher(frame))
+        service = AgentHistoricalBacktestService(
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame))
+        )
 
         result = service.run(
             {
@@ -207,7 +219,9 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
                 "ai_overlay": {},
             },
         ]
-        service = AgentHistoricalBacktestService(fetcher_manager=_FakeFetcher(frame))
+        service = AgentHistoricalBacktestService(
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame))
+        )
 
         result = service.run(
             {
@@ -248,7 +262,7 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
             },
         ]
         service = AgentHistoricalBacktestService(
-            fetcher_manager=_FakeFetcher(frame),
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
             ai_analyzer_factory=lambda: _FakeAiAnalyzer(calls),
         )
 

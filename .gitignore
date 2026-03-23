@@ -14,3 +14,9 @@ logs/
 
 # OS/editor
 .DS_Store
+.idea/
+
+# Root-level IDE export artifacts
+/index.html
+/styles.css
+/script.js

@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any
+
 
 from agent_stock.analyzer import AnalysisResult, GeminiAnalyzer, LlmRequestTimeoutError, STOCK_NAME_MAP
 from agent_stock.config import Config, RuntimeLlmConfig, get_config
@@ -24,12 +25,12 @@ class StockAnalysisPipeline:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        query_id: Optional[str] = None,
-        query_source: Optional[str] = None,
-        save_context_snapshot: Optional[bool] = None,
-        runtime_llm: Optional[RuntimeLlmConfig] = None,
-        runtime_market_source: Optional[str] = None,
+        config: Config | None = None,
+        query_id: str | None = None,
+        query_source: str | None = None,
+        save_context_snapshot: bool | None = None,
+        runtime_llm: RuntimeLlmConfig | None = None,
+        runtime_market_source: str | None = None,
     ) -> None:
         """初始化分析管线依赖。"""
         self.config = config or get_config()
@@ -56,8 +57,8 @@ class StockAnalysisPipeline:
         code: str,
         report_type: ReportType,
         query_id: str,
-        runtime_account_context: Optional[Dict[str, Any]] = None,
-    ) -> Optional[AnalysisResult]:
+        runtime_account_context: dict[str, Any] | None = None,
+    ) -> AnalysisResult | None:
         """执行一次端到端分析，并按需落库。"""
         try:
             logger.info("[%s] analysis pipeline start", code)
@@ -161,7 +162,7 @@ class StockAnalysisPipeline:
             logger.exception("[%s] detailed analysis error", code)
             return None
 
-    def _resolve_trend_result(self, code: str) -> Optional[TrendAnalysisResult]:
+    def _resolve_trend_result(self, code: str) -> TrendAnalysisResult | None:
         """从历史上下文中恢复趋势分析结果。"""
         context = self.db.get_analysis_context(code)
         if not context or "raw_data" not in context:
@@ -183,14 +184,14 @@ class StockAnalysisPipeline:
 
     def _enhance_context(
         self,
-        context: Dict[str, Any],
+        context: dict[str, Any],
         realtime_quote: Any,
-        chip_data: Optional[ChipDistribution],
-        trend_result: Optional[TrendAnalysisResult],
+        chip_data: ChipDistribution | None,
+        trend_result: TrendAnalysisResult | None,
         *,
         stock_name: str,
-        runtime_account_context: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        runtime_account_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         """将实时行情、筹码和运行时账户信息叠加到上下文中。"""
         enhanced = dict(context)
 
@@ -248,7 +249,7 @@ class StockAnalysisPipeline:
         return enhanced
 
     @staticmethod
-    def _build_runtime_account_payload(current_code: Any, runtime_account_context: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_runtime_account_payload(current_code: Any, runtime_account_context: dict[str, Any]) -> dict[str, Any]:
         """抽取当前股票维度最相关的账户信息给 AI 使用。"""
         account_snapshot = runtime_account_context.get("account_snapshot")
         summary = runtime_account_context.get("summary")
@@ -330,11 +331,11 @@ class StockAnalysisPipeline:
     def _build_context_snapshot(
         self,
         *,
-        enhanced_context: Dict[str, Any],
-        news_content: Optional[str],
+        enhanced_context: dict[str, Any],
+        news_content: str | None,
         realtime_quote: Any,
-        chip_data: Optional[ChipDistribution],
-    ) -> Dict[str, Any]:
+        chip_data: ChipDistribution | None,
+    ) -> dict[str, Any]:
         """构建可持久化的上下文快照。"""
         return {
             "enhanced_context": enhanced_context,
@@ -344,7 +345,7 @@ class StockAnalysisPipeline:
         }
 
     @staticmethod
-    def _safe_to_dict(value: Any) -> Optional[Dict[str, Any]]:
+    def _safe_to_dict(value: Any) -> dict[str, Any] | None:
         """安全地将对象转换为字典。"""
         if value is None:
             return None
@@ -360,7 +361,7 @@ class StockAnalysisPipeline:
                 return None
         return None
 
-    def _resolve_query_source(self, query_source: Optional[str]) -> str:
+    def _resolve_query_source(self, query_source: str | None) -> str:
         """推断本次查询来源。"""
         if query_source:
             return query_source
@@ -368,7 +369,7 @@ class StockAnalysisPipeline:
             return "web"
         return "system"
 
-    def _build_query_context(self, query_id: Optional[str] = None) -> Dict[str, str]:
+    def _build_query_context(self, query_id: str | None = None) -> dict[str, str]:
         """构造搜索结果持久化所需的查询上下文。"""
         return {
             "query_id": query_id or self.query_id or "",

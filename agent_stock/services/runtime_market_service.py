@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo
+from typing import Any
 
 import pandas as pd
 
 from agent_stock.config import ALLOWED_MARKET_SOURCES, Config, get_config
+from agent_stock.time_utils import shanghai_now
 from data_provider import DataFetcherManager
 from data_provider.base import DataSourceUnavailableError, canonical_stock_code, normalize_stock_code
 
-MARKET_SOURCE_META: Dict[str, Dict[str, str]] = {
+MARKET_SOURCE_META: dict[str, dict[str, str]] = {
     "tencent": {
         "label": "腾讯行情",
         "description": "腾讯通道，适合轻量级 A 股实时与历史行情请求。",
@@ -36,7 +35,7 @@ MARKET_SOURCE_META: Dict[str, Dict[str, str]] = {
     },
 }
 
-_runtime_market_service: "RuntimeMarketService | None" = None
+_runtime_market_service: RuntimeMarketService | None = None
 
 
 def _to_float(value: Any) -> float | None:
@@ -58,6 +57,17 @@ def _to_int(value: Any) -> int | None:
     return int(parsed)
 
 
+def _normalize_window_value(value: Any) -> int | None:
+    """将窗口值收窄为整数，避免对非浮点值调用浮点专有方法。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def _round4(value: float | None) -> float | None:
     if value is None:
         return None
@@ -77,15 +87,15 @@ class RuntimeMarketService:
     def __init__(
         self,
         *,
-        config: Optional[Config] = None,
-        fetcher_manager: Optional[DataFetcherManager] = None,
+        config: Config | None = None,
+        fetcher_manager: DataFetcherManager | None = None,
     ) -> None:
         self.config = config or get_config()
         self.fetcher_manager = fetcher_manager or DataFetcherManager()
 
-    def get_market_source_options(self) -> Dict[str, Any]:
+    def get_market_source_options(self) -> dict[str, Any]:
         available_fetchers = set(self.fetcher_manager.available_fetchers)
-        options: List[Dict[str, Any]] = []
+        options: list[dict[str, Any]] = []
 
         for code in ALLOWED_MARKET_SOURCES:
             meta = MARKET_SOURCE_META[code]
@@ -118,7 +128,7 @@ class RuntimeMarketService:
 
         return {"options": options}
 
-    def get_quote(self, stock_code: str, market_source: str) -> Dict[str, Any]:
+    def get_quote(self, stock_code: str, market_source: str) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
         source = self._normalize_market_source(market_source)
         quote = self.fetcher_manager.get_realtime_quote(code, fixed_source=source)
@@ -140,7 +150,7 @@ class RuntimeMarketService:
             "source": source,
         }
 
-    def get_history(self, stock_code: str, days: int, market_source: str) -> Dict[str, Any]:
+    def get_history(self, stock_code: str, days: int, market_source: str) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
         source = self._normalize_market_source(market_source)
         frame = self._load_daily_frame(code, source=source, days=max(days, 30))
@@ -155,7 +165,7 @@ class RuntimeMarketService:
             "source": source,
         }
 
-    def get_indicators(self, stock_code: str, days: int, windows: List[int], market_source: str) -> Dict[str, Any]:
+    def get_indicators(self, stock_code: str, days: int, windows: list[int], market_source: str) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
         source = self._normalize_market_source(market_source)
         normalized_windows = self._normalize_windows(windows)
@@ -173,7 +183,7 @@ class RuntimeMarketService:
             "source": source,
         }
 
-    def get_factors(self, stock_code: str, market_source: str, target_date: Optional[str] = None) -> Dict[str, Any]:
+    def get_factors(self, stock_code: str, market_source: str, target_date: str | None = None) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
         source = self._normalize_market_source(market_source)
         frame = self._load_daily_frame(code, source=source, days=365)
@@ -207,18 +217,18 @@ class RuntimeMarketService:
         return text
 
     @staticmethod
-    def _normalize_windows(windows: List[int]) -> List[int]:
-        cleaned = [
-            int(value)
-            for value in windows
-            if isinstance(value, int) or (isinstance(value, float) and value.is_integer())
-        ]
+    def _normalize_windows(windows: list[int]) -> list[int]:
+        cleaned: list[int] = []
+        for value in windows:
+            normalized = _normalize_window_value(value)
+            if normalized is not None:
+                cleaned.append(normalized)
         unique = sorted({value for value in cleaned if 0 < value <= 250})
         return unique or [5, 10, 20, 60]
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.now(ZoneInfo("Asia/Shanghai")).replace(microsecond=0).isoformat()
+        return shanghai_now().replace(microsecond=0).isoformat()
 
     def _resolve_stock_name(self, stock_code: str, market_source: str) -> str:
         try:
@@ -241,8 +251,8 @@ class RuntimeMarketService:
             raise DataSourceUnavailableError(f"{source} returned no history data for {stock_code}")
         return frame.sort_values("date", ascending=True).reset_index(drop=True)
 
-    def _frame_to_history_rows(self, frame: pd.DataFrame) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
+    def _frame_to_history_rows(self, frame: pd.DataFrame) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
         previous_close: float | None = None
 
         for _, row in frame.iterrows():
@@ -267,8 +277,8 @@ class RuntimeMarketService:
 
         return rows
 
-    def _frame_to_indicator_bars(self, frame: pd.DataFrame) -> List[Dict[str, Any]]:
-        bars: List[Dict[str, Any]] = []
+    def _frame_to_indicator_bars(self, frame: pd.DataFrame) -> list[dict[str, Any]]:
+        bars: list[dict[str, Any]] = []
         for _, row in frame.iterrows():
             date_text = _date_text(row.get("date"))
             if len(date_text) != 10:
@@ -286,19 +296,19 @@ class RuntimeMarketService:
         return bars
 
     @staticmethod
-    def _average(values: List[float | None]) -> float | None:
+    def _average(values: list[float | None]) -> float | None:
         filtered = [value for value in values if value is not None]
         if not filtered:
             return None
         return sum(filtered) / len(filtered)
 
-    def _compute_moving_average_at(self, bars: List[Dict[str, Any]], index: int, window: int) -> float | None:
+    def _compute_moving_average_at(self, bars: list[dict[str, Any]], index: int, window: int) -> float | None:
         if window <= 0 or index + 1 < window:
             return None
         closes = [bar.get("close") for bar in bars[index + 1 - window:index + 1]]
         return _round4(self._average(closes))
 
-    def _compute_rsi14_at(self, bars: List[Dict[str, Any]], index: int) -> float | None:
+    def _compute_rsi14_at(self, bars: list[dict[str, Any]], index: int) -> float | None:
         if index < 14:
             return None
 
@@ -331,7 +341,7 @@ class RuntimeMarketService:
         return _round4(100 - 100 / (1 + rs))
 
     @staticmethod
-    def _compute_momentum20_at(bars: List[Dict[str, Any]], index: int) -> float | None:
+    def _compute_momentum20_at(bars: list[dict[str, Any]], index: int) -> float | None:
         if index < 20:
             return None
         current = bars[index].get("close")
@@ -340,7 +350,7 @@ class RuntimeMarketService:
             return None
         return _round4(((current / base) - 1) * 100)
 
-    def _compute_vol_ratio5_at(self, bars: List[Dict[str, Any]], index: int) -> float | None:
+    def _compute_vol_ratio5_at(self, bars: list[dict[str, Any]], index: int) -> float | None:
         if index < 4:
             return None
         current_volume = bars[index].get("volume")
@@ -353,7 +363,7 @@ class RuntimeMarketService:
         return _round4(current_volume / avg_volume)
 
     @staticmethod
-    def _compute_amplitude_at(bars: List[Dict[str, Any]], index: int) -> float | None:
+    def _compute_amplitude_at(bars: list[dict[str, Any]], index: int) -> float | None:
         bar = bars[index]
         open_price = bar.get("open")
         high = bar.get("high")
@@ -362,8 +372,8 @@ class RuntimeMarketService:
             return None
         return _round4(((high - low) / open_price) * 100)
 
-    def _build_indicator_items(self, bars: List[Dict[str, Any]], windows: List[int]) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
+    def _build_indicator_items(self, bars: list[dict[str, Any]], windows: list[int]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
         for index, bar in enumerate(bars):
             mas = {
                 f"ma{window}": self._compute_moving_average_at(bars, index, window)
@@ -379,7 +389,7 @@ class RuntimeMarketService:
         return items
 
     @staticmethod
-    def _find_nearest_index_by_date(bars: List[Dict[str, Any]], target_date: Optional[str]) -> int:
+    def _find_nearest_index_by_date(bars: list[dict[str, Any]], target_date: str | None) -> int:
         if not bars:
             return -1
         if not target_date:
@@ -390,7 +400,7 @@ class RuntimeMarketService:
                 return index
         return -1
 
-    def _compute_factors_at(self, bars: List[Dict[str, Any]], index: int) -> Dict[str, Any]:
+    def _compute_factors_at(self, bars: list[dict[str, Any]], index: int) -> dict[str, Any]:
         return {
             "ma5": self._compute_moving_average_at(bars, index, 5),
             "ma10": self._compute_moving_average_at(bars, index, 10),
@@ -403,7 +413,7 @@ class RuntimeMarketService:
         }
 
 
-def get_runtime_market_service(config: Optional[Config] = None) -> RuntimeMarketService:
+def get_runtime_market_service(config: Config | None = None) -> RuntimeMarketService:
     """返回内部市场服务单例。"""
     global _runtime_market_service
     if _runtime_market_service is None:

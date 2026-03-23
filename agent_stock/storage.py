@@ -14,12 +14,10 @@ import json
 import logging
 import re
 from datetime import date, datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar
 
 import pandas as pd
 from sqlalchemy import (
-    Column,
     Date,
     DateTime,
     Float,
@@ -34,14 +32,16 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from agent_stock.config import get_config
+from agent_stock.time_utils import local_now
 
 logger = logging.getLogger(__name__)
 
-# 全项目共享同一套 SQLAlchemy Declarative Base，便于迁移脚本统一建表。
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    """全项目共享的 SQLAlchemy 2.0 Declarative Base。"""
 
 
 class StockDaily(Base):
@@ -49,32 +49,30 @@ class StockDaily(Base):
 
     __tablename__ = "stock_daily"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(10), nullable=False, index=True)
-    date = Column(Date, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
 
-    open = Column(Float)
-    high = Column(Float)
-    low = Column(Float)
-    close = Column(Float)
-    volume = Column(Float)
-    amount = Column(Float)
-    pct_chg = Column(Float)
+    open: Mapped[float | None] = mapped_column(Float)
+    high: Mapped[float | None] = mapped_column(Float)
+    low: Mapped[float | None] = mapped_column(Float)
+    close: Mapped[float | None] = mapped_column(Float)
+    volume: Mapped[float | None] = mapped_column(Float)
+    amount: Mapped[float | None] = mapped_column(Float)
+    pct_chg: Mapped[float | None] = mapped_column(Float)
 
-    ma5 = Column(Float)
-    ma10 = Column(Float)
-    ma20 = Column(Float)
-    volume_ratio = Column(Float)
+    ma5: Mapped[float | None] = mapped_column(Float)
+    ma10: Mapped[float | None] = mapped_column(Float)
+    ma20: Mapped[float | None] = mapped_column(Float)
+    volume_ratio: Mapped[float | None] = mapped_column(Float)
 
-    data_source = Column(String(50))
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    data_source: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=local_now)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, default=local_now, onupdate=local_now)
 
-    __table_args__ = (
-        UniqueConstraint("code", "date", name="uix_code_date"),
-    )
+    __table_args__ = (UniqueConstraint("code", "date", name="uix_code_date"),)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """将日线记录转换为字典。"""
         return {
             "code": self.code,
@@ -99,26 +97,26 @@ class NewsIntel(Base):
 
     __tablename__ = "news_intel"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    query_id = Column(String(64), index=True)
-    code = Column(String(10), nullable=False, index=True)
-    name = Column(String(50))
-    dimension = Column(String(32), index=True)
-    query = Column(String(255))
-    provider = Column(String(32), index=True)
-    title = Column(String(300), nullable=False)
-    snippet = Column(Text)
-    url = Column(String(1000), nullable=False)
-    source = Column(String(100))
-    published_date = Column(DateTime, index=True)
-    fetched_at = Column(DateTime, default=datetime.now, index=True)
-    query_source = Column(String(32), index=True)
-    requester_platform = Column(String(20))
-    requester_user_id = Column(String(64))
-    requester_user_name = Column(String(64))
-    requester_chat_id = Column(String(64))
-    requester_message_id = Column(String(64))
-    requester_query = Column(String(255))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str | None] = mapped_column(String(50))
+    dimension: Mapped[str | None] = mapped_column(String(32), index=True)
+    query: Mapped[str | None] = mapped_column(String(255))
+    provider: Mapped[str | None] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source: Mapped[str | None] = mapped_column(String(100))
+    published_date: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime, default=local_now, index=True)
+    query_source: Mapped[str | None] = mapped_column(String(32), index=True)
+    requester_platform: Mapped[str | None] = mapped_column(String(20))
+    requester_user_id: Mapped[str | None] = mapped_column(String(64))
+    requester_user_name: Mapped[str | None] = mapped_column(String(64))
+    requester_chat_id: Mapped[str | None] = mapped_column(String(64))
+    requester_message_id: Mapped[str | None] = mapped_column(String(64))
+    requester_query: Mapped[str | None] = mapped_column(String(255))
 
     __table_args__ = (UniqueConstraint("url", name="uix_news_url"),)
 
@@ -128,23 +126,23 @@ class AnalysisHistory(Base):
 
     __tablename__ = "analysis_history"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    query_id = Column(String(64), index=True)
-    code = Column(String(10), nullable=False, index=True)
-    name = Column(String(50))
-    report_type = Column(String(16), index=True)
-    sentiment_score = Column(Integer)
-    operation_advice = Column(String(20))
-    trend_prediction = Column(String(50))
-    analysis_summary = Column(Text)
-    raw_result = Column(Text)
-    news_content = Column(Text)
-    context_snapshot = Column(Text)
-    ideal_buy = Column(Float)
-    secondary_buy = Column(Float)
-    stop_loss = Column(Float)
-    take_profit = Column(Float)
-    created_at = Column(DateTime, default=datetime.now, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    name: Mapped[str | None] = mapped_column(String(50))
+    report_type: Mapped[str | None] = mapped_column(String(16), index=True)
+    sentiment_score: Mapped[int | None] = mapped_column(Integer)
+    operation_advice: Mapped[str | None] = mapped_column(String(20))
+    trend_prediction: Mapped[str | None] = mapped_column(String(50))
+    analysis_summary: Mapped[str | None] = mapped_column(Text)
+    raw_result: Mapped[str | None] = mapped_column(Text)
+    news_content: Mapped[str | None] = mapped_column(Text)
+    context_snapshot: Mapped[str | None] = mapped_column(Text)
+    ideal_buy: Mapped[float | None] = mapped_column(Float)
+    secondary_buy: Mapped[float | None] = mapped_column(Float)
+    stop_loss: Mapped[float | None] = mapped_column(Float)
+    take_profit: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, default=local_now, index=True)
 
 
 class PaperAccount(Base):
@@ -152,22 +150,22 @@ class PaperAccount(Base):
 
     __tablename__ = "paper_accounts"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(128), nullable=False, unique=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
 
-    initial_cash = Column(Float, nullable=False, default=0.0)
-    cash = Column(Float, nullable=False, default=0.0)
-    total_market_value = Column(Float, nullable=False, default=0.0)
-    total_asset = Column(Float, nullable=False, default=0.0)
+    initial_cash: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cash: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_market_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_asset: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    realized_pnl = Column(Float, nullable=False, default=0.0)
-    unrealized_pnl = Column(Float, nullable=False, default=0.0)
-    cumulative_fees = Column(Float, nullable=False, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    cumulative_fees: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    last_rollover_date = Column(Date)
+    last_rollover_date: Mapped[date | None] = mapped_column(Date)
 
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now, nullable=False)
 
 
 class PaperPosition(Base):
@@ -175,24 +173,22 @@ class PaperPosition(Base):
 
     __tablename__ = "paper_positions"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
 
-    code = Column(String(10), nullable=False, index=True)
-    quantity = Column(Integer, nullable=False, default=0)
-    available_qty = Column(Integer, nullable=False, default=0)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    avg_cost = Column(Float, nullable=False, default=0.0)
-    last_price = Column(Float, nullable=False, default=0.0)
-    market_value = Column(Float, nullable=False, default=0.0)
-    unrealized_pnl = Column(Float, nullable=False, default=0.0)
+    avg_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    last_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    market_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now, nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint("account_id", "code", name="uix_paper_position_account_code"),
-    )
+    __table_args__ = (UniqueConstraint("account_id", "code", name="uix_paper_position_account_code"),)
 
 
 class PaperOrder(Base):
@@ -200,19 +196,19 @@ class PaperOrder(Base):
 
     __tablename__ = "paper_orders"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(64), index=True)
-    account_id = Column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
 
-    code = Column(String(10), nullable=False, index=True)
-    side = Column(String(8), nullable=False)
-    qty = Column(Integer, nullable=False, default=0)
-    target_qty = Column(Integer, nullable=False, default=0)
-    limit_price = Column(Float, nullable=False, default=0.0)
-    status = Column(String(16), nullable=False, default="filled")
-    reason = Column(String(255))
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    target_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    limit_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="filled")
+    reason: Mapped[str | None] = mapped_column(String(255))
 
-    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False, index=True)
 
 
 class PaperTrade(Base):
@@ -220,22 +216,22 @@ class PaperTrade(Base):
 
     __tablename__ = "paper_trades"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(64), index=True)
-    order_id = Column(Integer, ForeignKey("paper_orders.id"), nullable=False, index=True)
-    account_id = Column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    order_id: Mapped[int] = mapped_column(Integer, ForeignKey("paper_orders.id"), nullable=False, index=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("paper_accounts.id"), nullable=False, index=True)
 
-    code = Column(String(10), nullable=False, index=True)
-    side = Column(String(8), nullable=False)
-    qty = Column(Integer, nullable=False, default=0)
-    fill_price = Column(Float, nullable=False, default=0.0)
-    gross_amount = Column(Float, nullable=False, default=0.0)
-    fee = Column(Float, nullable=False, default=0.0)
-    tax = Column(Float, nullable=False, default=0.0)
-    slippage_bps = Column(Float, nullable=False, default=0.0)
-    trade_date = Column(Date, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fill_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    gross_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    fee: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    tax: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
 
-    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False, index=True)
 
 
 class AgentRun(Base):
@@ -243,25 +239,25 @@ class AgentRun(Base):
 
     __tablename__ = "agent_runs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(64), nullable=False, unique=True, index=True)
-    mode = Column(String(16), nullable=False, index=True)
-    trade_date = Column(Date, nullable=False, index=True)
-    stock_codes = Column(String(1000), nullable=False)
-    account_name = Column(String(128), nullable=False, default="paper-default", index=True)
-    status = Column(String(16), nullable=False, default="completed", index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    stock_codes: Mapped[str] = mapped_column(String(1000), nullable=False)
+    account_name: Mapped[str] = mapped_column(String(128), nullable=False, default="paper-default", index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="completed", index=True)
 
-    data_snapshot = Column(Text)
-    signal_snapshot = Column(Text)
-    risk_snapshot = Column(Text)
-    execution_snapshot = Column(Text)
-    account_snapshot = Column(Text)
-    report_path = Column(String(1024))
-    error_message = Column(Text)
+    data_snapshot: Mapped[str | None] = mapped_column(Text)
+    signal_snapshot: Mapped[str | None] = mapped_column(Text)
+    risk_snapshot: Mapped[str | None] = mapped_column(Text)
+    execution_snapshot: Mapped[str | None] = mapped_column(Text)
+    account_snapshot: Mapped[str | None] = mapped_column(Text)
+    report_path: Mapped[str | None] = mapped_column(String(1024))
+    error_message: Mapped[str | None] = mapped_column(Text)
 
-    started_at = Column(DateTime, nullable=True)
-    ended_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False, index=True)
 
 
 class AgentSignalSnapshot(Base):
@@ -269,19 +265,17 @@ class AgentSignalSnapshot(Base):
 
     __tablename__ = "agent_signal_snapshots"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    code = Column(String(10), nullable=False, index=True)
-    trade_date = Column(Date, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
 
-    signal_payload = Column(Text)
-    ai_payload = Column(Text)
+    signal_payload: Mapped[str | None] = mapped_column(Text)
+    ai_payload: Mapped[str | None] = mapped_column(Text)
 
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now, nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint("code", "trade_date", name="uix_agent_signal_code_date"),
-    )
+    __table_args__ = (UniqueConstraint("code", "trade_date", name="uix_agent_signal_code_date"),)
 
 
 class AgentTask(Base):
@@ -289,33 +283,34 @@ class AgentTask(Base):
 
     __tablename__ = "agent_tasks"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(String(64), nullable=False, unique=True, index=True)
-    request_id = Column(String(128), nullable=True, unique=True, index=True)
-    status = Column(String(16), nullable=False, default="pending", index=True)
-    stock_codes = Column(String(1000), nullable=False)
-    account_name = Column(String(128), nullable=False, default="paper-default", index=True)
-    run_id = Column(String(64), nullable=True, index=True)
-    error_message = Column(Text)
-    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    stock_codes: Mapped[str] = mapped_column(String(1000), nullable=False)
+    account_name: Mapped[str] = mapped_column(String(128), nullable=False, default="paper-default", index=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now, nullable=False, index=True)
 
 
 class DatabaseManager:
     """Agent_stock 使用的数据库管理器单例。"""
 
-    _instance: Optional["DatabaseManager"] = None
+    _instance: ClassVar[DatabaseManager | None] = None
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args: Any, **kwargs: Any) -> DatabaseManager:
         """确保 DatabaseManager 维持单例。"""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
+        assert cls._instance is not None
         return cls._instance
 
-    def __init__(self, db_url: Optional[str] = None):
+    def __init__(self, db_url: str | None = None):
         """初始化数据库引擎、会话工厂和基础表结构。"""
         if getattr(self, "_initialized", False):
             return
@@ -324,7 +319,7 @@ class DatabaseManager:
             config = get_config()
             db_url = config.get_db_url()
 
-        engine_kwargs: Dict[str, Any] = {
+        engine_kwargs: dict[str, Any] = {
             "echo": False,
             "pool_pre_ping": True,
             "future": True,
@@ -351,7 +346,7 @@ class DatabaseManager:
         return self._engine
 
     @classmethod
-    def get_instance(cls) -> "DatabaseManager":
+    def get_instance(cls) -> DatabaseManager:
         """返回数据库管理器单例。"""
         if cls._instance is None:
             cls._instance = cls()
@@ -383,7 +378,7 @@ class DatabaseManager:
             ).scalars().all()
             if not rows:
                 return
-            now = datetime.now()
+            now = local_now()
             for row in rows:
                 row.status = "failed"
                 row.error_message = "service_restarted"
@@ -406,7 +401,7 @@ class DatabaseManager:
         except Exception:
             return False
 
-    def has_today_data(self, code: str, target_date: Optional[date] = None) -> bool:
+    def has_today_data(self, code: str, target_date: date | None = None) -> bool:
         """判断指定股票在目标日期是否已有日线数据。"""
         if target_date is None:
             target_date = date.today()
@@ -422,7 +417,7 @@ class DatabaseManager:
             ).scalar_one_or_none()
             return result is not None
 
-    def get_latest_data(self, code: str, days: int = 2) -> List[StockDaily]:
+    def get_latest_data(self, code: str, days: int = 2) -> list[StockDaily]:
         """读取指定股票最近若干天的日线数据。"""
         with self.get_session() as session:
             rows = session.execute(
@@ -492,7 +487,7 @@ class DatabaseManager:
                         existing.ma20 = row.get("ma20")
                         existing.volume_ratio = row.get("volume_ratio")
                         existing.data_source = data_source
-                        existing.updated_at = datetime.now()
+                        existing.updated_at = local_now()
 
                 session.commit()
             except Exception:
@@ -508,7 +503,7 @@ class DatabaseManager:
         dimension: str,
         query: str,
         response: Any,
-        query_context: Optional[Dict[str, str]] = None,
+        query_context: dict[str, str] | None = None,
     ) -> int:
         """基于 URL 去重并持久化单条搜索响应载荷。"""
         if not response or not getattr(response, "results", None):
@@ -545,7 +540,7 @@ class DatabaseManager:
                         existing.snippet = snippet or existing.snippet
                         existing.source = source or existing.source
                         existing.published_date = published_date or existing.published_date
-                        existing.fetched_at = datetime.now()
+                        existing.fetched_at = local_now()
                         if query_context:
                             if not existing.query_id and current_query_id:
                                 existing.query_id = current_query_id
@@ -574,7 +569,7 @@ class DatabaseManager:
                                     url=url_key,
                                     source=source,
                                     published_date=published_date,
-                                    fetched_at=datetime.now(),
+                                    fetched_at=local_now(),
                                     query_id=current_query_id or None,
                                     query_source=query_ctx.get("query_source"),
                                     requester_platform=query_ctx.get("requester_platform"),
@@ -602,8 +597,8 @@ class DatabaseManager:
         result: Any,
         query_id: str,
         report_type: str,
-        news_content: Optional[str],
-        context_snapshot: Optional[Dict[str, Any]] = None,
+        news_content: str | None,
+        context_snapshot: dict[str, Any] | None = None,
         save_snapshot: bool = True,
     ) -> int:
         """为审计与复盘持久化单条分析结果。"""
@@ -631,7 +626,7 @@ class DatabaseManager:
             secondary_buy=sniper_points.get("secondary_buy"),
             stop_loss=sniper_points.get("stop_loss"),
             take_profit=sniper_points.get("take_profit"),
-            created_at=datetime.now(),
+            created_at=local_now(),
         )
 
         with self.get_session() as session:
@@ -647,9 +642,9 @@ class DatabaseManager:
     def get_analysis_context(
         self,
         code: str,
-        target_date: Optional[date] = None,
+        target_date: date | None = None,
         history_days: int = 60,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """构建分析流程使用的上下文字典。"""
         if target_date is None:
             target_date = date.today()
@@ -661,7 +656,7 @@ class DatabaseManager:
         today_data = recent_data[0]
         yesterday_data = recent_data[1] if len(recent_data) > 1 else None
 
-        context: Dict[str, Any] = {
+        context: dict[str, Any] = {
             "code": code,
             "date": today_data.date.isoformat(),
             "today": today_data.to_dict(),
@@ -670,12 +665,17 @@ class DatabaseManager:
         if yesterday_data is not None:
             context["yesterday"] = yesterday_data.to_dict()
 
-            if yesterday_data.volume and yesterday_data.volume > 0:
-                context["volume_change_ratio"] = round(today_data.volume / yesterday_data.volume, 2)
+            today_volume = float(today_data.volume or 0.0)
+            yesterday_volume = float(yesterday_data.volume or 0.0)
+            today_close = float(today_data.close or 0.0)
+            yesterday_close = float(yesterday_data.close or 0.0)
 
-            if yesterday_data.close and yesterday_data.close > 0:
+            if yesterday_volume > 0:
+                context["volume_change_ratio"] = round(today_volume / yesterday_volume, 2)
+
+            if yesterday_close > 0:
                 context["price_change_ratio"] = round(
-                    (today_data.close - yesterday_data.close) / yesterday_data.close * 100,
+                    (today_close - yesterday_close) / yesterday_close * 100,
                     2,
                 )
 
@@ -683,7 +683,7 @@ class DatabaseManager:
 
         bars = self.get_latest_data(code, days=max(2, min(int(history_days), 240)))
         if bars:
-            raw_data: List[Dict[str, Any]] = []
+            raw_data: list[dict[str, Any]] = []
             for item in reversed(bars):
                 row = item.to_dict()
                 row_date = row.get("date")
@@ -710,7 +710,7 @@ class DatabaseManager:
         return "震荡整理"
 
     @staticmethod
-    def _parse_published_date(value: Optional[str]) -> Optional[datetime]:
+    def _parse_published_date(value: str | None) -> datetime | None:
         """解析新闻发布时间文本。"""
         if not value:
             return None
@@ -749,7 +749,7 @@ class DatabaseManager:
             return json.dumps(str(data), ensure_ascii=False)
 
     @staticmethod
-    def _build_raw_result(result: Any) -> Dict[str, Any]:
+    def _build_raw_result(result: Any) -> dict[str, Any]:
         """构造分析结果原始落库存档。"""
         data = result.to_dict() if hasattr(result, "to_dict") else {}
         data.update(
@@ -761,7 +761,7 @@ class DatabaseManager:
         return data
 
     @staticmethod
-    def _parse_sniper_value(value: Any) -> Optional[float]:
+    def _parse_sniper_value(value: Any) -> float | None:
         """从字符串或数字中提取狙击点价格。"""
         if value is None:
             return None
@@ -785,7 +785,7 @@ class DatabaseManager:
         segment_start = colon_pos + 1 if colon_pos != -1 else 0
         segment = text[segment_start:yuan_pos]
         matches = list(re.finditer(r"-?\d+(?:\.\d+)?", segment))
-        valid_numbers: List[str] = []
+        valid_numbers: list[str] = []
         for match in matches:
             if match.start() >= 2 and segment[match.start() - 2 : match.start()].upper() == "MA":
                 continue
@@ -799,7 +799,7 @@ class DatabaseManager:
         except ValueError:
             return None
 
-    def _extract_sniper_points(self, result: Any) -> Dict[str, Optional[float]]:
+    def _extract_sniper_points(self, result: Any) -> dict[str, float | None]:
         """提取理想买点、次优买点、止损和止盈。"""
         raw_points = result.get_sniper_points() if hasattr(result, "get_sniper_points") else {}
         raw_points = raw_points or {}
@@ -816,7 +816,7 @@ class DatabaseManager:
         code: str,
         title: str,
         source: str,
-        published_date: Optional[datetime],
+        published_date: datetime | None,
     ) -> str:
         """在新闻没有 URL 时构造稳定去重键。"""
         date_str = published_date.isoformat() if published_date else ""

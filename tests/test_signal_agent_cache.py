@@ -92,7 +92,10 @@ class SignalAgentCacheTestCase(unittest.TestCase):
         self.assertFalse(second.ai_refreshed)
         self.assertEqual(first.operation_advice, "买入")
         self.assertEqual(second.operation_advice, "买入")
-        self.assertAlmostEqual(float(second.stop_loss), 9.5)
+        stop_loss = second.stop_loss
+        self.assertIsNotNone(stop_loss)
+        assert stop_loss is not None
+        self.assertAlmostEqual(float(stop_loss), 9.5)
 
     def test_runtime_llm_request_bypasses_shared_daily_cache(self):
         context = {"raw_data": self._build_raw_data()}

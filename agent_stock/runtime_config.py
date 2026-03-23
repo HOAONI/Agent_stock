@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
+
 
 from agent_stock.config import (
     ALLOWED_MARKET_SOURCES,
@@ -23,7 +24,7 @@ ALLOWED_DATA_SOURCE_FIELDS = frozenset({"market_source"})
 ALLOWED_CONTEXT_FIELDS = frozenset({"account_snapshot", "summary", "positions"})
 
 
-def parse_runtime_config(runtime_config: Optional[dict[str, Any]]) -> Optional[AgentRuntimeConfig]:
+def parse_runtime_config(runtime_config: dict[str, Any] | None) -> AgentRuntimeConfig | None:
     """将请求中的运行时配置字典解析为强类型对象。"""
     if not runtime_config:
         return None
@@ -40,7 +41,7 @@ def parse_runtime_config(runtime_config: Optional[dict[str, Any]]) -> Optional[A
     )
 
 
-def _parse_account_config(account_raw: Any) -> Optional[RuntimeAccountConfig]:
+def _parse_account_config(account_raw: Any) -> RuntimeAccountConfig | None:
     """解析运行时账户配置并校验必填字段。"""
     account_raw = _ensure_object("runtime_config.account", account_raw)
     if account_raw is None:
@@ -68,7 +69,7 @@ def _parse_account_config(account_raw: Any) -> Optional[RuntimeAccountConfig]:
     )
 
 
-def _parse_llm_config(llm_raw: Any) -> Optional[RuntimeLlmConfig]:
+def _parse_llm_config(llm_raw: Any) -> RuntimeLlmConfig | None:
     """解析运行时 LLM 配置。"""
     llm_raw = _ensure_object("runtime_config.llm", llm_raw)
     if llm_raw is None:
@@ -96,7 +97,7 @@ def _parse_llm_config(llm_raw: Any) -> Optional[RuntimeLlmConfig]:
     )
 
 
-def _parse_strategy_config(strategy_raw: Any) -> Optional[RuntimeStrategyConfig]:
+def _parse_strategy_config(strategy_raw: Any) -> RuntimeStrategyConfig | None:
     """解析运行时策略覆盖项。"""
     strategy_raw = _ensure_object("runtime_config.strategy", strategy_raw)
     if strategy_raw is None:
@@ -123,7 +124,7 @@ def _parse_strategy_config(strategy_raw: Any) -> Optional[RuntimeStrategyConfig]
     )
 
 
-def _parse_execution_config(execution_raw: Any) -> Optional[RuntimeExecutionConfig]:
+def _parse_execution_config(execution_raw: Any) -> RuntimeExecutionConfig | None:
     """解析运行时执行模式配置。"""
     execution_raw = _ensure_object("runtime_config.execution", execution_raw)
     if execution_raw is None:
@@ -142,7 +143,7 @@ def _parse_execution_config(execution_raw: Any) -> Optional[RuntimeExecutionConf
         raise ValueError("runtime_config.execution.mode must be one of paper|broker")
 
     broker_account_id_raw = execution_raw.get("broker_account_id")
-    broker_account_id: Optional[int] = None
+    broker_account_id: int | None = None
     if broker_account_id_raw is not None:
         try:
             broker_account_id = int(broker_account_id_raw)
@@ -160,7 +161,7 @@ def _parse_execution_config(execution_raw: Any) -> Optional[RuntimeExecutionConf
     )
 
 
-def _parse_data_source_config(data_source_raw: Any) -> Optional[RuntimeDataSourceConfig]:
+def _parse_data_source_config(data_source_raw: Any) -> RuntimeDataSourceConfig | None:
     """解析请求级行情源固定选择。"""
     data_source_raw = _ensure_object("runtime_config.data_source", data_source_raw)
     if data_source_raw is None:
@@ -179,7 +180,7 @@ def _parse_data_source_config(data_source_raw: Any) -> Optional[RuntimeDataSourc
     return RuntimeDataSourceConfig(market_source=market_source)
 
 
-def _parse_context_config(context_raw: Any) -> Optional[RuntimeContextConfig]:
+def _parse_context_config(context_raw: Any) -> RuntimeContextConfig | None:
     """解析 Backend 透传的运行时账户上下文。"""
     context_raw = _ensure_object("runtime_config.context", context_raw)
     if context_raw is None:
@@ -211,7 +212,7 @@ def _parse_context_config(context_raw: Any) -> Optional[RuntimeContextConfig]:
     )
 
 
-def _ensure_object(section_name: str, raw: Any) -> Optional[dict[str, Any]]:
+def _ensure_object(section_name: str, raw: Any) -> dict[str, Any] | None:
     """确保某个配置段要么为空，要么是对象。"""
     if raw is None:
         return None

@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 from typing import Any
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agent_stock.config import ALLOWED_MARKET_SOURCES
 from agent_stock.runtime_config import ALLOWED_EXECUTION_MODES, ALLOWED_LLM_PROVIDERS
+
+_ALLOWED_LLM_PROVIDER_SET = set(ALLOWED_LLM_PROVIDERS)
+_ALLOWED_EXECUTION_MODE_SET = set(ALLOWED_EXECUTION_MODES)
+_ALLOWED_MARKET_SOURCE_SET = set(ALLOWED_MARKET_SOURCES)
 
 
 class RuntimeAccountRequest(BaseModel):
@@ -36,7 +39,7 @@ class RuntimeLlmRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal[*ALLOWED_LLM_PROVIDERS]
+    provider: str = Field(min_length=1)
     base_url: str = Field(min_length=1, max_length=1024)
     model: str = Field(min_length=1, max_length=128)
     api_token: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -49,6 +52,15 @@ class RuntimeLlmRequest(BaseModel):
         text = value.strip()
         if not text:
             raise ValueError("must not be empty")
+        return text
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        """校验请求级 provider 是否在允许列表中。"""
+        text = value.strip()
+        if text not in _ALLOWED_LLM_PROVIDER_SET:
+            raise ValueError(f"provider must be one of {sorted(_ALLOWED_LLM_PROVIDER_SET)}")
         return text
 
     @model_validator(mode="after")
@@ -74,13 +86,16 @@ class RuntimeExecutionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal[*ALLOWED_EXECUTION_MODES]
+    mode: str = Field(min_length=1)
     has_ticket: bool = False
     broker_account_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _normalize_execution(self) -> "RuntimeExecutionRequest":
         """规范执行模式并校验 broker 模式必填字段。"""
+        self.mode = self.mode.strip()
+        if self.mode not in _ALLOWED_EXECUTION_MODE_SET:
+            raise ValueError(f"execution.mode must be one of {sorted(_ALLOWED_EXECUTION_MODE_SET)}")
         # 保留 `has_ticket` 字段以兼容旧载荷结构；`broker`
         # 保留给受信任的 Backend -> Agent 内部模拟执行流程。
         if self.mode == "broker" and self.broker_account_id is None:
@@ -93,7 +108,16 @@ class RuntimeDataSourceRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    market_source: Literal[*ALLOWED_MARKET_SOURCES]
+    market_source: str = Field(min_length=1)
+
+    @field_validator("market_source")
+    @classmethod
+    def _validate_market_source(cls, value: str) -> str:
+        """校验请求级行情源是否在允许列表中。"""
+        text = value.strip()
+        if text not in _ALLOWED_MARKET_SOURCE_SET:
+            raise ValueError(f"market_source must be one of {sorted(_ALLOWED_MARKET_SOURCE_SET)}")
+        return text
 
 
 class RuntimeContextRequest(BaseModel):

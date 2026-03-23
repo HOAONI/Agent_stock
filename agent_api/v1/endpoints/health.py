@@ -3,13 +3,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from agent_api.deps import get_task_service_dep
 from agent_api.v1.schemas.common import HealthResponse
 from agent_stock.services.agent_task_service import AgentTaskService
+from agent_stock.time_utils import utc_now
 
 router = APIRouter()
 
@@ -19,7 +18,7 @@ def liveness() -> HealthResponse:
     """供容器编排器使用的存活探针。"""
     return HealthResponse(
         status="ok",
-        timestamp=datetime.utcnow().isoformat(),
+        timestamp=utc_now().isoformat(),
         detail="alive",
     )
 
@@ -37,6 +36,6 @@ def readiness(task_service: AgentTaskService = Depends(get_task_service_dep)) ->
         )
     return HealthResponse(
         status="ok",
-        timestamp=datetime.utcnow().isoformat(),
+        timestamp=utc_now().isoformat(),
         detail="ready",
     )

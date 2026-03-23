@@ -71,6 +71,7 @@ class RuntimeLlmOverrideTestCase(unittest.TestCase):
         resolved = base.resolve_default_runtime_llm()
 
         self.assertIsNotNone(resolved)
+        assert resolved is not None
         self.assertEqual(resolved.provider, "deepseek")
         self.assertEqual(resolved.base_url, "https://api.deepseek.com/v1")
         self.assertEqual(resolved.model, "deepseek-chat")

@@ -8,15 +8,17 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any
+
 
 from agent_stock.agents.contracts import AgentState, RiskAgentOutput, SignalAgentOutput
 from agent_stock.config import Config, RuntimeStrategyConfig, get_config
 
+
 class RiskAgent:
     """应用固定仓位映射与账户级限制。"""
 
-    def __init__(self, config: Optional[Config] = None) -> None:
+    def __init__(self, config: Config | None = None) -> None:
         """初始化风控配置。"""
         self.config = config or get_config()
 
@@ -27,9 +29,9 @@ class RiskAgent:
         trade_date: date,
         current_price: float,
         signal_output: SignalAgentOutput,
-        account_snapshot: Dict[str, float],
+        account_snapshot: dict[str, Any],
         current_position_value: float,
-        runtime_strategy: Optional[RuntimeStrategyConfig] = None,
+        runtime_strategy: RuntimeStrategyConfig | None = None,
     ) -> RiskAgentOutput:
         """计算目标持仓金额，并应用账户级风险限制。"""
         if current_price <= 0:
@@ -111,7 +113,9 @@ class RiskAgent:
         total_asset = float(account_snapshot.get("total_asset") or 0.0)
         total_market_value = float(account_snapshot.get("total_market_value") or 0.0)
         if total_market_value <= 0:
-            total_market_value = sum(float(item.get("market_value") or 0.0) for item in account_snapshot.get("positions", []))
+            total_market_value = sum(
+                float(item.get("market_value") or 0.0) for item in account_snapshot.get("positions", [])
+            )
         if total_asset <= 0:
             total_asset = float(account_snapshot.get("cash") or 0.0)
         if total_asset <= 0:
@@ -184,7 +188,7 @@ class RiskAgent:
         return any(token in text for token in ("卖出", "减仓", "清仓", "sell", "reduce", "strong sell", "强烈卖出"))
 
     @staticmethod
-    def _find_position(account_snapshot: Dict[str, Any], code: str) -> Dict[str, Any]:
+    def _find_position(account_snapshot: dict[str, Any], code: str) -> dict[str, Any]:
         """从账户快照中提取指定股票的持仓。"""
         for item in account_snapshot.get("positions", []):
             if str(item.get("code")) == str(code):

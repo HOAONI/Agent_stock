@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 
@@ -18,8 +19,8 @@ from agent_stock.config import Config
 
 class _SyncTaskService:
     def __init__(self):
-        self.last_runtime_config = None
-        self.last_account_name = None
+        self.last_runtime_config: dict[str, Any] | None = None
+        self.last_account_name: str | None = None
 
     def run_sync(self, *, stock_codes, request_id=None, account_name=None, runtime_config=None):
         self.last_runtime_config = runtime_config
@@ -113,11 +114,12 @@ class AgentApiRunsSyncTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.fake_service.last_account_name, "user-123")
         self.assertIsInstance(self.fake_service.last_runtime_config, dict)
+        runtime_config = cast(dict[str, Any], self.fake_service.last_runtime_config)
         self.assertEqual(
-            self.fake_service.last_runtime_config["strategy"]["position_max_pct"],
+            runtime_config["strategy"]["position_max_pct"],
             30,
         )
-        self.assertEqual(self.fake_service.last_runtime_config["execution"]["mode"], "paper")
+        self.assertEqual(runtime_config["execution"]["mode"], "paper")
 
 
 if __name__ == "__main__":

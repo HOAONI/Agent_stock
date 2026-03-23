@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -13,7 +13,7 @@ from agent_stock.services.runtime_market_service import RuntimeMarketService
 router = APIRouter()
 
 
-def _rethrow_market_error(action: str, error: Exception) -> None:
+def _rethrow_market_error(action: str, error: Exception) -> NoReturn:
     message = str(error).strip() or f"{action} failed"
     if "unsupported market source" in message or "stock_code is required" in message:
         raise HTTPException(status_code=422, detail={"error": "validation_error", "message": message}) from error
@@ -27,7 +27,7 @@ def get_stock_quote(
     stock_code: str,
     market_source: Annotated[str, Query(min_length=1)],
     service: RuntimeMarketService = Depends(get_runtime_market_service_dep),
-) -> dict:
+) -> dict[str, Any]:
     try:
         return service.get_quote(stock_code, market_source)
     except Exception as error:  # pragma: no cover - 内部异常统一映射
@@ -41,7 +41,7 @@ def get_stock_history(
     period: Annotated[str, Query()] = "daily",
     days: Annotated[int, Query(ge=1, le=365)] = 30,
     service: RuntimeMarketService = Depends(get_runtime_market_service_dep),
-) -> dict:
+) -> dict[str, Any]:
     if period != "daily":
         raise HTTPException(status_code=422, detail={"error": "validation_error", "message": "period must be daily"})
     try:
@@ -58,7 +58,7 @@ def get_stock_indicators(
     days: Annotated[int, Query(ge=1, le=365)] = 120,
     windows: Annotated[str, Query()] = "5,10,20,60",
     service: RuntimeMarketService = Depends(get_runtime_market_service_dep),
-) -> dict:
+) -> dict[str, Any]:
     if period != "daily":
         raise HTTPException(status_code=422, detail={"error": "validation_error", "message": "period must be daily"})
     try:
@@ -78,7 +78,7 @@ def get_stock_factors(
     market_source: Annotated[str, Query(min_length=1)],
     date: str | None = None,
     service: RuntimeMarketService = Depends(get_runtime_market_service_dep),
-) -> dict:
+) -> dict[str, Any]:
     try:
         return service.get_factors(stock_code, market_source, target_date=date)
     except Exception as error:  # pragma: no cover - 内部异常统一映射

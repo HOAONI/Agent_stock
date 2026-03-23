@@ -19,9 +19,9 @@ class _FakeBacktraderRuntimeService:
     def __init__(self) -> None:
         self.cash = 100000.0
         self.initial_capital = 100000.0
-        self.positions = []
-        self.last_order = None
-        self.reject_with = None
+        self.positions: list[dict[str, float | int | str]] = []
+        self.last_order: dict[str, object | dict[str, object]] | None = None
+        self.reject_with: str | None = None
 
     def get_account_summary(self, req):
         return {
@@ -183,8 +183,14 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
         self.assertEqual(output.trade_id, 22)
         self.assertGreater(output.traded_qty, 0)
         self.assertEqual(output.reason, "broker_executed")
-        self.assertEqual(runtime_service.last_order["broker_account_id"], 88)
-        self.assertEqual(runtime_service.last_order["payload"]["direction"], "buy")
+        last_order = runtime_service.last_order
+        self.assertIsNotNone(last_order)
+        assert last_order is not None
+        self.assertEqual(last_order["broker_account_id"], 88)
+        payload = last_order["payload"]
+        self.assertIsInstance(payload, dict)
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["direction"], "buy")
 
     def test_broker_mode_rejects_when_account_id_missing(self):
         agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)

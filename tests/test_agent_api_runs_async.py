@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 
@@ -18,9 +19,9 @@ from agent_stock.config import Config
 
 class _AsyncTaskService:
     def __init__(self):
-        self.store = {}
-        self.last_runtime_config = None
-        self.last_account_name = None
+        self.store: dict[str, dict[str, Any]] = {}
+        self.last_runtime_config: dict[str, Any] | None = None
+        self.last_account_name: str | None = None
 
     def submit_task(self, *, stock_codes, request_id=None, account_name=None, runtime_config=None):
         self.last_runtime_config = runtime_config
@@ -126,9 +127,11 @@ class AgentApiRunsAsyncTestCase(unittest.TestCase):
         response = self.client.post("/api/v1/runs", headers={"Authorization": "Bearer test-token"}, json=payload)
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.fake_service.last_account_name, "user-async")
-        self.assertEqual(self.fake_service.last_runtime_config["llm"]["provider"], "deepseek")
-        self.assertEqual(self.fake_service.last_runtime_config["execution"]["mode"], "paper")
-        self.assertEqual(self.fake_service.last_runtime_config["context"]["summary"]["cash"], 90000.0)
+        self.assertIsInstance(self.fake_service.last_runtime_config, dict)
+        runtime_config = cast(dict[str, Any], self.fake_service.last_runtime_config)
+        self.assertEqual(runtime_config["llm"]["provider"], "deepseek")
+        self.assertEqual(runtime_config["execution"]["mode"], "paper")
+        self.assertEqual(runtime_config["context"]["summary"]["cash"], 90000.0)
 
 
 if __name__ == "__main__":

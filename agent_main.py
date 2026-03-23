@@ -11,7 +11,6 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 # 确保以 `python agent_main.py` 运行时可以导入项目根目录。
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -50,7 +49,7 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_stock_codes(config: Config, stocks_arg: Optional[str]) -> List[str]:
+def resolve_stock_codes(config: Config, stocks_arg: str | None) -> list[str]:
     """从参数或配置中解析股票列表。"""
     if stocks_arg:
         return [canonical_stock_code(item) for item in stocks_arg.split(",") if item.strip()]
@@ -59,7 +58,7 @@ def resolve_stock_codes(config: Config, stocks_arg: Optional[str]) -> List[str]:
     return [canonical_stock_code(item) for item in config.stock_list if item]
 
 
-def run_once(service: AgentService, stock_codes: List[str]) -> int:
+def run_once(service: AgentService, stock_codes: list[str]) -> int:
     """执行一次 Agent 运行周期。"""
     result = service.run_once(stock_codes)
     logger.info(
@@ -73,9 +72,9 @@ def run_once(service: AgentService, stock_codes: List[str]) -> int:
 
 def run_realtime(
     service: AgentService,
-    stock_codes: List[str],
+    stock_codes: list[str],
     interval_minutes: int,
-    max_cycles: Optional[int],
+    max_cycles: int | None,
 ) -> int:
     """在交易时段守卫控制下运行实时循环。"""
     results = service.run_realtime(

@@ -1,0 +1,35 @@
+{
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv",
+  "useLibraryCodeForTypes": true,
+  "reportMissingTypeStubs": "none",
+  "include": [
+    "agent_stock",
+    "agent_api",
+    "data_provider",
+    "tests",
+    "agent_main.py",
+    "agent_server.py"
+  ],
+  "exclude": [
+    ".git",
+    ".idea",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "logs",
+    "data",
+    "build",
+    "dist"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "."
+      ]
+    }
+  ]
+}

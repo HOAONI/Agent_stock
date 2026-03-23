@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from datetime import date, datetime
-from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Callable
+
 from zoneinfo import ZoneInfo
 
 from agent_stock.agents.contracts import AgentRunResult, StockAgentResult
@@ -21,6 +22,13 @@ from agent_stock.agents.execution_agent import ExecutionAgent
 from agent_stock.agents.risk_agent import RiskAgent
 from agent_stock.agents.signal_agent import SignalAgent
 from agent_stock.config import AgentRuntimeConfig, Config, get_config
+from agent_stock.protocols import (
+    SupportsDataAgent,
+    SupportsExecutionAgent,
+    SupportsMarketSessionGuard,
+    SupportsRiskAgent,
+    SupportsSignalAgent,
+)
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.storage import DatabaseManager
 
@@ -36,9 +44,9 @@ class MarketSessionGuard:
         self.sessions = self._parse_sessions(sessions)
 
     @staticmethod
-    def _parse_sessions(sessions: str) -> List[tuple[int, int]]:
+    def _parse_sessions(sessions: str) -> list[tuple[int, int]]:
         """将 `09:30-11:30` 形式的配置解析为分钟区间。"""
-        windows: List[tuple[int, int]] = []
+        windows: list[tuple[int, int]] = []
         for item in (sessions or "").split(","):
             block = item.strip()
             if not block or "-" not in block:
@@ -56,7 +64,7 @@ class MarketSessionGuard:
         hour, minute = hhmm.strip().split(":", 1)
         return int(hour) * 60 + int(minute)
 
-    def is_market_open(self, now: Optional[datetime] = None) -> bool:
+    def is_market_open(self, now: datetime | None = None) -> bool:
         """判断当前时间是否落在配置的工作日交易时段内。"""
         now = now or datetime.now(self.timezone)
         if now.tzinfo is None:
@@ -76,16 +84,16 @@ class AgentOrchestrator:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        db_manager: Optional[DatabaseManager] = None,
-        data_agent: Optional[DataAgent] = None,
-        signal_agent: Optional[SignalAgent] = None,
-        risk_agent: Optional[RiskAgent] = None,
-        execution_agent: Optional[ExecutionAgent] = None,
-        execution_repo: Optional[ExecutionRepository] = None,
-        market_guard: Optional[MarketSessionGuard] = None,
-        now_provider: Optional[Callable[[], datetime]] = None,
-        sleep_func: Optional[Callable[[float], None]] = None,
+        config: Config | None = None,
+        db_manager: DatabaseManager | None = None,
+        data_agent: SupportsDataAgent | None = None,
+        signal_agent: SupportsSignalAgent | None = None,
+        risk_agent: SupportsRiskAgent | None = None,
+        execution_agent: SupportsExecutionAgent | None = None,
+        execution_repo: ExecutionRepository | Any | None = None,
+        market_guard: SupportsMarketSessionGuard | None = None,
+        now_provider: Callable[[], datetime] | None = None,
+        sleep_func: Callable[[float], None] | None = None,
     ) -> None:
         """初始化各阶段智能体、仓储和时段控制器。"""
         self.config = config or get_config()
@@ -93,9 +101,13 @@ class AgentOrchestrator:
         self.repo = execution_repo or ExecutionRepository(self.db)
 
         self.data_agent = data_agent or DataAgent(config=self.config, db_manager=self.db)
-        self.signal_agent = signal_agent or SignalAgent(config=self.config, db_manager=self.db, execution_repo=self.repo)
+        self.signal_agent = signal_agent or SignalAgent(
+            config=self.config, db_manager=self.db, execution_repo=self.repo
+        )
         self.risk_agent = risk_agent or RiskAgent(config=self.config)
-        self.execution_agent = execution_agent or ExecutionAgent(config=self.config, db_manager=self.db, execution_repo=self.repo)
+        self.execution_agent = execution_agent or ExecutionAgent(
+            config=self.config, db_manager=self.db, execution_repo=self.repo
+        )
 
         self.market_guard = market_guard or MarketSessionGuard(
             timezone_name=str(getattr(self.config, "agent_market_timezone", "Asia/Shanghai")),
@@ -107,19 +119,21 @@ class AgentOrchestrator:
 
     def run_cycle(
         self,
-        stock_codes: List[str],
+        stock_codes: list[str],
         *,
         mode: str,
-        request_id: Optional[str] = None,
-        account_name: Optional[str] = None,
-        initial_cash_override: Optional[float] = None,
-        runtime_config: Optional[AgentRuntimeConfig] = None,
+        request_id: str | None = None,
+        account_name: str | None = None,
+        initial_cash_override: float | None = None,
+        runtime_config: AgentRuntimeConfig | None = None,
     ) -> AgentRunResult:
         """按顺序执行一次完整的多股票运行周期。"""
         run_id = uuid.uuid4().hex
         started_at = self._now()
         trade_date = started_at.date()
-        account_name = account_name or str(getattr(self.config, "agent_account_name", "paper-default") or "paper-default")
+        account_name = account_name or str(
+            getattr(self.config, "agent_account_name", "paper-default") or "paper-default"
+        )
         initial_cash = (
             float(initial_cash_override)
             if initial_cash_override is not None
@@ -132,8 +146,10 @@ class AgentOrchestrator:
         )
 
         # 这份账户快照会在同一轮多股票执行过程中不断递推，模拟同一账户连续处理多只股票。
-        per_stock: List[StockAgentResult] = []
-        fixed_market_source = runtime_config.data_source.market_source if runtime_config and runtime_config.data_source else None
+        per_stock: list[StockAgentResult] = []
+        fixed_market_source = (
+            runtime_config.data_source.market_source if runtime_config and runtime_config.data_source else None
+        )
 
         for raw_code in stock_codes:
             # 每只股票都走同一条四阶段链路，并把阶段快照写进最终运行结果。
@@ -304,12 +320,12 @@ class AgentOrchestrator:
 
     def run_once(
         self,
-        stock_codes: List[str],
+        stock_codes: list[str],
         *,
-        request_id: Optional[str] = None,
-        account_name: Optional[str] = None,
-        initial_cash_override: Optional[float] = None,
-        runtime_config: Optional[AgentRuntimeConfig] = None,
+        request_id: str | None = None,
+        account_name: str | None = None,
+        initial_cash_override: float | None = None,
+        runtime_config: AgentRuntimeConfig | None = None,
     ) -> AgentRunResult:
         """执行一次不受交易时段约束的单轮运行。"""
         if account_name is None:
@@ -331,23 +347,23 @@ class AgentOrchestrator:
 
     def run_realtime(
         self,
-        stock_codes: List[str],
+        stock_codes: list[str],
         *,
         interval_minutes: int,
-        max_cycles: Optional[int] = None,
+        max_cycles: int | None = None,
         heartbeat_sleep: float = 5.0,
-        request_id: Optional[str] = None,
-        account_name: Optional[str] = None,
-        initial_cash_override: Optional[float] = None,
-        runtime_config: Optional[AgentRuntimeConfig] = None,
-    ) -> List[AgentRunResult]:
+        request_id: str | None = None,
+        account_name: str | None = None,
+        initial_cash_override: float | None = None,
+        runtime_config: AgentRuntimeConfig | None = None,
+    ) -> list[AgentRunResult]:
         """按配置交易时段执行循环运行。"""
         if interval_minutes <= 0:
             raise ValueError("interval_minutes must be positive")
 
-        results: List[AgentRunResult] = []
+        results: list[AgentRunResult] = []
         cycles = 0
-        next_run_at: Optional[datetime] = None
+        next_run_at: datetime | None = None
 
         while True:
             now = self._now()
@@ -434,11 +450,11 @@ class AgentOrchestrator:
             return default
 
     @classmethod
-    def _normalize_positions(cls, value: Any) -> List[Dict[str, Any]]:
+    def _normalize_positions(cls, value: Any) -> list[dict[str, Any]]:
         """统一不同来源的持仓结构。"""
         if not isinstance(value, list):
             return []
-        normalized: List[Dict[str, Any]] = []
+        normalized: list[dict[str, Any]] = []
         for item in value:
             if not isinstance(item, dict):
                 continue
@@ -446,7 +462,9 @@ class AgentOrchestrator:
             if not code:
                 continue
             quantity = max(0, cls._as_int(item.get("quantity") or item.get("qty") or item.get("volume"), 0))
-            available_qty = max(0, cls._as_int(item.get("available_qty") or item.get("available") or quantity, quantity))
+            available_qty = max(
+                0, cls._as_int(item.get("available_qty") or item.get("available") or quantity, quantity)
+            )
             avg_cost = cls._as_number(item.get("avg_cost") or item.get("cost_price"), 0.0)
             last_price = cls._as_number(item.get("last_price") or item.get("price"), 0.0)
             market_value = cls._as_number(item.get("market_value"), quantity * last_price)
@@ -468,11 +486,11 @@ class AgentOrchestrator:
     @classmethod
     def _normalize_account_snapshot(
         cls,
-        snapshot: Optional[Dict[str, Any]],
+        snapshot: dict[str, Any] | None,
         *,
         account_name: str,
         initial_cash: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """将账户快照归一化为执行链路使用的标准结构。"""
         raw = snapshot if isinstance(snapshot, dict) else {}
         positions = cls._normalize_positions(raw.get("positions"))
@@ -509,12 +527,12 @@ class AgentOrchestrator:
     def _resolve_runtime_account_snapshot(
         cls,
         *,
-        runtime_config: Optional[AgentRuntimeConfig],
+        runtime_config: AgentRuntimeConfig | None,
         account_name: str,
         initial_cash: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """从运行时上下文中拼出初始账户快照。"""
-        seed: Dict[str, Any] = {}
+        seed: dict[str, Any] = {}
         context = runtime_config.context if runtime_config else None
         if context:
             if isinstance(context.account_snapshot, dict):
@@ -524,9 +542,13 @@ class AgentOrchestrator:
                 if "cash" not in seed:
                     seed["cash"] = summary.get("cash") or summary.get("available_cash") or summary.get("availableCash")
                 if "total_market_value" not in seed:
-                    seed["total_market_value"] = summary.get("market_value") or summary.get("total_market_value") or summary.get("marketValue")
+                    seed["total_market_value"] = (
+                        summary.get("market_value") or summary.get("total_market_value") or summary.get("marketValue")
+                    )
                 if "total_asset" not in seed:
-                    seed["total_asset"] = summary.get("total_asset") or summary.get("totalAsset") or summary.get("total_equity")
+                    seed["total_asset"] = (
+                        summary.get("total_asset") or summary.get("totalAsset") or summary.get("total_equity")
+                    )
             if "positions" not in seed and isinstance(context.positions, list):
                 seed["positions"] = [item for item in context.positions if isinstance(item, dict)]
         return cls._normalize_account_snapshot(seed, account_name=account_name, initial_cash=initial_cash)

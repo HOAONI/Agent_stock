@@ -6,25 +6,27 @@ from __future__ import annotations
 import math
 import os
 import random
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any
+
 
 from sqlalchemy import desc, select
 
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.storage import DatabaseManager, PaperAccount, PaperOrder, PaperTrade
+from agent_stock.time_utils import local_now
 from data_provider import DataFetcherManager
 from data_provider.base import canonical_stock_code, normalize_stock_code
 
 
-def _as_dict(value: Any) -> Dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any]:
     """将任意值安全转换为字典，不可转换时返回空字典。"""
     if isinstance(value, dict):
         return value
     return {}
 
 
-def _as_positive_float(value: Any) -> Optional[float]:
+def _as_positive_float(value: Any) -> float | None:
     """将输入解析为大于 0 的浮点数。"""
     try:
         num = float(value)
@@ -35,7 +37,7 @@ def _as_positive_float(value: Any) -> Optional[float]:
     return num
 
 
-def _as_non_negative_float(value: Any) -> Optional[float]:
+def _as_non_negative_float(value: Any) -> float | None:
     """将输入解析为大于等于 0 的浮点数。"""
     try:
         num = float(value)
@@ -46,7 +48,7 @@ def _as_non_negative_float(value: Any) -> Optional[float]:
     return num
 
 
-def _extract_price(quote: Any) -> Optional[float]:
+def _extract_price(quote: Any) -> float | None:
     """从字典或对象形式的实时行情中提取价格。"""
     if quote is None:
         return None
@@ -65,9 +67,9 @@ class BacktraderRuntimeService:
 
     def __init__(
         self,
-        repo: Optional[ExecutionRepository] = None,
-        db_manager: Optional[DatabaseManager] = None,
-        fetcher_manager: Optional[DataFetcherManager] = None,
+        repo: ExecutionRepository | None = None,
+        db_manager: DatabaseManager | None = None,
+        fetcher_manager: DataFetcherManager | None = None,
     ):
         """初始化仓储、数据库和默认交易参数。"""
         self.repo = repo or ExecutionRepository()
@@ -83,7 +85,7 @@ class BacktraderRuntimeService:
         """将 Backend 的 broker_account_id 映射为本地账户名。"""
         return f"bt-{int(broker_account_id)}"
 
-    def _resolve_initial_capital(self, req: Dict[str, Any]) -> float:
+    def _resolve_initial_capital(self, req: dict[str, Any]) -> float:
         """从多种兼容字段中解析初始资金。"""
         payload = _as_dict(req.get("payload"))
         credentials = _as_dict(req.get("credentials"))
@@ -100,7 +102,7 @@ class BacktraderRuntimeService:
             raise ValueError("initial_capital must be > 0")
         return float(round(initial_capital, 2))
 
-    def _resolve_commission_rate(self, req: Dict[str, Any]) -> float:
+    def _resolve_commission_rate(self, req: dict[str, Any]) -> float:
         """解析手续费率，缺省时回退到服务默认值。"""
         payload = _as_dict(req.get("payload"))
         credentials = _as_dict(req.get("credentials"))
@@ -114,7 +116,7 @@ class BacktraderRuntimeService:
         rate = _as_non_negative_float(value)
         return float(rate if rate is not None else self.default_commission)
 
-    def _resolve_slippage_bps(self, req: Dict[str, Any]) -> float:
+    def _resolve_slippage_bps(self, req: dict[str, Any]) -> float:
         """解析滑点基点数，缺省时回退到服务默认值。"""
         payload = _as_dict(req.get("payload"))
         credentials = _as_dict(req.get("credentials"))
@@ -128,7 +130,7 @@ class BacktraderRuntimeService:
         bps = _as_non_negative_float(value)
         return float(bps if bps is not None else self.default_slippage_bps)
 
-    def _resolve_add_funds_amount(self, req: Dict[str, Any]) -> float:
+    def _resolve_add_funds_amount(self, req: dict[str, Any]) -> float:
         """解析入金金额。"""
         payload = _as_dict(req.get("payload"))
         value = payload.get("amount") or req.get("amount")
@@ -137,7 +139,7 @@ class BacktraderRuntimeService:
             raise ValueError("payload.amount must be > 0")
         return float(round(amount, 2))
 
-    def _resolve_account(self, req: Dict[str, Any]) -> PaperAccount:
+    def _resolve_account(self, req: dict[str, Any]) -> PaperAccount:
         """按请求中的 broker_account_id 获取或创建本地账户。"""
         broker_account_id = int(req.get("broker_account_id") or 0)
         if broker_account_id <= 0:
@@ -146,7 +148,7 @@ class BacktraderRuntimeService:
         initial_capital = self._resolve_initial_capital(req)
         return self.repo.get_or_create_account(account_name, initial_capital)
 
-    def _summary_payload(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def _summary_payload(self, req: dict[str, Any]) -> dict[str, Any]:
         """构造账户汇总响应，必要时先重算账户指标。"""
         broker_account_id = int(req.get("broker_account_id") or 0)
         account_name = self.account_name_from_broker_id(broker_account_id)
@@ -171,10 +173,10 @@ class BacktraderRuntimeService:
             "realized_pnl": float(snapshot.get("realized_pnl") or 0.0),
             "unrealized_pnl": float(snapshot.get("unrealized_pnl") or 0.0),
             "cumulative_fees": float(snapshot.get("cumulative_fees") or 0.0),
-            "snapshot_at": datetime.now().isoformat(),
+            "snapshot_at": local_now().isoformat(),
         }
 
-    def provision_account(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def provision_account(self, req: dict[str, Any]) -> dict[str, Any]:
         """为请求中的账户准备本地模拟账户。"""
         account = self._resolve_account(req)
         return {
@@ -186,11 +188,11 @@ class BacktraderRuntimeService:
             "message": "backtrader local account ready",
         }
 
-    def get_account_summary(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def get_account_summary(self, req: dict[str, Any]) -> dict[str, Any]:
         """返回账户汇总信息。"""
         return self._summary_payload(req)
 
-    def add_funds(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def add_funds(self, req: dict[str, Any]) -> dict[str, Any]:
         """向本地模拟账户追加资金。"""
         account = self._resolve_account(req)
         payload = _as_dict(req.get("payload"))
@@ -207,16 +209,16 @@ class BacktraderRuntimeService:
             "initial_capital_after": float(change.get("initial_cash_after") or 0.0),
             "note": str(payload.get("note") or "").strip() or None,
             "summary": summary,
-            "snapshot_at": datetime.now().isoformat(),
+            "snapshot_at": local_now().isoformat(),
         }
 
-    def get_positions(self, req: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def get_positions(self, req: dict[str, Any]) -> list[dict[str, Any]]:
         """读取账户当前持仓列表。"""
         broker_account_id = int(req.get("broker_account_id") or 0)
         account_name = self.account_name_from_broker_id(broker_account_id)
         snapshot = self.repo.recompute_account_metrics(account_name) or self.repo.get_account_snapshot(account_name)
         positions = snapshot.get("positions") or []
-        items: List[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         for row in positions:
             if not isinstance(row, dict):
                 continue
@@ -233,7 +235,7 @@ class BacktraderRuntimeService:
             )
         return items
 
-    def get_orders(self, req: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def get_orders(self, req: dict[str, Any]) -> list[dict[str, Any]]:
         """读取账户最近的订单记录。"""
         account = self._resolve_account(req)
         with self.db.get_session() as session:
@@ -259,7 +261,7 @@ class BacktraderRuntimeService:
             for row in rows
         ]
 
-    def get_trades(self, req: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def get_trades(self, req: dict[str, Any]) -> list[dict[str, Any]]:
         """读取账户最近的成交记录。"""
         account = self._resolve_account(req)
         with self.db.get_session() as session:
@@ -285,7 +287,7 @@ class BacktraderRuntimeService:
             for row in rows
         ]
 
-    def _resolve_price(self, stock_code: str, req: Dict[str, Any], order_payload: Dict[str, Any]) -> float:
+    def _resolve_price(self, stock_code: str, req: dict[str, Any], order_payload: dict[str, Any]) -> float:
         """优先使用显式价格；缺失时回退到实时行情。"""
         price = _as_positive_float(order_payload.get("price"))
         if price is not None:
@@ -301,7 +303,7 @@ class BacktraderRuntimeService:
             raise ValueError("price is required when realtime quote is unavailable")
         return float(quote_price)
 
-    def place_order(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def place_order(self, req: dict[str, Any]) -> dict[str, Any]:
         """在本地账本中模拟一次立即成交的市价单。"""
         account = self._resolve_account(req)
         order_payload = _as_dict(req.get("payload"))
@@ -372,7 +374,7 @@ class BacktraderRuntimeService:
                     "message": "可用持仓不足",
                 }
 
-        run_id = f"bt-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
+        run_id = f"bt-{local_now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
         result = self.repo.execute_fill(
             run_id=run_id,
             account_name=account.name,
@@ -403,11 +405,11 @@ class BacktraderRuntimeService:
             "cash_after": float(result.get("cash_after") or 0.0),
             "position_before": int(result.get("position_before") or pos_map.get(stock_code, 0)),
             "position_after": int(result.get("position_after") or 0),
-            "submitted_at": datetime.now().isoformat(),
+            "submitted_at": local_now().isoformat(),
             "message": "ok",
         }
 
-    def cancel_order(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def cancel_order(self, req: dict[str, Any]) -> dict[str, Any]:
         """尝试取消未成交的本地模拟订单。"""
         account = self._resolve_account(req)
         payload = _as_dict(req.get("payload"))
@@ -434,7 +436,7 @@ class BacktraderRuntimeService:
                     "provider_order_id": order_id_raw,
                     "provider_status": "not_found",
                     "status": "not_found",
-                    "cancelled_at": datetime.now().isoformat(),
+                    "cancelled_at": local_now().isoformat(),
                     "message": "order not found",
                 }
             if str(row.status).lower() == "filled":
@@ -443,7 +445,7 @@ class BacktraderRuntimeService:
                     "provider_order_id": order_id_raw,
                     "provider_status": "cannot_cancel_filled",
                     "status": "cannot_cancel_filled",
-                    "cancelled_at": datetime.now().isoformat(),
+                    "cancelled_at": local_now().isoformat(),
                     "message": "filled order cannot be cancelled",
                 }
             row.status = "cancelled"
@@ -454,12 +456,12 @@ class BacktraderRuntimeService:
             "provider_order_id": order_id_raw,
             "provider_status": "cancelled",
             "status": "cancelled",
-            "cancelled_at": datetime.now().isoformat(),
+            "cancelled_at": local_now().isoformat(),
             "message": "cancelled",
         }
 
 
-_backtrader_runtime_service: Optional[BacktraderRuntimeService] = None
+_backtrader_runtime_service: BacktraderRuntimeService | None = None
 
 
 def get_backtrader_runtime_service() -> BacktraderRuntimeService:

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, cast
+
 
 from sqlalchemy import and_, desc, select
 
@@ -24,12 +25,23 @@ from agent_stock.storage import (
     PaperTrade,
     StockDaily,
 )
+from agent_stock.time_utils import local_now
+
+
+def _mapped_int(value: Any) -> int:
+    """将 ORM 读取值明确收窄为整数，便于静态分析识别实例字段。"""
+    return int(cast(Any, value))
+
+
+def _mapped_float(value: Any) -> float:
+    """将 ORM 读取值明确收窄为浮点数，便于静态分析识别实例字段。"""
+    return float(cast(Any, value))
 
 
 class ExecutionRepository:
     """供 Risk/Execution/Orchestrator 使用的持久化层。"""
 
-    def __init__(self, db_manager: Optional[DatabaseManager] = None):
+    def __init__(self, db_manager: DatabaseManager | None = None):
         """初始化数据库管理器。"""
         self.db = db_manager or DatabaseManager.get_instance()
 
@@ -58,14 +70,14 @@ class ExecutionRepository:
             session.refresh(account)
             return account
 
-    def get_account(self, name: str) -> Optional[PaperAccount]:
+    def get_account(self, name: str) -> PaperAccount | None:
         """按名称获取账户。"""
         with self.db.get_session() as session:
             return session.execute(
                 select(PaperAccount).where(PaperAccount.name == name).limit(1)
             ).scalar_one_or_none()
 
-    def get_account_snapshot(self, name: str) -> Dict[str, Any]:
+    def get_account_snapshot(self, name: str) -> dict[str, Any]:
         """获取包含当前持仓的账户聚合值。"""
         with self.db.get_session() as session:
             account = session.execute(
@@ -101,7 +113,7 @@ class ExecutionRepository:
                 ],
             }
 
-    def get_latest_runtime_account_snapshot(self, name: str) -> Dict[str, Any]:
+    def get_latest_runtime_account_snapshot(self, name: str) -> dict[str, Any]:
         """获取账户最新的持久化运行快照（轻量状态来源）。"""
         with self.db.get_session() as session:
             row = session.execute(
@@ -124,7 +136,7 @@ class ExecutionRepository:
             )
             return payload
 
-    def get_position(self, account_id: int, code: str) -> Optional[PaperPosition]:
+    def get_position(self, account_id: int, code: str) -> PaperPosition | None:
         """按账户和代码获取单个持仓。"""
         with self.db.get_session() as session:
             return session.execute(
@@ -133,7 +145,7 @@ class ExecutionRepository:
                 .limit(1)
             ).scalar_one_or_none()
 
-    def list_positions(self, account_id: int) -> List[PaperPosition]:
+    def list_positions(self, account_id: int) -> list[PaperPosition]:
         """列出账户下的全部持仓。"""
         with self.db.get_session() as session:
             rows = session.execute(
@@ -161,10 +173,10 @@ class ExecutionRepository:
             for pos in positions:
                 # 本地模拟账户把“总持仓 -> 当日可卖”结转拆到日初统一完成，避免重复放量。
                 pos.available_qty = int(pos.quantity or 0)
-                pos.updated_at = datetime.now()
+                pos.updated_at = local_now()
 
             account.last_rollover_date = trade_date
-            account.updated_at = datetime.now()
+            account.updated_at = local_now()
             session.commit()
 
     def mark_position_price(self, account_id: int, code: str, price: float) -> None:
@@ -180,7 +192,7 @@ class ExecutionRepository:
             pos.last_price = float(price)
             pos.market_value = float(price) * float(pos.quantity or 0)
             pos.unrealized_pnl = (float(price) - float(pos.avg_cost or 0.0)) * float(pos.quantity or 0)
-            pos.updated_at = datetime.now()
+            pos.updated_at = local_now()
             session.commit()
 
     def execute_fill(
@@ -198,7 +210,7 @@ class ExecutionRepository:
         slippage_bps: float,
         reason: str,
         trade_date: date,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """原子化持久化单笔订单/成交并更新账户与持仓。"""
         with self.db.get_session() as session:
             account = session.execute(
@@ -224,14 +236,15 @@ class ExecutionRepository:
                 .limit(1)
             ).scalar_one_or_none()
 
-            cash_before = float(account.cash or 0.0)
-            quantity_before = int(position.quantity) if position is not None else 0
-            available_before = int(position.available_qty) if position is not None else 0
-            avg_cost_before = float(position.avg_cost) if position is not None else 0.0
+            account_id = _mapped_int(account.id)
+            cash_before = _mapped_float(account.cash or 0.0)
+            quantity_before = _mapped_int(position.quantity) if position is not None else 0
+            available_before = _mapped_int(position.available_qty) if position is not None else 0
+            avg_cost_before = _mapped_float(position.avg_cost) if position is not None else 0.0
 
             order = PaperOrder(
                 run_id=run_id,
-                account_id=account.id,
+                account_id=account_id,
                 code=code,
                 side=side,
                 qty=int(qty),
@@ -239,16 +252,17 @@ class ExecutionRepository:
                 limit_price=float(fill_price),
                 status="filled",
                 reason=reason,
-                created_at=datetime.now(),
+                created_at=local_now(),
             )
             session.add(order)
             session.flush()
+            order_id = _mapped_int(order.id)
 
             gross_amount = float(fill_price) * float(qty)
             trade = PaperTrade(
                 run_id=run_id,
-                order_id=order.id,
-                account_id=account.id,
+                order_id=order_id,
+                account_id=account_id,
                 code=code,
                 side=side,
                 qty=int(qty),
@@ -258,13 +272,13 @@ class ExecutionRepository:
                 tax=float(tax),
                 slippage_bps=float(slippage_bps),
                 trade_date=trade_date,
-                created_at=datetime.now(),
+                created_at=local_now(),
             )
             session.add(trade)
 
             if position is None:
                 position = PaperPosition(
-                    account_id=account.id,
+                    account_id=account_id,
                     code=code,
                     quantity=0,
                     available_qty=0,
@@ -300,7 +314,7 @@ class ExecutionRepository:
                     session.delete(position)
 
             account.cumulative_fees = float(account.cumulative_fees or 0.0) + float(fee) + float(tax)
-            account.updated_at = datetime.now()
+            account.updated_at = local_now()
 
             self._recompute_account_metrics_in_session(
                 session=session,
@@ -319,7 +333,7 @@ class ExecutionRepository:
                 "position_after": max(0, quantity_before + int(qty) if side == "buy" else quantity_before - int(qty)),
             }
 
-    def recompute_account_metrics(self, account_name: str, price_overrides: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    def recompute_account_metrics(self, account_name: str, price_overrides: dict[str, float] | None = None) -> dict[str, Any]:
         """重新计算账户市值与未实现盈亏。"""
         with self.db.get_session() as session:
             account = session.execute(
@@ -333,7 +347,7 @@ class ExecutionRepository:
 
         return self.get_account_snapshot(account_name)
 
-    def add_funds(self, account_name: str, amount: float) -> Dict[str, Any]:
+    def add_funds(self, account_name: str, amount: float) -> dict[str, Any]:
         """原子化增加账户现金与初始资金。"""
         amount_num = float(amount)
         if amount_num <= 0:
@@ -351,7 +365,7 @@ class ExecutionRepository:
 
             account.cash = cash_before + amount_num
             account.initial_cash = initial_cash_before + amount_num
-            account.updated_at = datetime.now()
+            account.updated_at = local_now()
 
             self._recompute_account_metrics_in_session(session=session, account=account)
             session.commit()
@@ -368,7 +382,7 @@ class ExecutionRepository:
         *,
         session,
         account: PaperAccount,
-        price_overrides: Optional[Dict[str, float]] = None,
+        price_overrides: dict[str, float] | None = None,
     ) -> None:
         """在打开会话中重新计算账户总计的内部辅助逻辑。"""
         price_overrides = price_overrides or {}
@@ -387,7 +401,7 @@ class ExecutionRepository:
             pos.last_price = latest_price
             pos.market_value = latest_price * float(pos.quantity or 0)
             pos.unrealized_pnl = (latest_price - float(pos.avg_cost or 0.0)) * float(pos.quantity or 0)
-            pos.updated_at = datetime.now()
+            pos.updated_at = local_now()
 
             total_mv += float(pos.market_value or 0.0)
             total_unrealized += float(pos.unrealized_pnl or 0.0)
@@ -395,10 +409,10 @@ class ExecutionRepository:
         account.total_market_value = total_mv
         account.unrealized_pnl = total_unrealized
         account.total_asset = float(account.cash or 0.0) + total_mv
-        account.updated_at = datetime.now()
+        account.updated_at = local_now()
 
     @staticmethod
-    def _get_latest_close_price_in_session(session, code: str) -> Optional[float]:
+    def _get_latest_close_price_in_session(session, code: str) -> float | None:
         """在当前会话内读取指定股票最近收盘价。"""
         row = session.execute(
             select(StockDaily)
@@ -416,18 +430,18 @@ class ExecutionRepository:
         run_id: str,
         mode: str,
         trade_date: date,
-        stock_codes: List[str],
+        stock_codes: list[str],
         account_name: str,
         status: str,
-        data_snapshot: Dict[str, Any],
-        signal_snapshot: Dict[str, Any],
-        risk_snapshot: Dict[str, Any],
-        execution_snapshot: Dict[str, Any],
-        account_snapshot: Dict[str, Any],
-        report_path: Optional[str] = None,
-        error_message: Optional[str] = None,
-        started_at: Optional[datetime] = None,
-        ended_at: Optional[datetime] = None,
+        data_snapshot: dict[str, Any],
+        signal_snapshot: dict[str, Any],
+        risk_snapshot: dict[str, Any],
+        execution_snapshot: dict[str, Any],
+        account_snapshot: dict[str, Any],
+        report_path: str | None = None,
+        error_message: str | None = None,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
     ) -> None:
         """持久化一次编排周期。"""
         payload = AgentRun(
@@ -446,7 +460,7 @@ class ExecutionRepository:
             error_message=error_message,
             started_at=started_at,
             ended_at=ended_at,
-            created_at=datetime.now(),
+            created_at=local_now(),
         )
 
         with self.db.get_session() as session:
@@ -470,10 +484,10 @@ class ExecutionRepository:
                 existing.error_message = payload.error_message
                 existing.started_at = payload.started_at
                 existing.ended_at = payload.ended_at
-                existing.created_at = datetime.now()
+                existing.created_at = local_now()
             session.commit()
 
-    def get_agent_run(self, run_id: str) -> Dict[str, Any]:
+    def get_agent_run(self, run_id: str) -> dict[str, Any]:
         """按 `run_id` 获取单条持久化运行记录。"""
         with self.db.get_session() as session:
             row = session.execute(
@@ -487,9 +501,9 @@ class ExecutionRepository:
         self,
         *,
         limit: int = 20,
-        status: Optional[str] = None,
-        trade_date: Optional[date] = None,
-    ) -> List[Dict[str, Any]]:
+        status: str | None = None,
+        trade_date: date | None = None,
+    ) -> list[dict[str, Any]]:
         """列出最近的持久化运行记录。"""
         with self.db.get_session() as session:
             query = select(AgentRun)
@@ -507,9 +521,9 @@ class ExecutionRepository:
         self,
         *,
         task_id: str,
-        stock_codes: List[str],
+        stock_codes: list[str],
         account_name: str,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         status: str = "pending",
     ) -> None:
         """持久化一条新的异步任务记录。"""
@@ -522,13 +536,13 @@ class ExecutionRepository:
                 account_name=account_name,
                 run_id=None,
                 error_message=None,
-                created_at=datetime.now(),
-                updated_at=datetime.now(),
+                created_at=local_now(),
+                updated_at=local_now(),
             )
             session.add(row)
             session.commit()
 
-    def get_agent_task(self, task_id: str) -> Dict[str, Any]:
+    def get_agent_task(self, task_id: str) -> dict[str, Any]:
         """按 `task_id` 获取任务。"""
         with self.db.get_session() as session:
             row = session.execute(
@@ -538,7 +552,7 @@ class ExecutionRepository:
                 return {}
             return self._task_to_dict(row)
 
-    def get_agent_task_by_request_id(self, request_id: str) -> Dict[str, Any]:
+    def get_agent_task_by_request_id(self, request_id: str) -> dict[str, Any]:
         """按幂等 `request_id` 获取任务。"""
         if not request_id:
             return {}
@@ -554,11 +568,11 @@ class ExecutionRepository:
         self,
         task_id: str,
         *,
-        status: Optional[str] = None,
-        run_id: Optional[str] = None,
-        error_message: Optional[str] = None,
-        started_at: Optional[datetime] = None,
-        completed_at: Optional[datetime] = None,
+        status: str | None = None,
+        run_id: str | None = None,
+        error_message: str | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
         """更新任务状态字段。"""
         with self.db.get_session() as session:
@@ -578,7 +592,7 @@ class ExecutionRepository:
                 row.started_at = started_at
             if completed_at is not None:
                 row.completed_at = completed_at
-            row.updated_at = datetime.now()
+            row.updated_at = local_now()
             session.commit()
 
     def mark_inflight_tasks_failed(self, reason: str = "service_restarted") -> int:
@@ -590,7 +604,7 @@ class ExecutionRepository:
             if not rows:
                 return 0
 
-            now = datetime.now()
+            now = local_now()
             for row in rows:
                 row.status = "failed"
                 row.error_message = reason
@@ -604,8 +618,8 @@ class ExecutionRepository:
         *,
         code: str,
         trade_date: date,
-        signal_payload: Dict[str, Any],
-        ai_payload: Dict[str, Any],
+        signal_payload: dict[str, Any],
+        ai_payload: dict[str, Any],
     ) -> None:
         """按代码插入或更新每日信号缓存。"""
         with self.db.get_session() as session:
@@ -620,17 +634,17 @@ class ExecutionRepository:
                     trade_date=trade_date,
                     signal_payload=self._safe_json(signal_payload),
                     ai_payload=self._safe_json(ai_payload),
-                    created_at=datetime.now(),
-                    updated_at=datetime.now(),
+                    created_at=local_now(),
+                    updated_at=local_now(),
                 )
                 session.add(row)
             else:
                 row.signal_payload = self._safe_json(signal_payload)
                 row.ai_payload = self._safe_json(ai_payload)
-                row.updated_at = datetime.now()
+                row.updated_at = local_now()
             session.commit()
 
-    def get_signal_snapshot(self, *, code: str, trade_date: date) -> Dict[str, Any]:
+    def get_signal_snapshot(self, *, code: str, trade_date: date) -> dict[str, Any]:
         """获取按代码划分的每日信号缓存。"""
         with self.db.get_session() as session:
             row = session.execute(
@@ -647,7 +661,7 @@ class ExecutionRepository:
                 "ai_payload": self._safe_loads(row.ai_payload),
             }
 
-    def _run_to_dict(self, row: AgentRun) -> Dict[str, Any]:
+    def _run_to_dict(self, row: AgentRun) -> dict[str, Any]:
         """将运行记录 ORM 对象转换为接口字典。"""
         return {
             "run_id": row.run_id,
@@ -669,7 +683,7 @@ class ExecutionRepository:
         }
 
     @staticmethod
-    def _task_to_dict(row: AgentTask) -> Dict[str, Any]:
+    def _task_to_dict(row: AgentTask) -> dict[str, Any]:
         """将任务 ORM 对象转换为接口字典。"""
         return {
             "task_id": row.task_id,
@@ -694,7 +708,7 @@ class ExecutionRepository:
             return "{}"
 
     @staticmethod
-    def _safe_loads(raw: Optional[str]) -> Dict[str, Any]:
+    def _safe_loads(raw: str | None) -> dict[str, Any]:
         """安全反序列化字典载荷。"""
         if not raw:
             return {}

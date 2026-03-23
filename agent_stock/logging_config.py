@@ -12,10 +12,10 @@
 
 import logging
 import sys
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import List, Optional
+
+from agent_stock.time_utils import local_now
 
 # ============================================================
 # 日志格式常量
@@ -35,10 +35,10 @@ DEFAULT_QUIET_LOGGERS = [
 
 def setup_logging(
     log_prefix: str = "app",
-    log_dir: Optional[str] = "./logs",
-    console_level: Optional[int] = None,
+    log_dir: str | None = "./logs",
+    console_level: int | None = None,
     debug: bool = False,
-    extra_quiet_loggers: Optional[List[str]] = None,
+    extra_quiet_loggers: list[str] | None = None,
     write_files: bool = True,
 ) -> None:
     """
@@ -81,7 +81,7 @@ def setup_logging(
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
 
-        today_str = datetime.now().strftime('%Y%m%d')
+        today_str = local_now().strftime('%Y%m%d')
         log_file = log_path / f"{log_prefix}_{today_str}.log"
         debug_log_file = log_path / f"{log_prefix}_debug_{today_str}.log"
 

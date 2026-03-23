@@ -8,13 +8,15 @@ import threading
 import uuid
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any
+
 
 from data_provider.base import canonical_stock_code
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.storage import DatabaseManager
 from agent_stock.config import Config, get_config, redact_sensitive_text
+from agent_stock.time_utils import local_now
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +27,9 @@ class AgentTaskService:
     def __init__(
         self,
         *,
-        config: Optional[Config] = None,
-        db_manager: Optional[DatabaseManager] = None,
-        execution_repo: Optional[ExecutionRepository] = None,
+        config: Config | None = None,
+        db_manager: DatabaseManager | None = None,
+        execution_repo: ExecutionRepository | None = None,
         agent_service=None,
     ) -> None:
         """初始化任务服务和线程池。"""
@@ -37,7 +39,7 @@ class AgentTaskService:
         self._agent_service = agent_service
         self._max_workers = max(1, int(getattr(self.config, "agent_task_max_workers", 3)))
         self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="agent_task")
-        self._futures: Dict[str, object] = {}
+        self._futures: dict[str, object] = {}
         self._lock = threading.RLock()
 
     @property
@@ -60,11 +62,11 @@ class AgentTaskService:
     def run_sync(
         self,
         *,
-        stock_codes: List[str],
-        request_id: Optional[str] = None,
-        account_name: Optional[str] = None,
-        runtime_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict:
+        stock_codes: list[str],
+        request_id: str | None = None,
+        account_name: str | None = None,
+        runtime_config: dict[str, Any] | None = None,
+    ) -> dict:
         """同步执行一次运行，并返回持久化结果。"""
         normalized_codes = self._normalize_codes(stock_codes)
         resolved_account = self._resolve_account_name(account_name=account_name, runtime_config=runtime_config)
@@ -110,11 +112,11 @@ class AgentTaskService:
     def submit_task(
         self,
         *,
-        stock_codes: List[str],
-        request_id: Optional[str] = None,
-        account_name: Optional[str] = None,
-        runtime_config: Optional[Dict[str, Any]] = None,
-    ) -> Dict:
+        stock_codes: list[str],
+        request_id: str | None = None,
+        account_name: str | None = None,
+        runtime_config: dict[str, Any] | None = None,
+    ) -> dict:
         """提交一次异步运行请求。"""
         normalized_codes = self._normalize_codes(stock_codes)
         resolved_account = self._resolve_account_name(account_name=account_name, runtime_config=runtime_config)
@@ -150,13 +152,13 @@ class AgentTaskService:
     def _execute_task(
         self,
         task_id: str,
-        request_id: Optional[str],
-        stock_codes: List[str],
+        request_id: str | None,
+        stock_codes: list[str],
         account_name: str,
-        runtime_config: Optional[Dict[str, Any]] = None,
+        runtime_config: dict[str, Any] | None = None,
     ) -> None:
         """线程池工作函数，负责实际执行异步任务。"""
-        started_at = datetime.now()
+        started_at = local_now()
         self.repo.update_agent_task(task_id, status="processing", started_at=started_at)
 
         try:
@@ -180,17 +182,17 @@ class AgentTaskService:
                 task_id,
                 status="failed",
                 error_message=safe_error,
-                completed_at=datetime.now(),
+                completed_at=local_now(),
             )
         finally:
             with self._lock:
                 self._futures.pop(task_id, None)
 
-    def get_task(self, task_id: str) -> Dict:
+    def get_task(self, task_id: str) -> dict:
         """按 `task_id` 查询任务状态。"""
         return self.repo.get_agent_task(task_id)
 
-    def get_run(self, run_id: str) -> Dict:
+    def get_run(self, run_id: str) -> dict:
         """按 `run_id` 查询运行结果。"""
         return self.repo.get_agent_run(run_id)
 
@@ -198,21 +200,21 @@ class AgentTaskService:
         self,
         *,
         limit: int = 20,
-        status: Optional[str] = None,
-        trade_date_value: Optional[str] = None,
-    ) -> List[Dict]:
+        status: str | None = None,
+        trade_date_value: str | None = None,
+    ) -> list[dict]:
         """按可选筛选条件列出运行记录。"""
-        parsed_trade_date: Optional[date] = None
+        parsed_trade_date: date | None = None
         if trade_date_value:
             parsed_trade_date = date.fromisoformat(trade_date_value)
         return self.repo.list_agent_runs(limit=limit, status=status, trade_date=parsed_trade_date)
 
-    def get_account_snapshot(self, account_name: str) -> Dict:
+    def get_account_snapshot(self, account_name: str) -> dict:
         """按账户名读取最新运行时快照，兼容旧接口。"""
         return self.repo.get_latest_runtime_account_snapshot(account_name)
 
     @staticmethod
-    def _normalize_codes(stock_codes: List[str]) -> List[str]:
+    def _normalize_codes(stock_codes: list[str]) -> list[str]:
         """标准化股票代码并去重。"""
         normalized = [canonical_stock_code(item) for item in stock_codes if item and str(item).strip()]
         unique = list(dict.fromkeys(normalized))
@@ -223,8 +225,8 @@ class AgentTaskService:
     def _resolve_account_name(
         self,
         *,
-        account_name: Optional[str],
-        runtime_config: Optional[Dict[str, Any]],
+        account_name: str | None,
+        runtime_config: dict[str, Any] | None,
     ) -> str:
         """解析同步/异步入口最终生效的账户名。"""
         top_level_account = str(account_name or "").strip() or None
@@ -243,7 +245,7 @@ class AgentTaskService:
         return resolved
 
     @staticmethod
-    def _extract_runtime_account_name(runtime_config: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _extract_runtime_account_name(runtime_config: dict[str, Any] | None) -> str | None:
         """从运行时配置中提取账户名覆盖项。"""
         if not isinstance(runtime_config, dict):
             return None
@@ -254,15 +256,15 @@ class AgentTaskService:
         return account_name or None
 
 
-_TASK_SERVICE: Optional[AgentTaskService] = None
+_TASK_SERVICE: AgentTaskService | None = None
 _TASK_SERVICE_LOCK = threading.Lock()
 
 
 def get_agent_task_service(
     *,
-    config: Optional[Config] = None,
-    db_manager: Optional[DatabaseManager] = None,
-    execution_repo: Optional[ExecutionRepository] = None,
+    config: Config | None = None,
+    db_manager: DatabaseManager | None = None,
+    execution_repo: ExecutionRepository | None = None,
     agent_service=None,
 ) -> AgentTaskService:
     """返回任务服务单例。"""

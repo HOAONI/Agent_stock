@@ -8,7 +8,8 @@ import os
 import re
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar
+
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -43,7 +44,7 @@ _BEARER_RE = re.compile(r"(?i)(bearer\s+)([A-Za-z0-9_\-\.=:+/]{6,})")
 _OPENAI_KEY_RE = re.compile(r"sk-[A-Za-z0-9]{8,}")
 
 
-def mask_secret(value: Optional[str]) -> str:
+def mask_secret(value: str | None) -> str:
     """对日志和错误中的敏感值进行脱敏。"""
     text = str(value or "")
     if not text:
@@ -53,13 +54,13 @@ def mask_secret(value: Optional[str]) -> str:
     return f"{text[:2]}{'*' * (len(text) - 4)}{text[-2:]}"
 
 
-def is_valid_secret(value: Optional[str]) -> bool:
+def is_valid_secret(value: str | None) -> bool:
     """判断类令牌值是否看起来已配置。"""
     text = str(value or "").strip()
     return bool(text) and len(text) > 10 and not text.startswith("your_")
 
 
-def infer_openai_compatible_provider(base_url: Optional[str]) -> str:
+def infer_openai_compatible_provider(base_url: str | None) -> str:
     """为单个 OpenAI 兼容端点推断提供方标签。"""
     normalized = str(base_url or "").strip().lower()
     if "deepseek" in normalized:
@@ -69,7 +70,7 @@ def infer_openai_compatible_provider(base_url: Optional[str]) -> str:
     return "openai"
 
 
-def redact_sensitive_text(text: Optional[str]) -> str:
+def redact_sensitive_text(text: str | None) -> str:
     """从纯文本中脱敏 token/key/secret 片段。"""
     raw = str(text or "")
     if not raw:
@@ -86,7 +87,7 @@ def redact_sensitive_payload(payload: Any) -> Any:
     if payload is None:
         return None
     if isinstance(payload, dict):
-        result: Dict[str, Any] = {}
+        result: dict[str, Any] = {}
         for key, value in payload.items():
             if _SENSITIVE_KEY_RE.search(str(key)):
                 result[key] = mask_secret(value if isinstance(value, str) else str(value))
@@ -107,8 +108,8 @@ class RuntimeAccountConfig:
     """请求级账户覆盖配置。"""
 
     account_name: str
-    initial_cash: Optional[float] = None
-    account_display_name: Optional[str] = None
+    initial_cash: float | None = None
+    account_display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,9 +117,9 @@ class RuntimeLlmConfig:
     """请求级 LLM 覆盖配置。"""
 
     provider: str
-    base_url: Optional[str] = None
-    model: Optional[str] = None
-    api_token: Optional[str] = None
+    base_url: str | None = None
+    model: str | None = None
+    api_token: str | None = None
     has_token: bool = False
 
 
@@ -136,9 +137,9 @@ class RuntimeLlmDefaultConfig:
 class RuntimeStrategyConfig:
     """请求级策略覆盖配置。"""
 
-    position_max_pct: Optional[float] = None
-    stop_loss_pct: Optional[float] = None
-    take_profit_pct: Optional[float] = None
+    position_max_pct: float | None = None
+    stop_loss_pct: float | None = None
+    take_profit_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,7 @@ class RuntimeExecutionConfig:
 
     mode: str = "paper"
     has_ticket: bool = False
-    broker_account_id: Optional[int] = None
+    broker_account_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -161,21 +162,21 @@ class RuntimeDataSourceConfig:
 class RuntimeContextConfig:
     """请求级上游账户上下文。"""
 
-    account_snapshot: Optional[Dict[str, Any]] = None
-    summary: Optional[Dict[str, Any]] = None
-    positions: Optional[list[Dict[str, Any]]] = None
+    account_snapshot: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+    positions: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
 class AgentRuntimeConfig:
     """请求级运行时覆盖配置集合。"""
 
-    account: Optional[RuntimeAccountConfig] = None
-    llm: Optional[RuntimeLlmConfig] = None
-    strategy: Optional[RuntimeStrategyConfig] = None
-    execution: Optional[RuntimeExecutionConfig] = None
-    data_source: Optional[RuntimeDataSourceConfig] = None
-    context: Optional[RuntimeContextConfig] = None
+    account: RuntimeAccountConfig | None = None
+    llm: RuntimeLlmConfig | None = None
+    strategy: RuntimeStrategyConfig | None = None
+    execution: RuntimeExecutionConfig | None = None
+    data_source: RuntimeDataSourceConfig | None = None
+    context: RuntimeContextConfig | None = None
 
 
 @dataclass
@@ -184,9 +185,9 @@ class Config:
 
     stock_list: list[str] = field(default_factory=lambda: DEFAULT_STOCK_LIST.copy())
 
-    tushare_token: Optional[str] = None
+    tushare_token: str | None = None
 
-    gemini_api_key: Optional[str] = None
+    gemini_api_key: str | None = None
     gemini_model: str = "gemini-3-flash-preview"
     gemini_model_fallback: str = "gemini-2.5-flash"
     gemini_temperature: float = 0.7
@@ -194,13 +195,13 @@ class Config:
     gemini_max_retries: int = 5
     gemini_retry_delay: float = 5.0
 
-    anthropic_api_key: Optional[str] = None
+    anthropic_api_key: str | None = None
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     anthropic_temperature: float = 0.7
     anthropic_max_tokens: int = 8192
 
-    openai_api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
     openai_model: str = "gpt-4o-mini"
     openai_temperature: float = 0.7
     agent_llm_request_timeout_ms: int = 120000
@@ -214,7 +215,7 @@ class Config:
     bias_threshold: float = 5.0
 
     database_path: str = "./data/stock_analysis.db"
-    database_url: Optional[str] = None
+    database_url: str | None = None
     save_context_snapshot: bool = True
 
     agent_run_mode: str = "once"
@@ -239,7 +240,7 @@ class Config:
     agent_service_mode: bool = False
     agent_service_host: str = "0.0.0.0"
     agent_service_port: int = 8001
-    agent_service_auth_token: Optional[str] = None
+    agent_service_auth_token: str | None = None
     agent_task_max_workers: int = 3
     agent_write_local_reports: bool = False
 
@@ -251,10 +252,10 @@ class Config:
     enable_eastmoney_patch: bool = False
     realtime_source_priority: str = DEFAULT_REALTIME_SOURCE_PRIORITY
 
-    _instance: ClassVar[Optional["Config"]] = None
+    _instance: ClassVar[Config | None] = None
 
     @classmethod
-    def get_instance(cls) -> "Config":
+    def get_instance(cls) -> Config:
         """返回配置单例。"""
         if cls._instance is None:
             cls._instance = cls._load_from_env()
@@ -266,7 +267,7 @@ class Config:
         cls._instance = None
 
     @classmethod
-    def _load_from_env(cls) -> "Config":
+    def _load_from_env(cls) -> Config:
         """从环境变量和 `.env` 文件加载配置。"""
         setup_env()
         cls._apply_proxy_settings()
@@ -392,15 +393,15 @@ class Config:
             return f"tushare,{DEFAULT_REALTIME_SOURCE_PRIORITY}"
         return DEFAULT_REALTIME_SOURCE_PRIORITY
 
-    def clone_with_overrides(self, **overrides: Any) -> "Config":
+    def clone_with_overrides(self, **overrides: Any) -> Config:
         """构建带请求级覆盖项的独立配置对象。"""
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         for item in fields(self):
             payload[item.name] = copy.deepcopy(getattr(self, item.name))
         payload.update(overrides)
         return Config(**payload)
 
-    def clone_for_runtime_llm(self, runtime_llm: Optional[RuntimeLlmConfig]) -> "Config":
+    def clone_for_runtime_llm(self, runtime_llm: RuntimeLlmConfig | None) -> Config:
         """为单个运行时 LLM 覆盖项构建请求级配置视图。"""
         if runtime_llm is None:
             return self
@@ -410,7 +411,7 @@ class Config:
         model = str(runtime_llm.model or "").strip()
         api_token = str(runtime_llm.api_token or "").strip() or None
 
-        overrides: Dict[str, Any] = {
+        overrides: dict[str, Any] = {
             "gemini_api_key": None,
             "anthropic_api_key": None,
             "openai_api_key": None,
@@ -443,7 +444,7 @@ class Config:
 
         return self.clone_with_overrides(**overrides)
 
-    def resolve_default_runtime_llm(self) -> Optional[RuntimeLlmDefaultConfig]:
+    def resolve_default_runtime_llm(self) -> RuntimeLlmDefaultConfig | None:
         """解析当前生效的内置默认 LLM 元数据。"""
         if is_valid_secret(self.gemini_api_key):
             return RuntimeLlmDefaultConfig(

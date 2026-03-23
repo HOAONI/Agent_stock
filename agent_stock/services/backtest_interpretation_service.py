@@ -6,7 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable
+
 
 from agent_stock.analyzer import GeminiAnalyzer
 from agent_stock.config import Config, RuntimeLlmConfig, get_config, redact_sensitive_text
@@ -17,13 +18,13 @@ UNAVAILABLE_SUMMARY = "AI 解读暂不可用，请先检查当前运行环境里
 FAILED_SUMMARY = "AI 解读生成失败，请稍后重试。"
 
 
-def _as_dict(value: Any) -> Dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
 
 
-def _as_list_of_dicts(value: Any) -> List[Dict[str, Any]]:
+def _as_list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
@@ -44,11 +45,11 @@ class InterpretationItem:
     item_type: str
     label: str
     code: str
-    requested_range: Dict[str, Any]
-    effective_range: Dict[str, Any]
-    metrics: Dict[str, Any]
-    benchmark: Dict[str, Any]
-    context: Dict[str, Any]
+    requested_range: dict[str, Any]
+    effective_range: dict[str, Any]
+    metrics: dict[str, Any]
+    benchmark: dict[str, Any]
+    context: dict[str, Any]
 
 
 class BacktestInterpretationService:
@@ -57,15 +58,15 @@ class BacktestInterpretationService:
     def __init__(
         self,
         *,
-        config: Optional[Config] = None,
-        analyzer_factory: Optional[Callable[[Optional[RuntimeLlmConfig]], Any]] = None,
+        config: Config | None = None,
+        analyzer_factory: Callable[[RuntimeLlmConfig | None], Any] | None = None,
     ) -> None:
         self.config = config or get_config()
         self._analyzer_factory = analyzer_factory or (
             lambda runtime_llm: GeminiAnalyzer(config=self.config, runtime_llm=runtime_llm)
         )
 
-    def interpret(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def interpret(self, payload: dict[str, Any]) -> dict[str, Any]:
         """批量生成回测结果中文解读。"""
         items = self._parse_items(payload)
         if not items:
@@ -113,7 +114,7 @@ class BacktestInterpretationService:
             for row in parsed
             if _clean_text(row.get("item_key"), 128)
         }
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         for item in items:
             matched = parsed_by_key.get(item.item_key)
             if not matched:
@@ -136,8 +137,8 @@ class BacktestInterpretationService:
             )
         return {"items": results}
 
-    def _parse_items(self, payload: Dict[str, Any]) -> List[InterpretationItem]:
-        items: List[InterpretationItem] = []
+    def _parse_items(self, payload: dict[str, Any]) -> list[InterpretationItem]:
+        items: list[InterpretationItem] = []
         for row in _as_list_of_dicts(payload.get("items")):
             item_key = _clean_text(row.get("item_key"), 128)
             if not item_key:
@@ -159,7 +160,7 @@ class BacktestInterpretationService:
         return items
 
     @staticmethod
-    def _parse_runtime_llm(payload: Dict[str, Any]) -> RuntimeLlmConfig | None:
+    def _parse_runtime_llm(payload: dict[str, Any]) -> RuntimeLlmConfig | None:
         if not payload:
             return None
 
@@ -177,7 +178,7 @@ class BacktestInterpretationService:
             has_token=bool(payload.get("has_token") or api_token),
         )
 
-    def _build_prompt(self, items: List[InterpretationItem]) -> str:
+    def _build_prompt(self, items: list[InterpretationItem]) -> str:
         prompt_payload = [
             {
                 "item_key": item.item_key,
@@ -210,13 +211,13 @@ class BacktestInterpretationService:
 {json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":"))}
 """
 
-    def _parse_response(self, raw_text: str) -> List[Dict[str, Any]]:
+    def _parse_response(self, raw_text: str) -> list[dict[str, Any]]:
         payload = self._extract_json(raw_text)
         if isinstance(payload, list):
             items = payload
         else:
             items = _as_list_of_dicts(_as_dict(payload).get("items"))
-        parsed: List[Dict[str, Any]] = []
+        parsed: list[dict[str, Any]] = []
         for row in items:
             item_key = _clean_text(row.get("item_key"), 128)
             summary = _clean_text(row.get("summary"), 280)
@@ -267,7 +268,7 @@ class BacktestInterpretationService:
         summary: Any,
         verdict: Any = None,
         error_message: Any = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return {
             "item_key": item_key,
             "status": status,
