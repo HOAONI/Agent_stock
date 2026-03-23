@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """信号智能体。
 
-它站在“规则分析”和“AI 分析”之间做汇总：先从历史上下文构建趋势信号，再决定
+它站在“规则分析”和“AI 分析”两者之间做汇总：先从历史上下文构建趋势信号，再决定
 是否刷新 AI 结果，最后把两者压平成统一的 `SignalAgentOutput`。
 """
 
@@ -10,7 +10,8 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable
+
 
 import pandas as pd
 
@@ -31,11 +32,11 @@ class SignalAgent:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        db_manager: Optional[DatabaseManager] = None,
-        trend_analyzer: Optional[StockTrendAnalyzer] = None,
-        execution_repo: Optional[ExecutionRepository] = None,
-        ai_resolver: Optional[Callable[[str], Any]] = None,
+        config: Config | None = None,
+        db_manager: DatabaseManager | None = None,
+        trend_analyzer: StockTrendAnalyzer | None = None,
+        execution_repo: ExecutionRepository | None = None,
+        ai_resolver: Callable[[str], Any] | None = None,
     ) -> None:
         """初始化信号生成所需的趋势分析、缓存和 AI 依赖。"""
         self.config = config or get_config()
@@ -43,13 +44,13 @@ class SignalAgent:
         self.trend_analyzer = trend_analyzer or StockTrendAnalyzer()
         self.repo = execution_repo or ExecutionRepository(self.db)
         self._ai_resolver = ai_resolver
-        self._pipeline: Optional[StockAnalysisPipeline] = None
+        self._pipeline: StockAnalysisPipeline | None = None
 
     def run(
         self,
         data_output: DataAgentOutput,
         *,
-        runtime_config: Optional[AgentRuntimeConfig] = None,
+        runtime_config: AgentRuntimeConfig | None = None,
     ) -> SignalAgentOutput:
         """结合趋势分析与 AI 结果生成每日信号。"""
         code = data_output.code
@@ -119,7 +120,7 @@ class SignalAgent:
             error_message=error_message,
         )
 
-    def _resolve_ai(self, code: str, *, runtime_config: Optional[AgentRuntimeConfig] = None) -> Any:
+    def _resolve_ai(self, code: str, *, runtime_config: AgentRuntimeConfig | None = None) -> Any:
         """通过注入的解析器或默认分析管线获取 AI 结果。"""
         if self._ai_resolver is not None:
             try:
@@ -167,7 +168,7 @@ class SignalAgent:
             return None
 
     @staticmethod
-    def _build_runtime_account_context(*, runtime_config: Optional[AgentRuntimeConfig]) -> Optional[Dict[str, Any]]:
+    def _build_runtime_account_context(*, runtime_config: AgentRuntimeConfig | None) -> dict[str, Any] | None:
         """将运行时账户上下文整理为 AI 分析可消费的载荷。"""
         if not runtime_config or not runtime_config.context:
             return None
@@ -177,7 +178,7 @@ class SignalAgent:
         summary = context.summary if isinstance(context.summary, dict) else {}
         positions = context.positions if isinstance(context.positions, list) else []
 
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         if account_snapshot:
             payload["account_snapshot"] = dict(account_snapshot)
         if summary:
@@ -186,7 +187,7 @@ class SignalAgent:
             payload["positions"] = [dict(item) for item in positions if isinstance(item, dict)]
         return payload or None
 
-    def _build_trend_result(self, data_output: DataAgentOutput) -> Optional[TrendAnalysisResult]:
+    def _build_trend_result(self, data_output: DataAgentOutput) -> TrendAnalysisResult | None:
         """基于上下文原始数据计算趋势分析结果。"""
         context = data_output.analysis_context or {}
         raw_data = context.get("raw_data")
@@ -203,7 +204,7 @@ class SignalAgent:
             return None
 
     @staticmethod
-    def _trend_to_payload(trend_result: Optional[TrendAnalysisResult]) -> Dict[str, Any]:
+    def _trend_to_payload(trend_result: TrendAnalysisResult | None) -> dict[str, Any]:
         """将趋势分析结果压平成可存储字典。"""
         if trend_result is None:
             return {}
@@ -218,9 +219,9 @@ class SignalAgent:
             "volume_status": trend_result.volume_status.value,
         }
 
-    def _extract_ai_payload(self, ai_result: Any) -> Dict[str, Any]:
+    def _extract_ai_payload(self, ai_result: Any) -> dict[str, Any]:
         """从 AI 分析结果中提取标准化字段。"""
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "operation_advice": getattr(ai_result, "operation_advice", None),
             "sentiment_score": getattr(ai_result, "sentiment_score", None),
             "trend_prediction": getattr(ai_result, "trend_prediction", None),
@@ -239,7 +240,7 @@ class SignalAgent:
         return payload
 
     @staticmethod
-    def _parse_price(value: Any) -> Optional[float]:
+    def _parse_price(value: Any) -> float | None:
         """从数字或字符串字段中提取价格。"""
         if value is None:
             return None
@@ -264,7 +265,7 @@ class SignalAgent:
             return None
 
     @staticmethod
-    def _fallback_operation_advice(trend_result: Optional[TrendAnalysisResult]) -> str:
+    def _fallback_operation_advice(trend_result: TrendAnalysisResult | None) -> str:
         """在 AI 不可用时，根据趋势信号回退生成操作建议。"""
         if trend_result is None:
             return "观望"

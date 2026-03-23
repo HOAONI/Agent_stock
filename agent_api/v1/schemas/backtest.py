@@ -188,7 +188,7 @@ class StrategyTemplateRunDefinition(BaseModel):
 
 
 class StrategyRangeRunRequest(BaseModel):
-    """区间策略回测请求。"""
+    """策略区间回测请求。"""
 
     model_config = ConfigDict(extra="allow")
 

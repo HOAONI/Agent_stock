@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import math
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any
+
 
 from data_provider.base import canonical_stock_code
 
 from agent_stock.agents.contracts import AgentState, ExecutionAgentOutput, RiskAgentOutput
 from agent_stock.repositories.execution_repo import ExecutionRepository
-from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
+from agent_stock.services.backtrader_runtime_service import get_backtrader_runtime_service
 from agent_stock.storage import DatabaseManager
 from agent_stock.config import Config, RuntimeExecutionConfig, get_config
 
@@ -25,10 +26,10 @@ class ExecutionAgent:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        db_manager: Optional[DatabaseManager] = None,
-        execution_repo: Optional[ExecutionRepository] = None,
-        runtime_service: Optional[BacktraderRuntimeService] = None,
+        config: Config | None = None,
+        db_manager: DatabaseManager | None = None,
+        execution_repo: ExecutionRepository | None = None,
+        runtime_service: Any | None = None,
     ) -> None:
         """初始化执行代理及其运行时依赖。"""
         self.config = config or get_config()
@@ -44,11 +45,11 @@ class ExecutionAgent:
         trade_date: date,
         current_price: float,
         risk_output: RiskAgentOutput,
-        account_snapshot: Optional[Dict[str, Any]] = None,
-        account_name: Optional[str] = None,
-        initial_cash_override: Optional[float] = None,
-        runtime_execution: Optional[RuntimeExecutionConfig] = None,
-        backend_task_id: Optional[str] = None,
+        account_snapshot: dict[str, Any] | None = None,
+        account_name: str | None = None,
+        initial_cash_override: float | None = None,
+        runtime_execution: RuntimeExecutionConfig | None = None,
+        backend_task_id: str | None = None,
     ) -> ExecutionAgentOutput:
         """按纸面模式或 broker 模拟模式执行单只股票决策。"""
         normalized_code = canonical_stock_code(code)
@@ -116,11 +117,11 @@ class ExecutionAgent:
         trade_date: date,
         current_price: float,
         risk_output: RiskAgentOutput,
-        account_snapshot: Optional[Dict[str, Any]],
+        account_snapshot: dict[str, Any] | None,
         account_name: str,
         initial_cash: float,
         broker_account_id: int,
-        backend_task_id: Optional[str],
+        backend_task_id: str | None,
     ) -> ExecutionAgentOutput:
         """调用本地 broker 运行时执行一笔模拟下单。"""
         # 先用 paper 口径推导出“理论上应该下什么单”，再决定是否真正调用 broker。
@@ -255,15 +256,15 @@ class ExecutionAgent:
         *,
         code: str,
         trade_date: date,
-        backend_task_id: Optional[str],
+        backend_task_id: str | None,
         candidate: ExecutionAgentOutput,
         broker_account_id: int,
         account_name: str,
         initial_cash: float,
-        snapshot_before: Optional[Dict[str, Any]],
+        snapshot_before: dict[str, Any] | None,
         reason: str,
         error_message: str,
-        response: Optional[Dict[str, Any]] = None,
+        response: dict[str, Any] | None = None,
     ) -> ExecutionAgentOutput:
         """构造 broker 路径失败时的统一执行结果。"""
         snapshot_after = self._fetch_broker_snapshot(
@@ -317,8 +318,8 @@ class ExecutionAgent:
         broker_account_id: int,
         account_name: str,
         initial_cash: float,
-        fallback_snapshot: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        fallback_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         """从本地 broker 运行时读取账户快照。"""
         try:
             summary = self.runtime_service.get_account_summary({"broker_account_id": broker_account_id})
@@ -376,7 +377,7 @@ class ExecutionAgent:
         risk_output: RiskAgentOutput,
         account_name: str,
         initial_cash: float,
-        account_snapshot: Optional[Dict[str, Any]],
+        account_snapshot: dict[str, Any] | None,
     ) -> ExecutionAgentOutput:
         """在不真正下单的情况下推导纸面交易意图。"""
         if current_price <= 0:
@@ -536,13 +537,13 @@ class ExecutionAgent:
             return default
 
     @staticmethod
-    def _as_text(value: Any) -> Optional[str]:
+    def _as_text(value: Any) -> str | None:
         """将输入清洗为非空字符串。"""
         text = str(value or "").strip()
         return text or None
 
     @classmethod
-    def _parse_optional_int(cls, value: Any) -> Optional[int]:
+    def _parse_optional_int(cls, value: Any) -> int | None:
         """解析可选整数字段，兼容 `bt-order-*` 格式。"""
         if value is None:
             return None
@@ -552,11 +553,11 @@ class ExecutionAgent:
         return parsed or None
 
     @classmethod
-    def _normalize_positions(cls, value: Any) -> list[Dict[str, Any]]:
+    def _normalize_positions(cls, value: Any) -> list[dict[str, Any]]:
         """将不同来源的持仓结构规整为统一格式。"""
         if not isinstance(value, list):
             return []
-        items: list[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         for raw in value:
             if not isinstance(raw, dict):
                 continue
@@ -584,12 +585,12 @@ class ExecutionAgent:
     @classmethod
     def _normalize_snapshot(
         cls,
-        snapshot: Optional[Dict[str, Any]],
+        snapshot: dict[str, Any] | None,
         *,
         account_name: str,
         initial_cash: float,
-    ) -> Dict[str, Any]:
-        """归一化账户快照，并补齐缺失的汇总字段。"""
+    ) -> dict[str, Any]:
+        """归一化账户快照，并补全缺失的汇总字段。"""
         raw = snapshot if isinstance(snapshot, dict) else {}
         positions = cls._normalize_positions(raw.get("positions"))
         inferred_market_value = sum(float(item.get("market_value") or 0.0) for item in positions)
@@ -622,7 +623,7 @@ class ExecutionAgent:
         }
 
     @staticmethod
-    def _find_position(account_snapshot: Dict[str, Any], code: str) -> Dict[str, Any]:
+    def _find_position(account_snapshot: dict[str, Any], code: str) -> dict[str, Any]:
         """从账户快照中查找指定股票持仓。"""
         for item in account_snapshot.get("positions", []):
             if str(item.get("code")) == str(code):
@@ -633,7 +634,7 @@ class ExecutionAgent:
     def _project_snapshot_after_trade(
         cls,
         *,
-        snapshot: Dict[str, Any],
+        snapshot: dict[str, Any],
         code: str,
         current_price: float,
         side: str,
@@ -641,7 +642,7 @@ class ExecutionAgent:
         cash_after: float,
         avg_cost_after: float,
         position_after_qty: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """基于当前快照推演成交后的账户状态。"""
         positions = [dict(item) for item in snapshot.get("positions", []) if isinstance(item, dict)]
         updated = False

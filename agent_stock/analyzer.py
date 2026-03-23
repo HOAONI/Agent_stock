@@ -12,7 +12,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Any, cast
+
 
 import httpx
 from json_repair import repair_json
@@ -36,66 +37,60 @@ class LlmRequestTimeoutError(RuntimeError):
 # 股票名称映射（常见股票）
 STOCK_NAME_MAP = {
     # === A股 ===
-    '600519': '贵州茅台',
-    '000001': '平安银行',
-    '300750': '宁德时代',
-    '002594': '比亚迪',
-    '600036': '招商银行',
-    '601318': '中国平安',
-    '000858': '五粮液',
-    '600276': '恒瑞医药',
-    '601012': '隆基绿能',
-    '002475': '立讯精密',
-    '300059': '东方财富',
-    '002415': '海康威视',
-    '600900': '长江电力',
-    '601166': '兴业银行',
-    '600028': '中国石化',
-
+    "600519": "贵州茅台",
+    "000001": "平安银行",
+    "300750": "宁德时代",
+    "002594": "比亚迪",
+    "600036": "招商银行",
+    "601318": "中国平安",
+    "000858": "五粮液",
+    "600276": "恒瑞医药",
+    "601012": "隆基绿能",
+    "002475": "立讯精密",
+    "300059": "东方财富",
+    "002415": "海康威视",
+    "600900": "长江电力",
+    "601166": "兴业银行",
+    "600028": "中国石化",
     # === 美股 ===
-    'AAPL': '苹果',
-    'TSLA': '特斯拉',
-    'MSFT': '微软',
-    'GOOGL': '谷歌A',
-    'GOOG': '谷歌C',
-    'AMZN': '亚马逊',
-    'NVDA': '英伟达',
-    'META': 'Meta',
-    'AMD': 'AMD',
-    'INTC': '英特尔',
-    'BABA': '阿里巴巴',
-    'PDD': '拼多多',
-    'JD': '京东',
-    'BIDU': '百度',
-    'NIO': '蔚来',
-    'XPEV': '小鹏汽车',
-    'LI': '理想汽车',
-    'COIN': 'Coinbase',
-    'MSTR': 'MicroStrategy',
-
+    "AAPL": "苹果",
+    "TSLA": "特斯拉",
+    "MSFT": "微软",
+    "GOOGL": "谷歌A",
+    "GOOG": "谷歌C",
+    "AMZN": "亚马逊",
+    "NVDA": "英伟达",
+    "META": "Meta",
+    "AMD": "AMD",
+    "INTC": "英特尔",
+    "BABA": "阿里巴巴",
+    "PDD": "拼多多",
+    "JD": "京东",
+    "BIDU": "百度",
+    "NIO": "蔚来",
+    "XPEV": "小鹏汽车",
+    "LI": "理想汽车",
+    "COIN": "Coinbase",
+    "MSTR": "MicroStrategy",
     # === 港股 (5位数字) ===
-    '00700': '腾讯控股',
-    '03690': '美团',
-    '01810': '小米集团',
-    '09988': '阿里巴巴',
-    '09618': '京东集团',
-    '09888': '百度集团',
-    '01024': '快手',
-    '00981': '中芯国际',
-    '02015': '理想汽车',
-    '09868': '小鹏汽车',
-    '00005': '汇丰控股',
-    '01299': '友邦保险',
-    '00941': '中国移动',
-    '00883': '中国海洋石油',
+    "00700": "腾讯控股",
+    "03690": "美团",
+    "01810": "小米集团",
+    "09988": "阿里巴巴",
+    "09618": "京东集团",
+    "09888": "百度集团",
+    "01024": "快手",
+    "00981": "中芯国际",
+    "02015": "理想汽车",
+    "09868": "小鹏汽车",
+    "00005": "汇丰控股",
+    "01299": "友邦保险",
+    "00941": "中国移动",
+    "00883": "中国海洋石油",
 }
 
 
-def get_stock_name_multi_source(
-    stock_code: str,
-    context: Optional[Dict] = None,
-    data_manager = None
-) -> str:
+def get_stock_name_multi_source(stock_code: str, context: dict | None = None, data_manager=None) -> str:
     """
     多来源获取股票中文名称
 
@@ -116,14 +111,15 @@ def get_stock_name_multi_source(
     # 1. 从上下文获取（实时行情数据）
     if context:
         # 优先从 stock_name 字段获取
-        if context.get('stock_name'):
-            name = context['stock_name']
-            if name and not name.startswith('股票'):
+        if context.get("stock_name"):
+            name = context["stock_name"]
+            if name and not name.startswith("股票"):
                 return name
 
         # 其次从 realtime 数据获取
-        if 'realtime' in context and context['realtime'].get('name'):
-            return context['realtime']['name']
+        realtime = context.get("realtime")
+        if isinstance(realtime, dict) and realtime.get("name"):
+            return str(realtime["name"])
 
     # 2. 从静态映射表获取
     if stock_code in STOCK_NAME_MAP:
@@ -133,6 +129,7 @@ def get_stock_name_multi_source(
     if data_manager is None:
         try:
             from data_provider.base import DataFetcherManager
+
             data_manager = DataFetcherManager()
         except Exception as e:
             logger.debug(f"无法初始化 DataFetcherManager: {e}")
@@ -148,7 +145,7 @@ def get_stock_name_multi_source(
             logger.debug(f"从数据源获取股票名称失败: {e}")
 
     # 4. 返回默认名称
-    return f'股票{stock_code}'
+    return f"股票{stock_code}"
 
 
 @dataclass
@@ -158,6 +155,7 @@ class AnalysisResult:
 
     封装 Gemini 返回的分析结果，包含决策仪表盘和详细分析
     """
+
     code: str
     name: str
 
@@ -169,7 +167,7 @@ class AnalysisResult:
     confidence_level: str = "中"  # 置信度：高/中/低
 
     # ========== 决策仪表盘 (新增) ==========
-    dashboard: Optional[Dict[str, Any]] = None  # 完整的决策仪表盘数据
+    dashboard: dict[str, Any] | None = None  # 完整的决策仪表盘数据
 
     # ========== 走势分析 ==========
     trend_analysis: str = ""  # 走势形态分析（支撑位、压力位、趋势线等）
@@ -199,126 +197,132 @@ class AnalysisResult:
     buy_reason: str = ""  # 买入/卖出理由
 
     # ========== 元数据 ==========
-    market_snapshot: Optional[Dict[str, Any]] = None  # 当日行情快照（展示用）
-    raw_response: Optional[str] = None  # 原始响应（调试用）
+    market_snapshot: dict[str, Any] | None = None  # 当日行情快照（展示用）
+    raw_response: str | None = None  # 原始响应（调试用）
     search_performed: bool = False  # 是否执行了联网搜索
     data_sources: str = ""  # 数据来源说明
     success: bool = True
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
     # ========== 价格数据（分析时快照）==========
-    current_price: Optional[float] = None  # 分析时的股价
-    change_pct: Optional[float] = None     # 分析时的涨跌幅(%)
+    current_price: float | None = None  # 分析时的股价
+    change_pct: float | None = None  # 分析时的涨跌幅(%)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
-            'code': self.code,
-            'name': self.name,
-            'sentiment_score': self.sentiment_score,
-            'trend_prediction': self.trend_prediction,
-            'operation_advice': self.operation_advice,
-            'decision_type': self.decision_type,
-            'confidence_level': self.confidence_level,
-            'dashboard': self.dashboard,  # 决策仪表盘数据
-            'trend_analysis': self.trend_analysis,
-            'short_term_outlook': self.short_term_outlook,
-            'medium_term_outlook': self.medium_term_outlook,
-            'technical_analysis': self.technical_analysis,
-            'ma_analysis': self.ma_analysis,
-            'volume_analysis': self.volume_analysis,
-            'pattern_analysis': self.pattern_analysis,
-            'fundamental_analysis': self.fundamental_analysis,
-            'sector_position': self.sector_position,
-            'company_highlights': self.company_highlights,
-            'news_summary': self.news_summary,
-            'market_sentiment': self.market_sentiment,
-            'hot_topics': self.hot_topics,
-            'analysis_summary': self.analysis_summary,
-            'key_points': self.key_points,
-            'risk_warning': self.risk_warning,
-            'buy_reason': self.buy_reason,
-            'market_snapshot': self.market_snapshot,
-            'search_performed': self.search_performed,
-            'success': self.success,
-            'error_message': self.error_message,
-            'current_price': self.current_price,
-            'change_pct': self.change_pct,
+            "code": self.code,
+            "name": self.name,
+            "sentiment_score": self.sentiment_score,
+            "trend_prediction": self.trend_prediction,
+            "operation_advice": self.operation_advice,
+            "decision_type": self.decision_type,
+            "confidence_level": self.confidence_level,
+            "dashboard": self.dashboard,  # 决策仪表盘数据
+            "trend_analysis": self.trend_analysis,
+            "short_term_outlook": self.short_term_outlook,
+            "medium_term_outlook": self.medium_term_outlook,
+            "technical_analysis": self.technical_analysis,
+            "ma_analysis": self.ma_analysis,
+            "volume_analysis": self.volume_analysis,
+            "pattern_analysis": self.pattern_analysis,
+            "fundamental_analysis": self.fundamental_analysis,
+            "sector_position": self.sector_position,
+            "company_highlights": self.company_highlights,
+            "news_summary": self.news_summary,
+            "market_sentiment": self.market_sentiment,
+            "hot_topics": self.hot_topics,
+            "analysis_summary": self.analysis_summary,
+            "key_points": self.key_points,
+            "risk_warning": self.risk_warning,
+            "buy_reason": self.buy_reason,
+            "market_snapshot": self.market_snapshot,
+            "search_performed": self.search_performed,
+            "success": self.success,
+            "error_message": self.error_message,
+            "current_price": self.current_price,
+            "change_pct": self.change_pct,
         }
+
+    def _dashboard_section(self, key: str) -> dict[str, Any]:
+        """读取仪表盘中的对象节点，缺失时返回空字典。"""
+        if not isinstance(self.dashboard, dict):
+            return {}
+        section = self.dashboard.get(key)
+        return section if isinstance(section, dict) else {}
 
     def get_core_conclusion(self) -> str:
         """获取核心结论（一句话）"""
-        if self.dashboard and 'core_conclusion' in self.dashboard:
-            return self.dashboard['core_conclusion'].get('one_sentence', self.analysis_summary)
-        return self.analysis_summary
+        core_conclusion = self._dashboard_section("core_conclusion")
+        return str(core_conclusion.get("one_sentence", self.analysis_summary) or self.analysis_summary)
 
     def get_position_advice(self, has_position: bool = False) -> str:
         """获取持仓建议"""
-        if self.dashboard and 'core_conclusion' in self.dashboard:
-            pos_advice = self.dashboard['core_conclusion'].get('position_advice', {})
-            if has_position:
-                return pos_advice.get('has_position', self.operation_advice)
-            return pos_advice.get('no_position', self.operation_advice)
-        return self.operation_advice
+        core_conclusion = self._dashboard_section("core_conclusion")
+        pos_advice_raw = core_conclusion.get("position_advice")
+        pos_advice = pos_advice_raw if isinstance(pos_advice_raw, dict) else {}
+        if has_position:
+            return str(pos_advice.get("has_position", self.operation_advice) or self.operation_advice)
+        return str(pos_advice.get("no_position", self.operation_advice) or self.operation_advice)
 
-    def get_sniper_points(self) -> Dict[str, str]:
+    def get_sniper_points(self) -> dict[str, str]:
         """获取狙击点位"""
-        if self.dashboard and 'battle_plan' in self.dashboard:
-            return self.dashboard['battle_plan'].get('sniper_points', {})
-        return {}
+        battle_plan = self._dashboard_section("battle_plan")
+        sniper_points = battle_plan.get("sniper_points")
+        return cast(dict[str, str], sniper_points) if isinstance(sniper_points, dict) else {}
 
-    def get_checklist(self) -> List[str]:
+    def get_checklist(self) -> list[str]:
         """获取检查清单"""
-        if self.dashboard and 'battle_plan' in self.dashboard:
-            return self.dashboard['battle_plan'].get('action_checklist', [])
-        return []
+        battle_plan = self._dashboard_section("battle_plan")
+        checklist = battle_plan.get("action_checklist")
+        return cast(list[str], checklist) if isinstance(checklist, list) else []
 
-    def get_risk_alerts(self) -> List[str]:
+    def get_risk_alerts(self) -> list[str]:
         """获取风险警报"""
-        if self.dashboard and 'intelligence' in self.dashboard:
-            return self.dashboard['intelligence'].get('risk_alerts', [])
-        return []
+        intelligence = self._dashboard_section("intelligence")
+        risk_alerts = intelligence.get("risk_alerts")
+        return cast(list[str], risk_alerts) if isinstance(risk_alerts, list) else []
 
     def get_emoji(self) -> str:
         """根据操作建议返回对应 emoji"""
         emoji_map = {
-            '买入': '🟢',
-            '加仓': '🟢',
-            '强烈买入': '💚',
-            '持有': '🟡',
-            '观望': '⚪',
-            '减仓': '🟠',
-            '卖出': '🔴',
-            '强烈卖出': '❌',
+            "买入": "🟢",
+            "加仓": "🟢",
+            "强烈买入": "💚",
+            "持有": "🟡",
+            "观望": "⚪",
+            "减仓": "🟠",
+            "卖出": "🔴",
+            "强烈卖出": "❌",
         }
-        advice = self.operation_advice or ''
+        advice = self.operation_advice or ""
         # 先进行直接匹配
         if advice in emoji_map:
             return emoji_map[advice]
         # 处理诸如“卖出/观望”的复合建议时，先取第一段
-        for part in advice.replace('/', '|').split('|'):
+        for part in advice.replace("/", "|").split("|"):
             part = part.strip()
             if part in emoji_map:
                 return emoji_map[part]
         # 按评分结果回退
         score = self.sentiment_score
         if score >= 80:
-            return '💚'
+            return "💚"
         elif score >= 65:
-            return '🟢'
+            return "🟢"
         elif score >= 55:
-            return '🟡'
+            return "🟡"
         elif score >= 45:
-            return '⚪'
+            return "⚪"
         elif score >= 35:
-            return '🟠'
+            return "🟠"
         else:
-            return '🔴'
+            return "🔴"
 
     def get_confidence_stars(self) -> str:
         """返回置信度星级"""
-        star_map = {'高': '⭐⭐⭐', '中': '⭐⭐', '低': '⭐'}
-        return star_map.get(self.confidence_level, '⭐⭐')
+        star_map = {"高": "⭐⭐⭐", "中": "⭐⭐", "低": "⭐"}
+        return star_map.get(self.confidence_level, "⭐⭐")
 
 
 class GeminiAnalyzer:
@@ -530,9 +534,9 @@ class GeminiAnalyzer:
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        config: Optional[Config] = None,
-        runtime_llm: Optional[RuntimeLlmConfig] = None,
+        api_key: str | None = None,
+        config: Config | None = None,
+        runtime_llm: RuntimeLlmConfig | None = None,
     ):
         """
         初始化 AI 分析器
@@ -559,7 +563,7 @@ class GeminiAnalyzer:
         self._anthropic_client = None  # Anthropic 客户端
 
         # 检查 Gemini API Key 是否有效（过滤占位符）
-        gemini_key_valid = self._api_key and not self._api_key.startswith('your_') and len(self._api_key) > 10
+        gemini_key_valid = self._api_key and not self._api_key.startswith("your_") and len(self._api_key) > 10
 
         # 优先级：Gemini > Anthropic > OpenAI
         if gemini_key_valid:
@@ -597,7 +601,7 @@ class GeminiAnalyzer:
         config = self._config
         anthropic_key_valid = (
             config.anthropic_api_key
-            and not config.anthropic_api_key.startswith('your_')
+            and not config.anthropic_api_key.startswith("your_")
             and len(config.anthropic_api_key) > 10
         )
         if not anthropic_key_valid:
@@ -613,9 +617,7 @@ class GeminiAnalyzer:
             )
             self._current_model_name = config.anthropic_model
             self._use_anthropic = True
-            logger.info(
-                f"Anthropic Claude API init OK (model: {config.anthropic_model})"
-            )
+            logger.info(f"Anthropic Claude API init OK (model: {config.anthropic_model})")
         except ImportError:
             logger.error("anthropic package not installed, run: pip install anthropic")
         except Exception as e:
@@ -635,9 +637,7 @@ class GeminiAnalyzer:
 
         # 检查 OpenAI API Key 是否有效（过滤占位符）
         openai_key_valid = (
-            config.openai_api_key and
-            not config.openai_api_key.startswith('your_') and
-            len(config.openai_api_key) > 10
+            config.openai_api_key and not config.openai_api_key.startswith("your_") and len(config.openai_api_key) > 10
         )
 
         if not openai_key_valid:
@@ -658,22 +658,24 @@ class GeminiAnalyzer:
                 "timeout": self._llm_timeout_seconds,
                 "max_retries": 0,
             }
-            if config.openai_base_url and config.openai_base_url.startswith('http'):
+            if config.openai_base_url and config.openai_base_url.startswith("http"):
                 client_kwargs["base_url"] = config.openai_base_url
 
             self._openai_client = OpenAI(**client_kwargs)
             self._current_model_name = config.openai_model
             self._use_openai = True
-            logger.info(f"OpenAI 兼容 API 初始化成功 (base_url: {config.openai_base_url}, model: {config.openai_model})")
+            logger.info(
+                f"OpenAI 兼容 API 初始化成功 (base_url: {config.openai_base_url}, model: {config.openai_model})"
+            )
         except ImportError as e:
             # 依赖缺失（如 socksio）
-            if 'socksio' in str(e).lower() or 'socks' in str(e).lower():
-                logger.error(f"OpenAI 客户端需要 SOCKS 代理支持，请运行: pip install httpx[socks] 或 pip install socksio")
+            if "socksio" in str(e).lower() or "socks" in str(e).lower():
+                logger.error("OpenAI 客户端需要 SOCKS 代理支持，请运行: pip install httpx[socks] 或 pip install socksio")
             else:
                 logger.error("OpenAI 依赖缺失: %s", self._safe_error(e))
         except Exception as e:
             error_msg = str(e).lower()
-            if 'socks' in error_msg or 'socksio' in error_msg or 'proxy' in error_msg:
+            if "socks" in error_msg or "socksio" in error_msg or "proxy" in error_msg:
                 logger.error(
                     "OpenAI 代理配置错误: %s，如使用 SOCKS 代理请运行: pip install httpx[socks]",
                     self._safe_error(e),
@@ -690,7 +692,7 @@ class GeminiAnalyzer:
         - 不启用 Google Search（使用外部 Tavily/SerpAPI 搜索）
         """
         try:
-            import google.generativeai as genai
+            genai = cast(Any, __import__("google.generativeai", fromlist=[""]))
 
             # 配置 API Key
             genai.configure(api_key=self._api_key)
@@ -740,7 +742,8 @@ class GeminiAnalyzer:
             是否成功切换
         """
         try:
-            import google.generativeai as genai
+            genai = cast(Any, __import__("google.generativeai", fromlist=[""]))
+
             config = self._config
             fallback_model = config.gemini_model_fallback
 
@@ -759,17 +762,13 @@ class GeminiAnalyzer:
 
     def is_available(self) -> bool:
         """检查分析器是否可用。"""
-        return (
-            self._model is not None
-            or self._anthropic_client is not None
-            or self._openai_client is not None
-        )
+        return self._model is not None or self._anthropic_client is not None or self._openai_client is not None
 
     def generate_text(
         self,
         prompt: str,
         *,
-        temperature: Optional[float] = None,
+        temperature: float | None = None,
         max_output_tokens: int = 4096,
     ) -> str:
         """执行一次通用文本生成，复用现有 provider 选路、重试与超时逻辑。"""
@@ -778,11 +777,7 @@ class GeminiAnalyzer:
 
         config = self._config
         generation_config = {
-            "temperature": (
-                config.gemini_temperature
-                if temperature is None
-                else float(temperature)
-            ),
+            "temperature": (config.gemini_temperature if temperature is None else float(temperature)),
             "max_output_tokens": max(128, int(max_output_tokens)),
         }
         return self._call_api_with_retry(prompt, generation_config)
@@ -827,44 +822,37 @@ class GeminiAnalyzer:
         config = self._config
         max_retries = config.gemini_max_retries
         base_delay = config.gemini_retry_delay
-        temperature = generation_config.get(
-            'temperature', config.anthropic_temperature
-        )
-        max_tokens = generation_config.get('max_output_tokens', config.anthropic_max_tokens)
+        temperature = generation_config.get("temperature", config.anthropic_temperature)
+        max_tokens = generation_config.get("max_output_tokens", config.anthropic_max_tokens)
+        client = self._anthropic_client
+        model_name = self._current_model_name
+        if client is None or not model_name:
+            raise ValueError("Anthropic client is not initialized")
 
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
                     delay = base_delay * (2 ** (attempt - 1))
                     delay = min(delay, 60)
-                    logger.info(
-                        f"[Anthropic] Retry {attempt + 1}/{max_retries}, "
-                        f"waiting {delay:.1f}s..."
-                    )
+                    logger.info(f"[Anthropic] Retry {attempt + 1}/{max_retries}, " f"waiting {delay:.1f}s...")
                     time.sleep(delay)
 
-                message = self._anthropic_client.messages.create(
-                    model=self._current_model_name,
+                message = client.messages.create(
+                    model=model_name,
                     max_tokens=max_tokens,
                     system=self.SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
                     timeout=self._llm_timeout_seconds,
                 )
-                if (
-                    message.content
-                    and len(message.content) > 0
-                    and hasattr(message.content[0], 'text')
-                ):
-                    return message.content[0].text
+                if message.content and len(message.content) > 0:
+                    text = getattr(message.content[0], "text", None)
+                    if isinstance(text, str) and text:
+                        return text
                 raise ValueError("Anthropic API returned empty response")
             except Exception as e:
                 error_str = self._safe_error(e)
-                is_rate_limit = (
-                    '429' in error_str
-                    or 'rate' in error_str.lower()
-                    or 'quota' in error_str.lower()
-                )
+                is_rate_limit = "429" in error_str or "rate" in error_str.lower() or "quota" in error_str.lower()
                 if self._is_timeout_exception(e):
                     logger.error(
                         "[Anthropic] request timed out after %sms",
@@ -873,13 +861,11 @@ class GeminiAnalyzer:
                     self._raise_llm_timeout("Anthropic")
                 if is_rate_limit:
                     logger.warning(
-                        f"[Anthropic] Rate limit, attempt {attempt + 1}/"
-                        f"{max_retries}: {error_str[:100]}"
+                        f"[Anthropic] Rate limit, attempt {attempt + 1}/" f"{max_retries}: {error_str[:100]}"
                     )
                 else:
                     logger.warning(
-                        f"[Anthropic] API failed, attempt {attempt + 1}/"
-                        f"{max_retries}: {error_str[:100]}"
+                        f"[Anthropic] API failed, attempt {attempt + 1}/" f"{max_retries}: {error_str[:100]}"
                     )
                 if attempt == max_retries - 1:
                     raise
@@ -899,29 +885,34 @@ class GeminiAnalyzer:
         config = self._config
         max_retries = config.gemini_max_retries
         base_delay = config.gemini_retry_delay
+        client = self._openai_client
+        model_name = str(self._current_model_name or getattr(config, "openai_model", "") or "").strip()
+        if client is None or not model_name:
+            raise ValueError("OpenAI client is not initialized")
 
         def _build_base_request_kwargs() -> dict:
             """构造 OpenAI 兼容请求的基础参数。"""
             kwargs = {
-                "model": self._current_model_name,
+                "model": model_name,
                 "messages": [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": generation_config.get('temperature', config.openai_temperature),
+                "temperature": generation_config.get("temperature", config.openai_temperature),
             }
             return kwargs
 
         def _is_unsupported_param_error(error_message: str, param_name: str) -> bool:
             """判断报错是否由不支持的参数名引起。"""
             lower_msg = error_message.lower()
-            return ('400' in lower_msg or "unsupported parameter" in lower_msg or "unsupported param" in lower_msg) and param_name in lower_msg
+            return (
+                "400" in lower_msg or "unsupported parameter" in lower_msg or "unsupported param" in lower_msg
+            ) and param_name in lower_msg
 
         if not hasattr(self, "_token_param_mode"):
             self._token_param_mode = {}
 
-        max_output_tokens = generation_config.get('max_output_tokens', 8192)
-        model_name = self._current_model_name
+        max_output_tokens = generation_config.get("max_output_tokens", 8192)
         mode = self._token_param_mode.get(model_name, "max_tokens")
 
         def _kwargs_with_mode(mode_value):
@@ -940,17 +931,19 @@ class GeminiAnalyzer:
                     time.sleep(delay)
 
                 try:
-                    response = self._openai_client.chat.completions.create(**_kwargs_with_mode(mode))
+                    response = client.chat.completions.create(**_kwargs_with_mode(mode))
                 except Exception as e:
                     error_str = self._safe_error(e)
                     if mode == "max_tokens" and _is_unsupported_param_error(error_str, "max_tokens"):
                         mode = "max_completion_tokens"
                         self._token_param_mode[model_name] = mode
-                        response = self._openai_client.chat.completions.create(**_kwargs_with_mode(mode))
-                    elif mode == "max_completion_tokens" and _is_unsupported_param_error(error_str, "max_completion_tokens"):
+                        response = client.chat.completions.create(**_kwargs_with_mode(mode))
+                    elif mode == "max_completion_tokens" and _is_unsupported_param_error(
+                        error_str, "max_completion_tokens"
+                    ):
                         mode = None
                         self._token_param_mode[model_name] = mode
-                        response = self._openai_client.chat.completions.create(**_kwargs_with_mode(mode))
+                        response = client.chat.completions.create(**_kwargs_with_mode(mode))
                     else:
                         raise
 
@@ -958,7 +951,7 @@ class GeminiAnalyzer:
                     return response.choices[0].message.content
                 else:
                     raise ValueError("OpenAI API 返回空响应")
-                    
+
             except Exception as e:
                 error_str = self._safe_error(e)
                 if self._is_timeout_exception(e):
@@ -968,33 +961,33 @@ class GeminiAnalyzer:
                         self._llm_timeout_ms,
                     )
                     self._raise_llm_timeout(self._openai_provider_label())
-                is_rate_limit = '429' in error_str or 'rate' in error_str.lower() or 'quota' in error_str.lower()
-                
+                is_rate_limit = "429" in error_str or "rate" in error_str.lower() or "quota" in error_str.lower()
+
                 if is_rate_limit:
                     logger.warning(f"[OpenAI] API 限流，第 {attempt + 1}/{max_retries} 次尝试: {error_str[:100]}")
                 else:
                     logger.warning(f"[OpenAI] API 调用失败，第 {attempt + 1}/{max_retries} 次尝试: {error_str[:100]}")
-                
+
                 if attempt == max_retries - 1:
                     raise
-        
+
         raise Exception("OpenAI API 调用失败，已达最大重试次数")
-    
+
     def _call_api_with_retry(self, prompt: str, generation_config: dict) -> str:
         """
         调用 AI API，带有重试和模型切换机制
-        
+
         优先级：Gemini > Gemini 备选模型 > OpenAI 兼容 API
-        
+
         处理 429 限流错误：
         1. 先指数退避重试
         2. 多次失败后切换到备选模型
         3. Gemini 完全失败后尝试 OpenAI
-        
+
         参数：
             提示词: 提示词
             generation_config: 生成配置
-            
+
         返回：
             响应文本
         """
@@ -1004,9 +997,7 @@ class GeminiAnalyzer:
                 return self._call_anthropic_api(prompt, generation_config)
             except Exception as anthropic_error:
                 if self._openai_client:
-                    logger.warning(
-                        "[Anthropic] All retries failed, falling back to OpenAI"
-                    )
+                    logger.warning("[Anthropic] All retries failed, falling back to OpenAI")
                     return self._call_openai_api(prompt, generation_config)
                 raise anthropic_error
 
@@ -1017,10 +1008,13 @@ class GeminiAnalyzer:
         config = self._config
         max_retries = config.gemini_max_retries
         base_delay = config.gemini_retry_delay
-        
+
         last_error = None
-        tried_fallback = getattr(self, '_using_fallback', False)
-        
+        tried_fallback = getattr(self, "_using_fallback", False)
+        model = self._model
+        if model is None:
+            raise ValueError("Gemini model is not initialized")
+
         for attempt in range(max_retries):
             try:
                 # 请求前增加延时（防止请求过快触发限流）
@@ -1029,18 +1023,18 @@ class GeminiAnalyzer:
                     delay = min(delay, 60)  # 最大60秒
                     logger.info(f"[Gemini] 第 {attempt + 1} 次重试，等待 {delay:.1f} 秒...")
                     time.sleep(delay)
-                
-                response = self._model.generate_content(
+
+                response = model.generate_content(
                     prompt,
-                    generation_config=generation_config,
-                    request_options={"timeout": self._llm_timeout_seconds}
+                    generation_config=cast(Any, generation_config),
+                    request_options={"timeout": self._llm_timeout_seconds},
                 )
-                
+
                 if response and response.text:
                     return response.text
                 else:
                     raise ValueError("Gemini 返回空响应")
-                    
+
             except Exception as e:
                 last_error = e
                 error_str = self._safe_error(e)
@@ -1050,13 +1044,13 @@ class GeminiAnalyzer:
                         self._llm_timeout_ms,
                     )
                     self._raise_llm_timeout("Gemini")
-                
+
                 # 检查是否是 429 限流错误
-                is_rate_limit = '429' in error_str or 'quota' in error_str.lower() or 'rate' in error_str.lower()
-                
+                is_rate_limit = "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower()
+
                 if is_rate_limit:
                     logger.warning(f"[Gemini] API 限流 (429)，第 {attempt + 1}/{max_retries} 次尝试: {error_str[:100]}")
-                    
+
                     # 如果已经重试了一半次数且还没切换过备选模型，尝试切换
                     if attempt >= max_retries // 2 and not tried_fallback:
                         if self._switch_to_fallback_model():
@@ -1067,7 +1061,7 @@ class GeminiAnalyzer:
                 else:
                     # 非限流错误，记录并继续重试
                     logger.warning(f"[Gemini] API 调用失败，第 {attempt + 1}/{max_retries} 次尝试: {error_str[:100]}")
-        
+
         # Gemini 重试耗尽，尝试 Anthropic 再 OpenAI
         if self._anthropic_client:
             logger.warning("[Gemini] All retries failed, switching to Anthropic")
@@ -1124,78 +1118,79 @@ class GeminiAnalyzer:
 
         # 所有备选均耗尽
         raise last_error or Exception("所有 AI API 调用失败，已达最大重试次数")
-    
-    def analyze(
-        self, 
-        context: Dict[str, Any],
-        news_context: Optional[str] = None
-    ) -> AnalysisResult:
+
+    def analyze(self, context: dict[str, Any], news_context: str | None = None) -> AnalysisResult:
         """
         分析单只股票
-        
+
         流程：
         1. 格式化输入数据（技术面 + 新闻）
         2. 调用 Gemini API（带重试和模型切换）
         3. 解析 JSON 响应
         4. 返回结构化结果
-        
+
         参数：
             context: 从 storage.get_analysis_context() 获取的上下文数据
             news_context: 预先搜索的新闻内容（可选）
-            
+
         返回：
             AnalysisResult 对象
         """
-        code = context.get('code', 'Unknown')
+        code = context.get("code", "Unknown")
         config = self._config
-        
+
         # 请求前增加延时（防止连续请求触发限流）
         request_delay = config.gemini_request_delay
         if request_delay > 0:
             logger.debug(f"[LLM] 请求前等待 {request_delay:.1f} 秒...")
             time.sleep(request_delay)
-        
+
         # 优先从上下文获取股票名称（由 main.py 传入）
-        name = context.get('stock_name')
-        if not name or name.startswith('股票'):
+        name = context.get("stock_name")
+        if not name or name.startswith("股票"):
             # 备选：从 realtime 中获取
-            if 'realtime' in context and context['realtime'].get('name'):
-                name = context['realtime']['name']
+            realtime = context.get("realtime")
+            if isinstance(realtime, dict) and realtime.get("name"):
+                name = realtime["name"]
             else:
                 # 最后从映射表获取
-                name = STOCK_NAME_MAP.get(code, f'股票{code}')
-        
+                name = STOCK_NAME_MAP.get(code, f"股票{code}")
+
         # 如果模型不可用，返回默认结果
         if not self.is_available():
             return AnalysisResult(
                 code=code,
                 name=name,
                 sentiment_score=50,
-                trend_prediction='震荡',
-                operation_advice='持有',
-                confidence_level='低',
-                analysis_summary='AI 分析功能未启用（未配置 API Key）',
-                risk_warning='请配置 Gemini API Key 后重试',
+                trend_prediction="震荡",
+                operation_advice="持有",
+                confidence_level="低",
+                analysis_summary="AI 分析功能未启用（未配置 API Key）",
+                risk_warning="请配置 Gemini API Key 后重试",
                 success=False,
-                error_message='Gemini API Key 未配置',
+                error_message="Gemini API Key 未配置",
             )
-        
+
         try:
             # 格式化输入（包含技术面数据和新闻）
             prompt = self._format_prompt(context, name, news_context)
-            
+
             # 获取模型名称
-            model_name = getattr(self, '_current_model_name', None)
+            model_name = getattr(self, "_current_model_name", None)
             if not model_name:
-                model_name = getattr(self._model, '_model_name', 'unknown')
-                if hasattr(self._model, 'model_name'):
-                    model_name = self._model.model_name
-            
+                model = self._model
+                if model is not None:
+                    model_name = getattr(model, "_model_name", "unknown")
+                    if hasattr(model, "model_name"):
+                        model_name = model.model_name
+                else:
+                    model_name = "unknown"
+
             logger.info(f"========== AI 分析 {name}({code}) ==========")
             logger.info(f"[LLM配置] 模型: {model_name}")
             logger.info(f"[LLM配置] Prompt 长度: {len(prompt)} 字符")
             logger.info(f"[LLM配置] 是否包含新闻: {'是' if news_context else '否'}")
-            
+
             # 记录完整 提示词 到日志（INFO级别记录摘要，DEBUG记录完整）
             prompt_preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
             logger.info(f"[LLM Prompt 预览]\n{prompt_preview}")
@@ -1209,26 +1204,26 @@ class GeminiAnalyzer:
             }
 
             # 记录实际使用的 API 提供方
-            api_provider = (
-                "OpenAI" if self._use_openai
-                else "Anthropic" if self._use_anthropic
-                else "Gemini"
-            )
+            api_provider = "OpenAI" if self._use_openai else "Anthropic" if self._use_anthropic else "Gemini"
             logger.info(f"[LLM调用] 开始调用 {api_provider} API...")
-            
+
             # 使用带重试的 API 调用
             start_time = time.time()
             response_text = self._call_api_with_retry(prompt, generation_config)
             elapsed = time.time() - start_time
 
             # 记录响应信息
-            logger.info(f"[LLM返回] {api_provider} API 响应成功, 耗时 {elapsed:.2f}s, 响应长度 {len(response_text)} 字符")
-            
+            logger.info(
+                f"[LLM返回] {api_provider} API 响应成功, 耗时 {elapsed:.2f}s, 响应长度 {len(response_text)} 字符"
+            )
+
             # 记录响应预览（INFO级别）和完整响应（DEBUG级别）
             response_preview = response_text[:300] + "..." if len(response_text) > 300 else response_text
             logger.info(f"[LLM返回 预览]\n{response_preview}")
-            logger.debug(f"=== {api_provider} 完整响应 ({len(response_text)}字符) ===\n{response_text}\n=== End Response ===")
-            
+            logger.debug(
+                f"=== {api_provider} 完整响应 ({len(response_text)}字符) ===\n{response_text}\n=== End Response ==="
+            )
+
             # 解析响应
             result = self._parse_response(response_text, code, name)
             result.raw_response = response_text
@@ -1236,9 +1231,9 @@ class GeminiAnalyzer:
             result.market_snapshot = self._build_market_snapshot(context)
 
             logger.info(f"[LLM解析] {name}({code}) 分析完成: {result.trend_prediction}, 评分 {result.sentiment_score}")
-            
+
             return result
-            
+
         except Exception as e:
             if isinstance(e, LlmRequestTimeoutError):
                 raise
@@ -1248,40 +1243,35 @@ class GeminiAnalyzer:
                 code=code,
                 name=name,
                 sentiment_score=50,
-                trend_prediction='震荡',
-                operation_advice='持有',
-                confidence_level='低',
-                analysis_summary=f'分析过程出错: {safe_error[:100]}',
-                risk_warning='分析失败，请稍后重试或手动分析',
+                trend_prediction="震荡",
+                operation_advice="持有",
+                confidence_level="低",
+                analysis_summary=f"分析过程出错: {safe_error[:100]}",
+                risk_warning="分析失败，请稍后重试或手动分析",
                 success=False,
                 error_message=safe_error,
             )
-    
-    def _format_prompt(
-        self, 
-        context: Dict[str, Any], 
-        name: str,
-        news_context: Optional[str] = None
-    ) -> str:
+
+    def _format_prompt(self, context: dict[str, Any], name: str, news_context: str | None = None) -> str:
         """
         格式化分析提示词（决策仪表盘 v2.0）
-        
+
         包含：技术指标、实时行情（量比/换手率）、筹码分布、趋势分析、新闻
-        
+
         参数：
             context: 技术面数据上下文（包含增强数据）
             name: 股票名称（默认值，可能被上下文覆盖）
             news_context: 预先搜索的新闻内容
         """
-        code = context.get('code', 'Unknown')
-        
+        code = context.get("code", "Unknown")
+
         # 优先使用上下文中的股票名称（从 realtime_quote 获取）
-        stock_name = context.get('stock_name', name)
-        if not stock_name or stock_name == f'股票{code}':
-            stock_name = STOCK_NAME_MAP.get(code, f'股票{code}')
-            
-        today = context.get('today', {})
-        
+        stock_name = context.get("stock_name", name)
+        if not stock_name or stock_name == f"股票{code}":
+            stock_name = STOCK_NAME_MAP.get(code, f"股票{code}")
+
+        today = context.get("today", {})
+
         # ========== 构建决策仪表盘格式的输入 ==========
         prompt = f"""# 决策仪表盘分析请求
 
@@ -1315,10 +1305,10 @@ class GeminiAnalyzer:
 | MA20 | {today.get('ma20', 'N/A')} | 中期趋势线 |
 | 均线形态 | {context.get('ma_status', '未知')} | 多头/空头/缠绕 |
 """
-        
+
         # 添加实时行情数据（量比、换手率等）
-        if 'realtime' in context:
-            rt = context['realtime']
+        if "realtime" in context:
+            rt = context["realtime"]
             prompt += f"""
 ### 实时行情增强数据
 | 指标 | 数值 | 解读 |
@@ -1332,11 +1322,11 @@ class GeminiAnalyzer:
 | 流通市值 | {self._format_amount(rt.get('circ_mv'))} | |
 | 60日涨跌幅 | {rt.get('change_60d', 'N/A')}% | 中期表现 |
 """
-        
+
         # 添加筹码分布数据
-        if 'chip' in context:
-            chip = context['chip']
-            profit_ratio = chip.get('profit_ratio', 0)
+        if "chip" in context:
+            chip = context["chip"]
+            profit_ratio = chip.get("profit_ratio", 0)
             prompt += f"""
 ### 筹码分布数据（效率指标）
 | 指标 | 数值 | 健康标准 |
@@ -1347,11 +1337,11 @@ class GeminiAnalyzer:
 | 70%筹码集中度 | {chip.get('concentration_70', 0):.2%} | |
 | 筹码状态 | {chip.get('chip_status', '未知')} | |
 """
-        
+
         # 添加趋势分析结果（基于交易理念的预判）
-        if 'trend_analysis' in context:
-            trend = context['trend_analysis']
-            bias_warning = "🚨 超过5%，严禁追高！" if trend.get('bias_ma5', 0) > 5 else "✅ 安全范围"
+        if "trend_analysis" in context:
+            trend = context["trend_analysis"]
+            bias_warning = "🚨 超过5%，严禁追高！" if trend.get("bias_ma5", 0) > 5 else "✅ 安全范围"
             prompt += f"""
 ### 趋势分析预判（基于交易理念）
 | 指标 | 数值 | 判定 |
@@ -1372,10 +1362,10 @@ class GeminiAnalyzer:
 **风险因素**：
 {chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
 """
-        
+
         # 添加昨日对比数据
-        if 'yesterday' in context:
-            volume_change = context.get('volume_change_ratio', 'N/A')
+        if "yesterday" in context:
+            volume_change = context.get("volume_change_ratio", "N/A")
             prompt += f"""
 ### 量价变化
 - 成交量较昨日变化：{volume_change}倍
@@ -1383,14 +1373,15 @@ class GeminiAnalyzer:
 """
 
         # 注入运行时账户快照（来自 Backend runtime_config.context）
-        runtime_account = context.get('runtime_account')
+        runtime_account = context.get("runtime_account")
         if isinstance(runtime_account, dict):
-            position = runtime_account.get('position')
-            has_position = isinstance(position, dict) and bool(position)
+            position = runtime_account.get("position")
+            position_dict = position if isinstance(position, dict) else {}
+            has_position = bool(position_dict)
             position_text = (
-                f"持仓 {position.get('quantity', 'N/A')} 股 / 可用 {position.get('available_qty', 'N/A')} 股"
-                if has_position else
-                "当前标的无持仓"
+                f"持仓 {position_dict.get('quantity', 'N/A')} 股 / 可用 {position_dict.get('available_qty', 'N/A')} 股"
+                if has_position
+                else "当前标的无持仓"
             )
             prompt += f"""
 ### 账户资金约束（运行时快照）
@@ -1401,9 +1392,9 @@ class GeminiAnalyzer:
 | 持仓市值 | {self._format_amount(runtime_account.get('total_market_value'))} | 已有风险暴露 |
 | 当前标的持仓 | {position_text} | 用于判断加仓/减仓 |
 """
-            if runtime_account.get('snapshot_at') or runtime_account.get('data_source'):
+            if runtime_account.get("snapshot_at") or runtime_account.get("data_source"):
                 prompt += f"- 账户快照时间：{runtime_account.get('snapshot_at', 'N/A')}（来源：{runtime_account.get('data_source', 'N/A')}）\n"
-        
+
         # 添加新闻搜索结果（重点区域）
         prompt += """
 ---
@@ -1427,7 +1418,7 @@ class GeminiAnalyzer:
 """
 
         # 注入缺失数据警告
-        if context.get('data_missing'):
+        if context.get("data_missing"):
             prompt += """
 ⚠️ **数据缺失警告**
 由于接口限制，当前无法获取完整的实时行情和技术指标数据。
@@ -1461,24 +1452,24 @@ class GeminiAnalyzer:
 - **检查清单**：每项用 ✅/⚠️/❌ 标记
 
 请输出完整的 JSON 格式决策仪表盘。"""
-        
+
         return prompt
-    
-    def _format_volume(self, volume: Optional[float]) -> str:
+
+    def _format_volume(self, volume: float | None) -> str:
         """格式化成交量显示"""
         if volume is None:
-            return 'N/A'
+            return "N/A"
         if volume >= 1e8:
             return f"{volume / 1e8:.2f} 亿股"
         elif volume >= 1e4:
             return f"{volume / 1e4:.2f} 万股"
         else:
             return f"{volume:.0f} 股"
-    
-    def _format_amount(self, amount: Optional[float]) -> str:
+
+    def _format_amount(self, amount: float | None) -> str:
         """格式化成交额显示"""
         if amount is None:
-            return 'N/A'
+            return "N/A"
         if amount >= 1e8:
             return f"{amount / 1e8:.2f} 亿元"
         elif amount >= 1e4:
@@ -1486,34 +1477,34 @@ class GeminiAnalyzer:
         else:
             return f"{amount:.0f} 元"
 
-    def _format_percent(self, value: Optional[float]) -> str:
+    def _format_percent(self, value: float | None) -> str:
         """格式化百分比显示"""
         if value is None:
-            return 'N/A'
+            return "N/A"
         try:
             return f"{float(value):.2f}%"
         except (TypeError, ValueError):
-            return 'N/A'
+            return "N/A"
 
-    def _format_price(self, value: Optional[float]) -> str:
+    def _format_price(self, value: float | None) -> str:
         """格式化价格显示"""
         if value is None:
-            return 'N/A'
+            return "N/A"
         try:
             return f"{float(value):.2f}"
         except (TypeError, ValueError):
-            return 'N/A'
+            return "N/A"
 
-    def _build_market_snapshot(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_market_snapshot(self, context: dict[str, Any]) -> dict[str, Any]:
         """构建当日行情快照（展示用）"""
-        today = context.get('today', {}) or {}
-        realtime = context.get('realtime', {}) or {}
-        yesterday = context.get('yesterday', {}) or {}
+        today = context.get("today", {}) or {}
+        realtime = context.get("realtime", {}) or {}
+        yesterday = context.get("yesterday", {}) or {}
 
-        prev_close = yesterday.get('close')
-        close = today.get('close')
-        high = today.get('high')
-        low = today.get('low')
+        prev_close = yesterday.get("close")
+        close = today.get("close")
+        high = today.get("high")
+        low = today.get("low")
 
         amplitude = None
         change_amount = None
@@ -1529,185 +1520,177 @@ class GeminiAnalyzer:
                 change_amount = None
 
         snapshot = {
-            "date": context.get('date', '未知'),
+            "date": context.get("date", "未知"),
             "close": self._format_price(close),
-            "open": self._format_price(today.get('open')),
+            "open": self._format_price(today.get("open")),
             "high": self._format_price(high),
             "low": self._format_price(low),
             "prev_close": self._format_price(prev_close),
-            "pct_chg": self._format_percent(today.get('pct_chg')),
+            "pct_chg": self._format_percent(today.get("pct_chg")),
             "change_amount": self._format_price(change_amount),
             "amplitude": self._format_percent(amplitude),
-            "volume": self._format_volume(today.get('volume')),
-            "amount": self._format_amount(today.get('amount')),
+            "volume": self._format_volume(today.get("volume")),
+            "amount": self._format_amount(today.get("amount")),
         }
 
         if realtime:
-            snapshot.update({
-                "price": self._format_price(realtime.get('price')),
-                "volume_ratio": realtime.get('volume_ratio', 'N/A'),
-                "turnover_rate": self._format_percent(realtime.get('turnover_rate')),
-                "source": getattr(realtime.get('source'), 'value', realtime.get('source', 'N/A')),
-            })
+            snapshot.update(
+                {
+                    "price": self._format_price(realtime.get("price")),
+                    "volume_ratio": realtime.get("volume_ratio", "N/A"),
+                    "turnover_rate": self._format_percent(realtime.get("turnover_rate")),
+                    "source": getattr(realtime.get("source"), "value", realtime.get("source", "N/A")),
+                }
+            )
 
         return snapshot
 
-    def _parse_response(
-        self, 
-        response_text: str, 
-        code: str, 
-        name: str
-    ) -> AnalysisResult:
+    def _parse_response(self, response_text: str, code: str, name: str) -> AnalysisResult:
         """
         解析 Gemini 响应（决策仪表盘版）
-        
+
         尝试从响应中提取 JSON 格式的分析结果，包含 仪表盘 字段
         如果解析失败，尝试智能提取或返回默认结果
         """
         try:
             # 清理响应文本：移除 markdown 代码块标记
             cleaned_text = response_text
-            if '```json' in cleaned_text:
-                cleaned_text = cleaned_text.replace('```json', '').replace('```', '')
-            elif '```' in cleaned_text:
-                cleaned_text = cleaned_text.replace('```', '')
-            
+            if "```json" in cleaned_text:
+                cleaned_text = cleaned_text.replace("```json", "").replace("```", "")
+            elif "```" in cleaned_text:
+                cleaned_text = cleaned_text.replace("```", "")
+
             # 尝试找到 JSON 内容
-            json_start = cleaned_text.find('{')
-            json_end = cleaned_text.rfind('}') + 1
-            
+            json_start = cleaned_text.find("{")
+            json_end = cleaned_text.rfind("}") + 1
+
             if json_start >= 0 and json_end > json_start:
                 json_str = cleaned_text[json_start:json_end]
-                
+
                 # 尝试修复常见的 JSON 问题
                 json_str = self._fix_json_string(json_str)
-                
+
                 data = json.loads(json_str)
-                
+
                 # 提取 仪表盘 数据
-                dashboard = data.get('dashboard', None)
+                dashboard = data.get("dashboard", None)
 
                 # 优先使用 AI 返回的股票名称（如果原名称无效或包含代码）
-                ai_stock_name = data.get('stock_name')
-                if ai_stock_name and (name.startswith('股票') or name == code or 'Unknown' in name):
+                ai_stock_name = data.get("stock_name")
+                if ai_stock_name and (name.startswith("股票") or name == code or "Unknown" in name):
                     name = ai_stock_name
 
                 # 解析所有字段，使用默认值防止缺失
                 # 解析 decision_type，如果没有则根据 operation_advice 推断
-                decision_type = data.get('decision_type', '')
+                decision_type = data.get("decision_type", "")
                 if not decision_type:
-                    op = data.get('operation_advice', '持有')
-                    if op in ['买入', '加仓', '强烈买入']:
-                        decision_type = 'buy'
-                    elif op in ['卖出', '减仓', '强烈卖出']:
-                        decision_type = 'sell'
+                    op = data.get("operation_advice", "持有")
+                    if op in ["买入", "加仓", "强烈买入"]:
+                        decision_type = "buy"
+                    elif op in ["卖出", "减仓", "强烈卖出"]:
+                        decision_type = "sell"
                     else:
-                        decision_type = 'hold'
-                
+                        decision_type = "hold"
+
                 return AnalysisResult(
                     code=code,
                     name=name,
                     # 核心指标
-                    sentiment_score=int(data.get('sentiment_score', 50)),
-                    trend_prediction=data.get('trend_prediction', '震荡'),
-                    operation_advice=data.get('operation_advice', '持有'),
+                    sentiment_score=int(data.get("sentiment_score", 50)),
+                    trend_prediction=data.get("trend_prediction", "震荡"),
+                    operation_advice=data.get("operation_advice", "持有"),
                     decision_type=decision_type,
-                    confidence_level=data.get('confidence_level', '中'),
+                    confidence_level=data.get("confidence_level", "中"),
                     # 决策仪表盘
                     dashboard=dashboard,
                     # 走势分析
-                    trend_analysis=data.get('trend_analysis', ''),
-                    short_term_outlook=data.get('short_term_outlook', ''),
-                    medium_term_outlook=data.get('medium_term_outlook', ''),
+                    trend_analysis=data.get("trend_analysis", ""),
+                    short_term_outlook=data.get("short_term_outlook", ""),
+                    medium_term_outlook=data.get("medium_term_outlook", ""),
                     # 技术面
-                    technical_analysis=data.get('technical_analysis', ''),
-                    ma_analysis=data.get('ma_analysis', ''),
-                    volume_analysis=data.get('volume_analysis', ''),
-                    pattern_analysis=data.get('pattern_analysis', ''),
+                    technical_analysis=data.get("technical_analysis", ""),
+                    ma_analysis=data.get("ma_analysis", ""),
+                    volume_analysis=data.get("volume_analysis", ""),
+                    pattern_analysis=data.get("pattern_analysis", ""),
                     # 基本面
-                    fundamental_analysis=data.get('fundamental_analysis', ''),
-                    sector_position=data.get('sector_position', ''),
-                    company_highlights=data.get('company_highlights', ''),
+                    fundamental_analysis=data.get("fundamental_analysis", ""),
+                    sector_position=data.get("sector_position", ""),
+                    company_highlights=data.get("company_highlights", ""),
                     # 情绪面/消息面
-                    news_summary=data.get('news_summary', ''),
-                    market_sentiment=data.get('market_sentiment', ''),
-                    hot_topics=data.get('hot_topics', ''),
+                    news_summary=data.get("news_summary", ""),
+                    market_sentiment=data.get("market_sentiment", ""),
+                    hot_topics=data.get("hot_topics", ""),
                     # 综合
-                    analysis_summary=data.get('analysis_summary', '分析完成'),
-                    key_points=data.get('key_points', ''),
-                    risk_warning=data.get('risk_warning', ''),
-                    buy_reason=data.get('buy_reason', ''),
+                    analysis_summary=data.get("analysis_summary", "分析完成"),
+                    key_points=data.get("key_points", ""),
+                    risk_warning=data.get("risk_warning", ""),
+                    buy_reason=data.get("buy_reason", ""),
                     # 元数据
-                    search_performed=data.get('search_performed', False),
-                    data_sources=data.get('data_sources', '技术面数据'),
+                    search_performed=data.get("search_performed", False),
+                    data_sources=data.get("data_sources", "技术面数据"),
                     success=True,
                 )
             else:
                 # 没有找到 JSON，尝试从纯文本中提取信息
-                logger.warning(f"无法从响应中提取 JSON，使用原始文本分析")
+                logger.warning("无法从响应中提取 JSON，使用原始文本分析")
                 return self._parse_text_response(response_text, code, name)
-                
+
         except json.JSONDecodeError as e:
             logger.warning(f"JSON 解析失败: {e}，尝试从文本提取")
             return self._parse_text_response(response_text, code, name)
-    
+
     def _fix_json_string(self, json_str: str) -> str:
         """修复常见的 JSON 格式问题"""
         import re
-        
+
         # 移除注释
-        json_str = re.sub(r'//.*?\n', '\n', json_str)
-        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
-        
+        json_str = re.sub(r"//.*?\n", "\n", json_str)
+        json_str = re.sub(r"/\*.*?\*/", "", json_str, flags=re.DOTALL)
+
         # 修复尾随逗号
-        json_str = re.sub(r',\s*}', '}', json_str)
-        json_str = re.sub(r',\s*]', ']', json_str)
-        
+        json_str = re.sub(r",\s*}", "}", json_str)
+        json_str = re.sub(r",\s*]", "]", json_str)
+
         # 确保布尔值是小写
-        json_str = json_str.replace('True', 'true').replace('False', 'false')
-        
+        json_str = json_str.replace("True", "true").replace("False", "false")
+
         # 使用 `json-repair` 修复
         json_str = repair_json(json_str)
-        
+
         return json_str
-    
-    def _parse_text_response(
-        self, 
-        response_text: str, 
-        code: str, 
-        name: str
-    ) -> AnalysisResult:
+
+    def _parse_text_response(self, response_text: str, code: str, name: str) -> AnalysisResult:
         """从纯文本响应中尽可能提取分析信息"""
         # 尝试识别关键词来判断情绪
         sentiment_score = 50
-        trend = '震荡'
-        advice = '持有'
-        
+        trend = "震荡"
+        advice = "持有"
+
         text_lower = response_text.lower()
-        
+
         # 简单的情绪识别
-        positive_keywords = ['看多', '买入', '上涨', '突破', '强势', '利好', '加仓', 'bullish', 'buy']
-        negative_keywords = ['看空', '卖出', '下跌', '跌破', '弱势', '利空', '减仓', 'bearish', 'sell']
-        
+        positive_keywords = ["看多", "买入", "上涨", "突破", "强势", "利好", "加仓", "bullish", "buy"]
+        negative_keywords = ["看空", "卖出", "下跌", "跌破", "弱势", "利空", "减仓", "bearish", "sell"]
+
         positive_count = sum(1 for kw in positive_keywords if kw in text_lower)
         negative_count = sum(1 for kw in negative_keywords if kw in text_lower)
-        
+
         if positive_count > negative_count + 1:
             sentiment_score = 65
-            trend = '看多'
-            advice = '买入'
-            decision_type = 'buy'
+            trend = "看多"
+            advice = "买入"
+            decision_type = "buy"
         elif negative_count > positive_count + 1:
             sentiment_score = 35
-            trend = '看空'
-            advice = '卖出'
-            decision_type = 'sell'
+            trend = "看空"
+            advice = "卖出"
+            decision_type = "sell"
         else:
-            decision_type = 'hold'
-        
-        # 截取前500字符作为摘要
-        summary = response_text[:500] if response_text else '无分析结果'
-        
+            decision_type = "hold"
+
+        # 截取前 500 个字符作为摘要
+        summary = response_text[:500] if response_text else "无分析结果"
+
         return AnalysisResult(
             code=code,
             name=name,
@@ -1715,41 +1698,37 @@ class GeminiAnalyzer:
             trend_prediction=trend,
             operation_advice=advice,
             decision_type=decision_type,
-            confidence_level='低',
+            confidence_level="低",
             analysis_summary=summary,
-            key_points='JSON解析失败，仅供参考',
-            risk_warning='分析结果可能不准确，建议结合其他信息判断',
+            key_points="JSON解析失败，仅供参考",
+            risk_warning="分析结果可能不准确，建议结合其他信息判断",
             raw_response=response_text,
             success=True,
         )
-    
-    def batch_analyze(
-        self, 
-        contexts: List[Dict[str, Any]],
-        delay_between: float = 2.0
-    ) -> List[AnalysisResult]:
+
+    def batch_analyze(self, contexts: list[dict[str, Any]], delay_between: float = 2.0) -> list[AnalysisResult]:
         """
         批量分析多只股票
-        
+
         注意：为避免 API 速率限制，每次分析之间会有延迟
-        
+
         参数：
             contexts: 上下文数据列表
             delay_between: 每次分析之间的延迟（秒）
-            
+
         返回：
             AnalysisResult 列表
         """
         results = []
-        
+
         for i, context in enumerate(contexts):
             if i > 0:
                 logger.debug(f"等待 {delay_between} 秒后继续...")
                 time.sleep(delay_between)
-            
+
             result = self.analyze(context)
             results.append(result)
-        
+
         return results
 
 
@@ -1762,31 +1741,31 @@ def get_analyzer() -> GeminiAnalyzer:
 if __name__ == "__main__":
     # 测试代码
     logging.basicConfig(level=logging.DEBUG)
-    
+
     # 模拟上下文数据
     test_context = {
-        'code': '600519',
-        'date': '2026-01-09',
-        'today': {
-            'open': 1800.0,
-            'high': 1850.0,
-            'low': 1780.0,
-            'close': 1820.0,
-            'volume': 10000000,
-            'amount': 18200000000,
-            'pct_chg': 1.5,
-            'ma5': 1810.0,
-            'ma10': 1800.0,
-            'ma20': 1790.0,
-            'volume_ratio': 1.2,
+        "code": "600519",
+        "date": "2026-01-09",
+        "today": {
+            "open": 1800.0,
+            "high": 1850.0,
+            "low": 1780.0,
+            "close": 1820.0,
+            "volume": 10000000,
+            "amount": 18200000000,
+            "pct_chg": 1.5,
+            "ma5": 1810.0,
+            "ma10": 1800.0,
+            "ma20": 1790.0,
+            "volume_ratio": 1.2,
         },
-        'ma_status': '多头排列 📈',
-        'volume_change_ratio': 1.3,
-        'price_change_ratio': 1.5,
+        "ma_status": "多头排列 📈",
+        "volume_change_ratio": 1.3,
+        "price_change_ratio": 1.5,
     }
-    
+
     analyzer = GeminiAnalyzer()
-    
+
     if analyzer.is_available():
         print("=== AI 分析测试 ===")
         result = analyzer.analyze(test_context)

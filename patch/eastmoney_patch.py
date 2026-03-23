@@ -88,7 +88,7 @@ def _get_nid(user_agent):
                 生成 st_nvi 值的方法
                 :return: 返回生成的 st_nvi 值
                 """
-                HASH_LENGTH = 4  # 截取哈希值的前几位
+                HASH_LENGTH = 4  # 截取哈希值最前面的几位
 
                 def generate_random_string(length=21):
                     """

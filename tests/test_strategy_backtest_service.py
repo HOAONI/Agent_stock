@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""区间策略回测服务测试。
+"""策略区间回测服务测试。
 
 这些测试主要验证三类事情：
 1. 参数和结果结构是否稳定
@@ -25,7 +25,7 @@ class _StubFetcher:
     def __init__(self, frame: pd.DataFrame):
         self._frame = frame
 
-    def get_daily_data(self, code, start_date=None, end_date=None, days=0):  # noqa: ARG002
+    def get_daily_data(self, code, start_date=None, end_date=None, days=0) -> tuple[pd.DataFrame | None, str | None]:  # noqa: ARG002
         return self._frame.copy(), "stub"
 
 
@@ -36,7 +36,7 @@ class _RecordingFetcher(_StubFetcher):
         super().__init__(frame)
         self.calls = []
 
-    def get_daily_data(self, code, start_date=None, end_date=None, days=0):  # noqa: ARG002
+    def get_daily_data(self, code, start_date=None, end_date=None, days=0) -> tuple[pd.DataFrame | None, str | None]:  # noqa: ARG002
         self.calls.append(
             {
                 "code": code,

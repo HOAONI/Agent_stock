@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from sqlalchemy import create_engine, text
 
@@ -59,7 +60,7 @@ def main() -> int:
             "CREATE INDEX IF NOT EXISTS ix_agent_tasks_status ON agent_tasks (status)",
             "CREATE INDEX IF NOT EXISTS ix_agent_tasks_run_id ON agent_tasks (run_id)",
         ]
-        with engine.begin() as conn:
+        with cast(Any, engine.begin()) as conn:
             for stmt in stmts:
                 conn.execute(text(stmt))
         logger.info("PostgreSQL migrations applied")

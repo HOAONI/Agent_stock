@@ -1,8 +1,9 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportGeneralTypeIssues=false, reportOptionalMemberAccess=false
 # -*- coding: utf-8 -*-
-"""模板化区间策略回测服务。
+"""模板化策略区间回测服务。
 
 与 `agent_historical_backtest_service` 不同，这里更偏向策略模板回放：给定一段区间、
-一组策略模板和参数，输出标准化的权益曲线、成交记录和绩效指标。
+多组策略模板及其参数，输出标准化的权益曲线、成交记录和绩效指标。
 """
 
 from __future__ import annotations
@@ -10,29 +11,57 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import math
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Iterable, cast
+
 
 import pandas as pd
 
 from data_provider import DataFetcherManager
 from data_provider.base import canonical_stock_code, normalize_stock_code
+from agent_stock.protocols import SupportsDailyDataFetcher
 
 try:
     import backtrader as bt  # type: ignore
 except Exception:  # pragma: no cover
     bt = None
 
+bt = cast(Any, bt)
+
+
+def _bt_indicators() -> Any:
+    """读取 Backtrader 指标命名空间，避免 IDE 将动态属性误判为缺失。"""
+    bt_module: Any = bt
+    return bt_module.indicators
+
+
+def _new_cerebro() -> Any:
+    """创建 Backtrader 引擎实例。"""
+    bt_module: Any = bt
+    return bt_module.Cerebro(stdstats=False)
+
+
+def _new_pandas_data_feed(frame: pd.DataFrame) -> Any:
+    """基于 DataFrame 创建 Backtrader 数据源。"""
+    bt_module: Any = bt
+    return bt_module.feeds.PandasData(dataname=frame)
+
+
+def _strategy_bar_count(strategy: Any) -> int:
+    """读取策略当前累积 bar 数量。"""
+    return int(len(strategy))
+
+
 # 兼容旧接口仍在使用的策略编码，进入服务后会统一映射为新的模板编码。
 LEGACY_STRATEGY_CODES = ["ma20_trend", "rsi14_mean_reversion"]
-LEGACY_STRATEGY_NAMES: Dict[str, str] = {
+LEGACY_STRATEGY_NAMES: dict[str, str] = {
     "ma20_trend": "MA20 Trend",
     "rsi14_mean_reversion": "RSI14 Mean Reversion",
 }
-TEMPLATE_NAMES: Dict[str, str] = {
+TEMPLATE_NAMES: dict[str, str] = {
     "ma_cross": "MA Cross",
     "rsi_threshold": "RSI Threshold",
 }
-LEGACY_STRATEGY_TEMPLATE_MAP: Dict[str, Dict[str, Any]] = {
+LEGACY_STRATEGY_TEMPLATE_MAP: dict[str, dict[str, Any]] = {
     "ma20_trend": {
         "template_code": "ma_cross",
         "strategy_name": LEGACY_STRATEGY_NAMES["ma20_trend"],
@@ -69,11 +98,11 @@ class StrategyRunParams:
 class StrategyDefinition:
     """归一化后的策略模板定义。"""
 
-    strategy_id: Optional[int]
+    strategy_id: int | None
     strategy_name: str
     template_code: str
     template_name: str
-    params: Dict[str, float]
+    params: dict[str, float]
 
 
 class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
@@ -87,8 +116,8 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         self.pending_order = None
         self.pending_exit_reason = None
         self.current_entry = None
-        self.trades: List[Dict[str, Any]] = []
-        self.equity_points: List[Dict[str, Any]] = []
+        self.trades: list[dict[str, Any]] = []
+        self.equity_points: list[dict[str, Any]] = []
         self.margin_rejections = 0
         self.entry_signal_count = 0
         self.exit_signal_count = 0
@@ -117,7 +146,7 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
         """返回当前 bar 对应的交易日。"""
         return bt.num2date(self.data.datetime[0]).date()
 
-    def _trade_window_bounds(self) -> tuple[Optional[date], Optional[date]]:
+    def _trade_window_bounds(self) -> tuple[date | None, date | None]:
         """解析策略参数中的交易窗口起止日期。"""
         trade_start = getattr(self.p, "trade_start", None)
         trade_end = getattr(self.p, "trade_end", None)
@@ -302,14 +331,15 @@ class _MACrossStrategy(_BaseTrackedStrategy):
     def __init__(self):  # type: ignore[override]
         """初始化均线指标与上下穿信号。"""
         super().__init__()
+        indicators = _bt_indicators()
         self.ma_window = max(5, int(getattr(self.p, "ma_window", 20) or 20))
-        self.moving_average = bt.indicators.SimpleMovingAverage(self.data.close, period=self.ma_window)
-        self.cross_up = bt.indicators.CrossUp(self.data.close, self.moving_average)
-        self.cross_down = bt.indicators.CrossDown(self.data.close, self.moving_average)
+        self.moving_average = indicators.SimpleMovingAverage(self.data.close, period=self.ma_window)
+        self.cross_up = indicators.CrossUp(self.data.close, self.moving_average)
+        self.cross_down = indicators.CrossDown(self.data.close, self.moving_average)
 
     def _should_buy(self) -> bool:
         """判断是否满足均线上穿买入条件。"""
-        if len(self) < self.ma_window:
+        if _strategy_bar_count(self) < self.ma_window:
             return False
 
         ma_value = float(self.moving_average[0])
@@ -320,11 +350,11 @@ class _MACrossStrategy(_BaseTrackedStrategy):
             close_value = float(self.data.close[0])
             return math.isfinite(close_value) and close_value > ma_value
 
-        return len(self) >= self.ma_window + 1 and float(self.cross_up[0]) > 0
+        return _strategy_bar_count(self) >= self.ma_window + 1 and float(self.cross_up[0]) > 0
 
     def _should_sell(self) -> bool:
         """判断是否满足均线下穿卖出条件。"""
-        return len(self) >= self.ma_window + 1 and float(self.cross_down[0]) > 0
+        return _strategy_bar_count(self) >= self.ma_window + 1 and float(self.cross_down[0]) > 0
 
     def _signal_exit_reason(self) -> str:
         """返回均线策略离场原因。"""
@@ -346,21 +376,22 @@ class _RSIThresholdStrategy(_BaseTrackedStrategy):
     def __init__(self):  # type: ignore[override]
         """初始化 RSI 指标与阈值配置。"""
         super().__init__()
+        indicators = _bt_indicators()
         self.rsi_period = max(5, int(getattr(self.p, "rsi_period", 14) or 14))
         self.oversold_threshold = float(getattr(self.p, "oversold_threshold", 30) or 30)
         self.overbought_threshold = float(getattr(self.p, "overbought_threshold", 70) or 70)
-        self.rsi = bt.indicators.RSI_Safe(self.data.close, period=self.rsi_period)
+        self.rsi = indicators.RSI_Safe(self.data.close, period=self.rsi_period)
 
     def _should_buy(self) -> bool:
         """判断是否满足 RSI 超卖买入条件。"""
-        if len(self) < self.rsi_period + 1:
+        if _strategy_bar_count(self) < self.rsi_period + 1:
             return False
         value = float(self.rsi[0])
         return math.isfinite(value) and value < self.oversold_threshold
 
     def _should_sell(self) -> bool:
         """判断是否满足 RSI 超买卖出条件。"""
-        if len(self) < self.rsi_period + 1:
+        if _strategy_bar_count(self) < self.rsi_period + 1:
             return False
         value = float(self.rsi[0])
         return math.isfinite(value) and value > self.overbought_threshold
@@ -373,7 +404,7 @@ class _RSIThresholdStrategy(_BaseTrackedStrategy):
 class StrategyBacktestService:
     """执行模板化策略的区间回测，并输出标准指标。"""
 
-    def __init__(self, fetcher_manager: Optional[DataFetcherManager] = None):
+    def __init__(self, fetcher_manager: SupportsDailyDataFetcher | None = None):
         """初始化数据获取器。"""
         self.fetcher = fetcher_manager or DataFetcherManager()
 
@@ -384,7 +415,7 @@ class StrategyBacktestService:
         return math.floor(value * factor + 0.5) / factor
 
     @staticmethod
-    def _to_date(value: Any) -> Optional[date]:
+    def _to_date(value: Any) -> date | None:
         """将输入安全解析为日期。"""
         if value is None:
             return None
@@ -418,7 +449,7 @@ class StrategyBacktestService:
         return normalize_stock_code(code)
 
     @staticmethod
-    def _normalize_template_params(template_code: str, raw_params: Any) -> Dict[str, float]:
+    def _normalize_template_params(template_code: str, raw_params: Any) -> dict[str, float]:
         """按模板类型归一化策略参数。"""
         source = raw_params if isinstance(raw_params, dict) else {}
 
@@ -452,12 +483,12 @@ class StrategyBacktestService:
 
         raise ValueError(f"validation_error: unsupported template_code={template_code}")
 
-    def _normalize_strategy_definitions(self, payload: Dict[str, Any]) -> List[StrategyDefinition]:
+    def _normalize_strategy_definitions(self, payload: dict[str, Any]) -> list[StrategyDefinition]:
         """从新旧两种请求格式中解析策略定义。"""
         raw_strategies = payload.get("strategies")
         if isinstance(raw_strategies, list) and raw_strategies:
-            definitions: List[StrategyDefinition] = []
-            seen: set[tuple[Optional[int], str, str]] = set()
+            definitions: list[StrategyDefinition] = []
+            seen: set[tuple[int | None, str, str]] = set()
             for item in raw_strategies:
                 if not isinstance(item, dict):
                     raise ValueError("validation_error: strategies must be objects")
@@ -508,7 +539,7 @@ class StrategyBacktestService:
             )
         return definitions
 
-    def _validate_params(self, payload: Dict[str, Any]) -> StrategyRunParams:
+    def _validate_params(self, payload: dict[str, Any]) -> StrategyRunParams:
         """校验回测请求并提取基础运行参数。"""
         if bt is None:
             raise ValueError("backtrader_not_available: install backtrader to run strategy backtest")
@@ -550,7 +581,7 @@ class StrategyBacktestService:
         if frame is None or frame.empty:
             raise ValueError("insufficient_data: no daily bars in requested range")
 
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for _, row in frame.iterrows():
             day = self._to_date(row.get("date"))
             if day is None:
@@ -600,17 +631,18 @@ class StrategyBacktestService:
         return prepared.set_index("date"), trade_window.set_index("date")
 
     @staticmethod
-    def _compute_benchmark_equity(frame: pd.DataFrame, initial_capital: float) -> Dict[str, Any]:
+    def _compute_benchmark_equity(frame: pd.DataFrame, initial_capital: float) -> dict[str, Any]:
         """计算买入持有基准曲线。"""
         first_close = float(frame["close"].iloc[0])
         shares = int(initial_capital // first_close) if first_close > 0 else 0
         cash = initial_capital - shares * first_close
 
-        points: List[Dict[str, Any]] = []
+        points: list[dict[str, Any]] = []
         for idx, row in frame.iterrows():
+            trade_day = pd.Timestamp(cast(Any, idx)).date()
             close_price = float(row["close"])
             equity = cash + shares * close_price
-            points.append({"trade_date": idx.date().isoformat(), "benchmark_equity": equity})
+            points.append({"trade_date": trade_day.isoformat(), "benchmark_equity": equity})
 
         final_equity = points[-1]["benchmark_equity"] if points else initial_capital
         total_return_pct = ((final_equity / initial_capital) - 1) * 100 if initial_capital > 0 else 0.0
@@ -623,10 +655,10 @@ class StrategyBacktestService:
 
     @staticmethod
     def _merge_equity_with_benchmark(
-        equity_points: Iterable[Dict[str, Any]],
-        benchmark_points: Iterable[Dict[str, Any]],
+        equity_points: Iterable[dict[str, Any]],
+        benchmark_points: Iterable[dict[str, Any]],
         initial_capital: float,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """将策略权益曲线与基准曲线按交易日对齐。"""
         benchmark_rows = [
             {
@@ -643,7 +675,7 @@ class StrategyBacktestService:
             if str(point.get("trade_date") or "")
         }
 
-        merged: List[Dict[str, Any]] = []
+        merged: list[dict[str, Any]] = []
         peak = None
         latest_equity = float(initial_capital)
         for point in benchmark_rows:
@@ -664,12 +696,12 @@ class StrategyBacktestService:
         return merged
 
     @staticmethod
-    def _compute_sharpe(equity_points: List[Dict[str, Any]]) -> Optional[float]:
+    def _compute_sharpe(equity_points: list[dict[str, Any]]) -> float | None:
         """根据权益点序列估算年化夏普比率。"""
         if len(equity_points) < 3:
             return None
 
-        returns: List[float] = []
+        returns: list[float] = []
         previous = None
         for point in equity_points:
             equity = float(point.get("equity") or 0.0)
@@ -694,8 +726,8 @@ class StrategyBacktestService:
         frame: pd.DataFrame,
         trade_window: pd.DataFrame,
         params: StrategyRunParams,
-        benchmark: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        benchmark: dict[str, Any],
+    ) -> dict[str, Any]:
         """执行单个策略模板的回测，并输出标准结果。"""
         if strategy.template_code == "ma_cross":
             strategy_cls = _MACrossStrategy
@@ -712,8 +744,8 @@ class StrategyBacktestService:
         else:
             raise ValueError(f"validation_error: unsupported template_code={strategy.template_code}")
 
-        cerebro = bt.Cerebro(stdstats=False)
-        data_feed = bt.feeds.PandasData(dataname=frame)
+        cerebro = _new_cerebro()
+        data_feed = _new_pandas_data_feed(frame)
         cerebro.adddata(data_feed)
         trade_start = trade_window.index[0].date()
         trade_end = trade_window.index[-1].date()
@@ -859,8 +891,8 @@ class StrategyBacktestService:
             "equity": merged_equity,
         }
 
-    def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """执行区间策略回测入口。"""
+    def run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """执行策略区间回测入口。"""
         strategy_definitions = self._normalize_strategy_definitions(payload)
         params = self._validate_params(payload)
         frame, trade_window = self._load_daily_frame(params)
@@ -886,7 +918,7 @@ class StrategyBacktestService:
         }
 
 
-_strategy_backtest_service: Optional[StrategyBacktestService] = None
+_strategy_backtest_service: StrategyBacktestService | None = None
 
 
 def get_strategy_backtest_service() -> StrategyBacktestService:

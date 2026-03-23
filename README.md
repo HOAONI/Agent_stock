@@ -5,8 +5,8 @@
 ## 项目定位
 
 - 这是一个“分析 + 编排 + 执行 + 回测”一体化服务，不是前端项目。
-- CLI 入口是 [`agent_main.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_main.py)，适合本地单次运行或实时轮询。
-- 微服务入口是 [`agent_server.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_server.py)，对外暴露 FastAPI 接口。
+- CLI 入口是 [`agent_main.py`](agent_main.py)，适合本地单次运行或实时轮询。
+- 微服务入口是 [`agent_server.py`](agent_server.py)，对外暴露 FastAPI 接口。
 - 核心业务命名空间是 `agent_stock.*`、`agent_api.*`、`data_provider.*`、`patch.*`。
 
 ## 快速上手
@@ -15,6 +15,7 @@
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
@@ -89,50 +90,50 @@ docker compose -f docker/docker-compose.yml down
 
 ## 目录职责
 
-- [`agent_stock/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock)
+- `agent_stock/`
   核心业务目录，包含配置、分析器、多 Agent 编排、存储、报表、回测服务。
-- [`agent_api/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_api)
+- `agent_api/`
   FastAPI 应用、路由、Schema、鉴权中间件和依赖注入。
-- [`data_provider/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/data_provider)
+- `data_provider/`
   多数据源抓取层，统一封装 AkShare、Tushare、Baostock、Pytdx、Yfinance 等接口。
-- [`patch/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/patch)
+- `patch/`
   对第三方请求行为的补丁，例如东方财富反爬请求头补丁。
-- [`scripts/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/scripts)
+- `scripts/`
   迁移脚本和工程检查脚本。
-- [`tests/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/tests)
+- `tests/`
   覆盖 API、运行时、回测、异步任务与数据处理的回归测试。
 
 ## 推荐阅读顺序
 
 第一次接手这个项目，建议按下面顺序阅读：
 
-1. [`agent_main.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_main.py)
+1. [`agent_main.py`](agent_main.py)
    先理解 CLI 如何启动一次运行或实时循环。
-2. [`agent_server.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_server.py) 和 [`agent_api/app.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_api/app.py)
+2. [`agent_server.py`](agent_server.py) 和 [`agent_api/app.py`](agent_api/app.py)
    看清服务模式如何启动和挂路由。
-3. [`agent_stock/config.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/config.py) 与 [`agent_stock/storage.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/storage.py)
+3. [`agent_stock/config.py`](agent_stock/config.py) 与 [`agent_stock/storage.py`](agent_stock/storage.py)
    理解配置来源、数据库连接和核心表结构。
-4. [`agent_stock/agents/contracts.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/agents/contracts.py)
+4. [`agent_stock/agents/contracts.py`](agent_stock/agents/contracts.py)
    先熟悉运行过程中各阶段产出的统一数据结构。
-5. [`agent_stock/agents/orchestrator.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/agents/orchestrator.py)
+5. [`agent_stock/agents/orchestrator.py`](agent_stock/agents/orchestrator.py)
    掌握数据、信号、风控、执行是怎样串起来的。
 6. `agent_stock/services/*`
    重点看 `agent_service.py`、`agent_task_service.py`、`backtest_service.py`、`strategy_backtest_service.py`、`agent_historical_backtest_service.py`。
-7. [`data_provider/base.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/data_provider/base.py) 与各个 `*_fetcher.py`
-   理解多数据源优先级、降级策略和实时行情补齐逻辑。
-8. [`agent_api/v1/endpoints/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_api/v1/endpoints)
+7. [`data_provider/base.py`](data_provider/base.py) 与各个 `*_fetcher.py`
+   理解多数据源优先级、降级策略和实时行情补全逻辑。
+8. `agent_api/v1/endpoints/`
    对照接口了解 Backend_stock 是如何调用本服务的。
-9. [`tests/`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/tests)
+9. `tests/`
    从复杂测试场景反推业务边界和历史 bug。
 
 ## 常见调试入口
 
-- 编排主链路：[`agent_stock/agents/orchestrator.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/agents/orchestrator.py)
-- AI 分析与 LLM 兜底：[`agent_stock/analyzer.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/analyzer.py)
-- 新闻搜索与缓存：[`agent_stock/search_service.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/search_service.py)
-- 账户、持仓、任务落库：[`agent_stock/repositories/execution_repo.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/repositories/execution_repo.py)
-- 历史回放与策略回测：[`agent_stock/services/agent_historical_backtest_service.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/services/agent_historical_backtest_service.py)、[`agent_stock/services/strategy_backtest_service.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/agent_stock/services/strategy_backtest_service.py)
-- 数据源切换：[`data_provider/base.py`](/Users/hoaon/Desktop/毕设相关/project/v4/Agent_stock/data_provider/base.py)
+- 编排主链路：[`agent_stock/agents/orchestrator.py`](agent_stock/agents/orchestrator.py)
+- AI 分析与 LLM 兜底：[`agent_stock/analyzer.py`](agent_stock/analyzer.py)
+- 新闻搜索与缓存：[`agent_stock/search_service.py`](agent_stock/search_service.py)
+- 账户、持仓、任务落库：[`agent_stock/repositories/execution_repo.py`](agent_stock/repositories/execution_repo.py)
+- 历史回放与策略回测：[`agent_stock/services/agent_historical_backtest_service.py`](agent_stock/services/agent_historical_backtest_service.py)、[`agent_stock/services/strategy_backtest_service.py`](agent_stock/services/strategy_backtest_service.py)
+- 数据源切换：[`data_provider/base.py`](data_provider/base.py)
 
 ## API 概览
 
@@ -175,9 +176,14 @@ Authorization: Bearer <AGENT_SERVICE_AUTH_TOKEN>
 ## 验证命令
 
 ```bash
+python scripts/clean_workspace_artifacts.py
 python scripts/check_import_boundaries.py
+python -m flake8 .
+python -m pyright
 python -m pytest tests -q
 python -c "import agent_main, agent_server, agent_api.app; print('imports ok')"
 ```
+
+如仅运行服务，可只安装 `requirements.txt`；本地开发、提交前检查和 CI 建议安装 `requirements-dev.txt`。
 
 当 `AGENT_WRITE_LOCAL_REPORTS=true` 时，Markdown 与 CSV 报表会落到 `logs/agent_reports/<trade-date>/`。

@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportReturnType=false
 # -*- coding: utf-8 -*-
 """Agent 流水线历史回放服务。
 
@@ -10,7 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 import math
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Iterable, cast
+
 
 import numpy as np
 import pandas as pd
@@ -21,6 +23,7 @@ from agent_stock.agents.contracts import AgentState, RiskAgentOutput, SignalAgen
 from agent_stock.agents.risk_agent import RiskAgent
 from agent_stock.analyzer import GeminiAnalyzer
 from agent_stock.config import Config, RuntimeLlmConfig, RuntimeStrategyConfig, get_config
+from agent_stock.protocols import SupportsDailyDataFetcher, SupportsTrendAnalyzer
 from agent_stock.stock_analyzer import BuySignal, StockTrendAnalyzer, TrendAnalysisResult
 
 ENGINE_VERSION = "agent_replay_v1"
@@ -69,14 +72,14 @@ class ReplayBar:
     vol_ratio5: float
 
 
-def _as_dict(value: Any) -> Dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any]:
     """将任意值安全转换为字典。"""
     if isinstance(value, dict):
         return value
     return {}
 
 
-def _as_list_of_dicts(value: Any) -> List[Dict[str, Any]]:
+def _as_list_of_dicts(value: Any) -> list[dict[str, Any]]:
     """将输入转换为字典列表。"""
     if not isinstance(value, list):
         return []
@@ -129,7 +132,7 @@ def _iso_day(value: date | None) -> str | None:
 class HistoricalDataAgent:
     """准备不泄露未来信息的历史滚动窗口。"""
 
-    def __init__(self, fetcher_manager: Optional[DataFetcherManager] = None) -> None:
+    def __init__(self, fetcher_manager: SupportsDailyDataFetcher | None = None) -> None:
         """初始化历史行情数据获取器。"""
         self.fetcher = fetcher_manager or DataFetcherManager()
 
@@ -154,22 +157,25 @@ class HistoricalDataAgent:
         if trade_window.empty:
             raise ValueError("insufficient_data: no trading bars inside date range")
 
-        trade_end = pd.Timestamp(trade_window["date"].iloc[-1])
+        trade_dates = cast(pd.Series, trade_window["date"])
+        trade_end = pd.Timestamp(trade_dates.iloc[-1])
         # prepared 保留“截至最后一个交易日”的完整可见历史，后续每日再切滚动窗口。
-        prepared = normalized[normalized["date"] <= trade_end].copy()
+        normalized_dates = cast(pd.Series, normalized["date"])
+        prepared = normalized[normalized_dates <= trade_end].copy()
         if prepared.empty:
             raise ValueError("insufficient_data: no bars available after warmup preparation")
         return prepared.reset_index(drop=True), trade_window.reset_index(drop=True)
 
     def rolling_window(self, prepared: pd.DataFrame, trade_day: date) -> pd.DataFrame:
         """截取截至指定交易日的滚动观察窗口。"""
-        scoped = prepared[prepared["date"] <= pd.Timestamp(trade_day)].copy()
+        prepared_dates = cast(pd.Series, prepared["date"])
+        scoped = prepared[prepared_dates <= pd.Timestamp(trade_day)].copy()
         return scoped.tail(ROLLING_WINDOW_BARS).reset_index(drop=True)
 
     @staticmethod
     def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
         """清洗原始行情，并补齐回放所需技术指标。"""
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for _, row in frame.iterrows():
             day = _to_day(row.get("date"))
             if day is None:
@@ -200,17 +206,17 @@ class HistoricalDataAgent:
             raise ValueError("insufficient_data: no valid OHLC bars after normalization")
 
         normalized = pd.DataFrame(rows).drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
-        normalized["pct_chg"] = normalized["close"].pct_change().fillna(0.0) * 100.0
-        normalized["MA5"] = normalized["close"].rolling(5, min_periods=1).mean()
-        normalized["MA10"] = normalized["close"].rolling(10, min_periods=1).mean()
-        normalized["MA20"] = normalized["close"].rolling(20, min_periods=1).mean()
-        normalized["MA60"] = normalized["close"].rolling(60, min_periods=1).mean()
-        normalized["momentum20"] = normalized["close"].pct_change(20).fillna(0.0) * 100.0
-        avg_volume5 = normalized["volume"].rolling(5, min_periods=1).mean()
-        normalized["vol_ratio5"] = (
-            normalized["volume"] / avg_volume5.replace(0.0, np.nan)
-        ).fillna(1.0)
-        normalized["rsi14"] = HistoricalDataAgent._compute_rsi(normalized["close"], 14)
+        close_series = cast(pd.Series, normalized["close"])
+        volume_series = cast(pd.Series, normalized["volume"])
+        normalized["pct_chg"] = close_series.pct_change().fillna(0.0) * 100.0
+        normalized["MA5"] = close_series.rolling(5, min_periods=1).mean()
+        normalized["MA10"] = close_series.rolling(10, min_periods=1).mean()
+        normalized["MA20"] = close_series.rolling(20, min_periods=1).mean()
+        normalized["MA60"] = close_series.rolling(60, min_periods=1).mean()
+        normalized["momentum20"] = close_series.pct_change(20).fillna(0.0) * 100.0
+        avg_volume5 = cast(pd.Series, volume_series.rolling(5, min_periods=1).mean())
+        normalized["vol_ratio5"] = cast(pd.Series, volume_series / avg_volume5.replace(0.0, np.nan)).fillna(1.0)
+        normalized["rsi14"] = HistoricalDataAgent._compute_rsi(close_series, 14)
         return normalized
 
     @staticmethod
@@ -221,15 +227,15 @@ class HistoricalDataAgent:
         losses = (-delta.clip(upper=0))
         avg_gain = gains.rolling(period, min_periods=1).mean()
         avg_loss = losses.rolling(period, min_periods=1).mean()
-        rs = avg_gain / avg_loss.replace(0.0, np.nan)
-        rsi = 100.0 - (100.0 / (1.0 + rs))
+        rs = cast(pd.Series, avg_gain / cast(pd.Series, avg_loss.replace(0.0, np.nan)))
+        rsi = cast(pd.Series, 100.0 - (100.0 / (1.0 + rs)))
         return rsi.fillna(50.0)
 
 
 class HistoricalRiskAdapter:
     """对实时 RiskAgent 的适配层，使其可用于历史回放。"""
 
-    def __init__(self, risk_agent: Optional[RiskAgent] = None) -> None:
+    def __init__(self, risk_agent: RiskAgent | None = None) -> None:
         """初始化底层风险代理。"""
         self.risk_agent = risk_agent or RiskAgent()
 
@@ -240,7 +246,7 @@ class HistoricalRiskAdapter:
         trade_day: date,
         current_price: float,
         signal_output: SignalAgentOutput,
-        simulator: "HistoricalExecutionSimulator",
+        simulator: HistoricalExecutionSimulator,
         runtime_strategy: RuntimeStrategyConfig,
     ) -> RiskAgentOutput:
         """基于模拟账户快照调用实时风控逻辑。"""
@@ -268,14 +274,14 @@ class HistoricalExecutionSimulator:
         self.cash = float(initial_capital)
         self.position_qty = 0
         self.avg_cost = 0.0
-        self.pending_action: Dict[str, Any] | None = None
-        self.current_entry: Dict[str, Any] | None = None
-        self.trades: List[Dict[str, Any]] = []
+        self.pending_action: dict[str, Any] | None = None
+        self.current_entry: dict[str, Any] | None = None
+        self.trades: list[dict[str, Any]] = []
         self.benchmark_shares = 0
         self.benchmark_cash = float(initial_capital)
         self._benchmark_initialized = False
 
-    def start_day(self, bar: ReplayBar) -> Dict[str, Any]:
+    def start_day(self, bar: ReplayBar) -> dict[str, Any]:
         """在新交易日开始时执行上一个交易日计划的动作。"""
         self._ensure_benchmark(bar.close)
         payload = {
@@ -333,7 +339,7 @@ class HistoricalExecutionSimulator:
 
         return payload
 
-    def check_intraday_exit(self, bar: ReplayBar, runtime_strategy: RuntimeStrategyConfig) -> Dict[str, Any] | None:
+    def check_intraday_exit(self, bar: ReplayBar, runtime_strategy: RuntimeStrategyConfig) -> dict[str, Any] | None:
         """检查盘中是否触发运行时止盈止损。"""
         if self.position_qty <= 0 or self.avg_cost <= 0:
             return None
@@ -350,12 +356,14 @@ class HistoricalExecutionSimulator:
         if not stop_hit and not take_hit:
             return None
 
-        if stop_hit:
+        if stop_hit and stop_loss is not None:
             return self._close_position(bar.day, float(stop_loss), "stop_loss", None)
+        if take_profit is None:
+            return None
         return self._close_position(bar.day, float(take_profit), "take_profit", None)
 
-    def plan_next_open(self, risk_output: RiskAgentOutput, current_price: float, is_last_day: bool) -> Dict[str, Any]:
-        """根据风控输出安排下一交易日开盘动作。"""
+    def plan_next_open(self, risk_output: RiskAgentOutput, current_price: float, is_last_day: bool) -> dict[str, Any]:
+        """根据风控输出安排下一交易日开盘时的动作。"""
         if is_last_day:
             self.pending_action = None
             return {
@@ -396,7 +404,7 @@ class HistoricalExecutionSimulator:
             "target_qty": 0,
         }
 
-    def equity_point(self, bar: ReplayBar) -> Dict[str, Any]:
+    def equity_point(self, bar: ReplayBar) -> dict[str, Any]:
         """计算当前交易日的权益点。"""
         position_value = self.position_qty * bar.close
         equity = self.cash + position_value
@@ -410,11 +418,11 @@ class HistoricalExecutionSimulator:
             "cash": round(self.cash, 4),
         }
 
-    def account_snapshot(self, code: str, current_price: float) -> Dict[str, Any]:
+    def account_snapshot(self, code: str, current_price: float) -> dict[str, Any]:
         """构造当前模拟账户快照。"""
         market_value = self.position_qty * current_price
         total_asset = self.cash + market_value
-        positions: List[Dict[str, Any]] = []
+        positions: list[dict[str, Any]] = []
         if self.position_qty > 0:
             positions.append(
                 {
@@ -445,8 +453,8 @@ class HistoricalExecutionSimulator:
         trade_day: date,
         fill_price: float,
         reason: str,
-        base_payload: Dict[str, Any] | None,
-    ) -> Dict[str, Any]:
+        base_payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         """按给定价格平仓，并记录收益与费用。"""
         qty = self.position_qty
         if qty <= 0:
@@ -507,10 +515,10 @@ class HistoricalSignalReplayService:
 
     def __init__(
         self,
-        trend_analyzer: Optional[StockTrendAnalyzer] = None,
-        ai_analyzer_factory: Optional[Callable[[], Any]] = None,
-        runtime_llm: Optional[RuntimeLlmConfig] = None,
-        config: Optional[Config] = None,
+        trend_analyzer: SupportsTrendAnalyzer | None = None,
+        ai_analyzer_factory: Callable[[], Any] | None = None,
+        runtime_llm: RuntimeLlmConfig | None = None,
+        config: Config | None = None,
     ) -> None:
         """初始化趋势分析器与懒加载 AI 分析器工厂。"""
         self.trend_analyzer = trend_analyzer or StockTrendAnalyzer()
@@ -518,12 +526,12 @@ class HistoricalSignalReplayService:
         self._ai_analyzer_factory = ai_analyzer_factory or (lambda: GeminiAnalyzer(config=resolved_config, runtime_llm=runtime_llm))
         self._ai_analyzer: Any | None = None
 
-    def build_anchor_days(self, trade_frame: pd.DataFrame, fast_snapshots: List[Dict[str, Any]]) -> List[str]:
+    def build_anchor_days(self, trade_frame: pd.DataFrame, fast_snapshots: list[dict[str, Any]]) -> list[str]:
         """挑选需要调用 LLM 精修的锚点交易日。"""
-        anchors: Dict[str, int] = {}
+        anchors: dict[str, int] = {}
         previous = None
         for index, (_, row) in enumerate(trade_frame.iterrows()):
-            day = row["date"].date().isoformat()
+            day = pd.Timestamp(row["date"]).date().isoformat()
             if index == 0:
                 anchors[day] = 0
             if index % 5 == 0:
@@ -552,8 +560,8 @@ class HistoricalSignalReplayService:
         code: str,
         trade_day: date,
         window_frame: pd.DataFrame,
-        archived_news_payload: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        archived_news_payload: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         """仅基于规则信号构建快速快照。"""
         trend_result = None
         if not window_frame.empty:
@@ -582,7 +590,7 @@ class HistoricalSignalReplayService:
             "ai_overlay": {},
         }
 
-    def load_cached_snapshot(self, cached: Dict[str, Any], fallback_fast: Dict[str, Any]) -> Dict[str, Any]:
+    def load_cached_snapshot(self, cached: dict[str, Any], fallback_fast: dict[str, Any]) -> dict[str, Any]:
         """将缓存快照规整为统一结构。"""
         factor_payload = _as_dict(cached.get("factor_payload")) or fallback_fast["factor_payload"]
         signal_payload = _as_dict(cached.get("signal_payload")) or fallback_fast["signal_payload"]
@@ -605,10 +613,10 @@ class HistoricalSignalReplayService:
         code: str,
         trade_day: date,
         window_frame: pd.DataFrame,
-        archived_news_payload: List[Dict[str, Any]],
-        fast_snapshot: Dict[str, Any],
-        account_snapshot: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        archived_news_payload: list[dict[str, Any]],
+        fast_snapshot: dict[str, Any],
+        account_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
         """对锚点日运行 AI 精修，并叠加到快速信号上。"""
         analyzer = self._get_ai_analyzer()
         context = self._build_ai_context(
@@ -651,7 +659,7 @@ class HistoricalSignalReplayService:
             "ai_overlay": ai_overlay,
         }
 
-    def apply_overlay(self, fast_snapshot: Dict[str, Any], overlay_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def apply_overlay(self, fast_snapshot: dict[str, Any], overlay_snapshot: dict[str, Any]) -> dict[str, Any]:
         """将最近一次锚点日的 AI 覆盖层应用到普通交易日。"""
         ai_overlay = _as_dict(overlay_snapshot.get("ai_overlay"))
         if not ai_overlay:
@@ -678,7 +686,7 @@ class HistoricalSignalReplayService:
             "ai_overlay": ai_overlay,
         }
 
-    def to_signal_output(self, code: str, trade_day: date, snapshot: Dict[str, Any]) -> SignalAgentOutput:
+    def to_signal_output(self, code: str, trade_day: date, snapshot: dict[str, Any]) -> SignalAgentOutput:
         """将快照字典转换为标准 SignalAgentOutput。"""
         signal_payload = _as_dict(snapshot.get("signal_payload"))
         factor_payload = _as_dict(snapshot.get("factor_payload"))
@@ -701,7 +709,7 @@ class HistoricalSignalReplayService:
         )
 
     @staticmethod
-    def _fast_advice_from_trend(trend_result: Optional[TrendAnalysisResult]) -> str:
+    def _fast_advice_from_trend(trend_result: TrendAnalysisResult | None) -> str:
         """根据趋势结果快速生成基础操作建议。"""
         if trend_result is None:
             return "观望"
@@ -720,9 +728,9 @@ class HistoricalSignalReplayService:
         return self._ai_analyzer
 
     @staticmethod
-    def _build_factor_payload(window_frame: pd.DataFrame, trend_result: Optional[TrendAnalysisResult]) -> Dict[str, Any]:
+    def _build_factor_payload(window_frame: pd.DataFrame, trend_result: TrendAnalysisResult | None) -> dict[str, Any]:
         """从窗口行情中提取规则信号与技术因子。"""
-        payload: Dict[str, Any] = {}
+        payload: dict[str, Any] = {}
         if window_frame.empty:
             return payload
         latest = window_frame.iloc[-1]
@@ -793,9 +801,9 @@ class HistoricalSignalReplayService:
         code: str,
         trade_day: date,
         window_frame: pd.DataFrame,
-        fast_snapshot: Dict[str, Any],
-        account_snapshot: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        fast_snapshot: dict[str, Any],
+        account_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
         """为 AI 分析器构建结构化上下文。"""
         latest = window_frame.iloc[-1]
         previous = window_frame.iloc[-2] if len(window_frame.index) > 1 else latest
@@ -836,11 +844,11 @@ class HistoricalSignalReplayService:
         }
 
     @staticmethod
-    def _build_news_context(archived_news_payload: List[Dict[str, Any]]) -> str | None:
+    def _build_news_context(archived_news_payload: list[dict[str, Any]]) -> str | None:
         """将归档新闻整理为 LLM 可直接消费的文本块。"""
         if not archived_news_payload:
             return None
-        parts: List[str] = []
+        parts: list[str] = []
         for item in archived_news_payload[:9]:
             published = str(item.get("published_date") or "")
             title = str(item.get("title") or "")
@@ -855,11 +863,11 @@ class AgentHistoricalBacktestService:
 
     def __init__(
         self,
-        fetcher_manager: Optional[DataFetcherManager] = None,
-        trend_analyzer: Optional[StockTrendAnalyzer] = None,
-        risk_agent: Optional[RiskAgent] = None,
-        ai_analyzer_factory: Optional[Callable[[], Any]] = None,
-        config: Optional[Config] = None,
+        fetcher_manager: SupportsDailyDataFetcher | None = None,
+        trend_analyzer: SupportsTrendAnalyzer | None = None,
+        risk_agent: RiskAgent | None = None,
+        ai_analyzer_factory: Callable[[], Any] | None = None,
+        config: Config | None = None,
     ) -> None:
         """初始化历史回放依赖。"""
         self.config = config or get_config()
@@ -868,7 +876,7 @@ class AgentHistoricalBacktestService:
         self._ai_analyzer_factory = ai_analyzer_factory
         self.risk_adapter = HistoricalRiskAdapter(risk_agent=risk_agent)
 
-    def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """执行历史回放主流程。"""
         params = self._parse_payload(payload)
         signal_replay = HistoricalSignalReplayService(
@@ -884,8 +892,8 @@ class AgentHistoricalBacktestService:
         cached_snapshots = self._cached_snapshot_map(_as_list_of_dicts(payload.get("cached_snapshots")))
 
         prepared, trade_window = self.data_agent.load(params)
-        fast_snapshots: List[Dict[str, Any]] = []
-        trade_days: List[date] = []
+        fast_snapshots: list[dict[str, Any]] = []
+        trade_days: list[date] = []
         for _, row in trade_window.iterrows():
             trade_day = row["date"].date()
             trade_days.append(trade_day)
@@ -911,14 +919,14 @@ class AgentHistoricalBacktestService:
             slippage_bps=params.slippage_bps,
         )
 
-        daily_steps: List[Dict[str, Any]] = []
-        signal_snapshots: List[Dict[str, Any]] = []
+        daily_steps: list[dict[str, Any]] = []
+        signal_snapshots: list[dict[str, Any]] = []
         snapshot_hit_count = 0
         snapshot_miss_count = 0
         no_news_days = 0
         llm_anchor_count = 0
         divergence_days = 0
-        active_overlay_snapshot: Dict[str, Any] | None = None
+        active_overlay_snapshot: dict[str, Any] | None = None
 
         for index, trade_day in enumerate(trade_days):
             bar = self._frame_row_to_bar(trade_window.iloc[index])
@@ -931,7 +939,7 @@ class AgentHistoricalBacktestService:
                 no_news_days += 1
             window_frame = self.data_agent.rolling_window(prepared, trade_day)
             fast_snapshot = fast_snapshots[index]
-            snapshot: Dict[str, Any]
+            snapshot: dict[str, Any]
             fast_operation_advice = str(fast_snapshot["signal_payload"].get("operation_advice") or "")
 
             if params.phase == "fast":
@@ -1051,7 +1059,7 @@ class AgentHistoricalBacktestService:
             "pending_anchor_dates": pending_anchor_days if params.phase == "fast" else [],
         }
 
-    def _parse_payload(self, payload: Dict[str, Any]) -> HistoricalRunParams:
+    def _parse_payload(self, payload: dict[str, Any]) -> HistoricalRunParams:
         """校验请求并解析历史回放运行参数。"""
         code = canonical_stock_code(str(payload.get("code") or ""))
         if not code:
@@ -1106,9 +1114,9 @@ class AgentHistoricalBacktestService:
         )
 
     @staticmethod
-    def _cached_snapshot_map(cached_rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _cached_snapshot_map(cached_rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """按交易日索引缓存快照。"""
-        result: Dict[str, Dict[str, Any]] = {}
+        result: dict[str, dict[str, Any]] = {}
         for row in cached_rows:
             trade_date = str(row.get("trade_date") or "")
             if trade_date:
@@ -1116,7 +1124,7 @@ class AgentHistoricalBacktestService:
         return result
 
     @staticmethod
-    def _is_refined_snapshot(row: Dict[str, Any] | None) -> bool:
+    def _is_refined_snapshot(row: dict[str, Any] | None) -> bool:
         """判断快照是否已经过 LLM 精修。"""
         if not row:
             return False
@@ -1125,11 +1133,11 @@ class AgentHistoricalBacktestService:
 
     @staticmethod
     def _collect_recent_news(
-        archived_news_by_date: Dict[str, List[Dict[str, Any]]],
+        archived_news_by_date: dict[str, list[dict[str, Any]]],
         trade_day: date,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """收集交易日前 4 天内的最近新闻。"""
-        payload: List[Dict[str, Any]] = []
+        payload: list[dict[str, Any]] = []
         for offset in range(0, 4):
             day = (trade_day - timedelta(days=offset)).isoformat()
             payload.extend(archived_news_by_date.get(day, []))
@@ -1158,9 +1166,9 @@ class AgentHistoricalBacktestService:
         )
 
     @staticmethod
-    def _with_drawdown(simulator: HistoricalExecutionSimulator, daily_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """根据每日步骤补齐权益曲线与回撤信息。"""
-        points: List[Dict[str, Any]] = []
+    def _with_drawdown(simulator: HistoricalExecutionSimulator, daily_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """根据每日步骤补全权益曲线与回撤信息。"""
+        points: list[dict[str, Any]] = []
         peak = 0.0
         for row in daily_steps:
             execution_payload = _as_dict(row.get("execution_payload"))
@@ -1189,7 +1197,7 @@ class AgentHistoricalBacktestService:
         return points
 
     @staticmethod
-    def _build_summary(initial_capital: float, equity: List[Dict[str, Any]], trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _build_summary(initial_capital: float, equity: list[dict[str, Any]], trades: list[dict[str, Any]]) -> dict[str, Any]:
         """根据权益曲线和成交记录生成汇总指标。"""
         final_equity = float(equity[-1]["equity"]) if equity else float(initial_capital)
         final_benchmark = float(equity[-1]["benchmark_equity"]) if equity else float(initial_capital)
@@ -1211,9 +1219,9 @@ class AgentHistoricalBacktestService:
         }
 
     @staticmethod
-    def _decision_source_breakdown(daily_steps: List[Dict[str, Any]]) -> Dict[str, int]:
+    def _decision_source_breakdown(daily_steps: list[dict[str, Any]]) -> dict[str, int]:
         """统计每日决策来源分布。"""
-        payload: Dict[str, int] = {}
+        payload: dict[str, int] = {}
         for row in daily_steps:
             key = str(row.get("decision_source") or "unknown")
             payload[key] = payload.get(key, 0) + 1

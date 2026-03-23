@@ -19,12 +19,12 @@ class _FakeQuote:
     def __init__(self, price: float):
         self.price = price
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, float | str]:
         return {"price": self.price, "source": "fake"}
 
 
 class _FakeFetcherManager:
-    def get_daily_data(self, stock_code: str, days: int = 60):
+    def get_daily_data(self, stock_code: str, days: int = 60) -> tuple[pd.DataFrame | None, str | None]:
         today = date.today()
         yesterday = today - timedelta(days=1)
         df = pd.DataFrame(
@@ -61,7 +61,7 @@ class _FakeFetcherManager:
         )
         return df, "FakeFetcher"
 
-    def get_realtime_quote(self, stock_code: str):
+    def get_realtime_quote(self, stock_code: str) -> _FakeQuote:
         return _FakeQuote(price=10.6)
 
 

@@ -52,7 +52,7 @@ def get_backtest_interpretation_service_dep() -> BacktestInterpretationService:
 
 
 def get_strategy_backtest_service_dep() -> StrategyBacktestService:
-    """返回区间策略回测服务单例。"""
+    """返回策略区间回测服务单例。"""
     return get_strategy_backtest_service()
 
 

@@ -22,7 +22,7 @@ class _StubFetcherManager:
     def __init__(self, frame: pd.DataFrame):
         self.frame = frame
 
-    def get_daily_data(self, stock_code, start_date=None, end_date=None, days=30):  # noqa: ARG002
+    def get_daily_data(self, stock_code, start_date=None, end_date=None, days=30) -> tuple[pd.DataFrame | None, str | None]:  # noqa: ARG002
         return self.frame.copy(), "stub"
 
 
@@ -199,7 +199,9 @@ class BacktestServiceTestCase(unittest.TestCase):
 
     def test_compare_fetch_failure_raises_error(self):
         class _FailingFetcher:
-            def get_daily_data(self, stock_code, start_date=None, end_date=None, days=30):  # noqa: ARG002
+            def get_daily_data(
+                self, stock_code, start_date=None, end_date=None, days=30
+            ) -> tuple[pd.DataFrame | None, str | None]:  # noqa: ARG002
                 raise RuntimeError("network down")
 
         service = BacktestService(fetcher_manager=_FailingFetcher())

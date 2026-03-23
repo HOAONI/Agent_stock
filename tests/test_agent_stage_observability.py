@@ -34,7 +34,7 @@ class _DummyRepo:
 
 
 class _FakeDataAgent:
-    def run(self, code: str):
+    def run(self, code: str, *, runtime_config=None) -> DataAgentOutput:
         return DataAgentOutput(
             code=code,
             trade_date=date(2026, 2, 25),
@@ -45,7 +45,7 @@ class _FakeDataAgent:
 
 
 class _FakeSignalAgent:
-    def run(self, data_output: DataAgentOutput, *, runtime_config=None):
+    def run(self, data_output: DataAgentOutput, *, runtime_config=None) -> SignalAgentOutput:
         return SignalAgentOutput(
             code=data_output.code,
             trade_date=data_output.trade_date,
@@ -61,7 +61,7 @@ class _FakeSignalAgent:
 
 
 class _FakeRiskAgent:
-    def run(self, **kwargs):
+    def run(self, **kwargs) -> RiskAgentOutput:
         return RiskAgentOutput(
             code=kwargs["code"],
             trade_date=kwargs["trade_date"],
@@ -78,7 +78,7 @@ class _FakeRiskAgent:
 
 
 class _FakeExecutionAgent:
-    def run(self, **kwargs):
+    def run(self, **kwargs) -> ExecutionAgentOutput:
         return ExecutionAgentOutput(
             code=kwargs["code"],
             trade_date=kwargs["trade_date"],

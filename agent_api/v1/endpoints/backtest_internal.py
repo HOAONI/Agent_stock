@@ -89,7 +89,7 @@ def distribution_backtest(
     request: BacktestDistributionRequest,
     service: BacktestService = Depends(get_backtest_service_dep),
 ) -> BacktestInternalEnvelope:
-    """统计回测结果中的仓位与胜负分布。"""
+    """统计回测结果里的持仓分布与胜负分布。"""
     try:
         data = service.distribution(request.model_dump(exclude_none=True))
         return BacktestInternalEnvelope(ok=True, data=data)

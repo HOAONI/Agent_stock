@@ -3,7 +3,7 @@
 
 它负责把“原始行情抓取”转换成后续阶段能直接消费的标准化输入，包括：
 1. 拉取并缓存近 60 个交易日的日线数据
-2. 尝试补实时行情
+2. 尝试补充实时行情
 3. 组装 `analysis_context` 供 Signal/Analyzer 使用
 """
 
@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional
+from typing import Any
 
 from data_provider import DataFetcherManager
 from data_provider.base import canonical_stock_code
 from agent_stock.agents.contracts import AgentState, DataAgentOutput
 from agent_stock.config import AgentRuntimeConfig, Config, get_config
+from agent_stock.protocols import SupportsRealtimeQuoteFetcher
 from agent_stock.storage import DatabaseManager, get_db
 
 logger = logging.getLogger(__name__)
@@ -27,9 +28,9 @@ class DataAgent:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        fetcher_manager: Optional[DataFetcherManager] = None,
-        db_manager: Optional[DatabaseManager] = None,
+        config: Config | None = None,
+        fetcher_manager: SupportsRealtimeQuoteFetcher | None = None,
+        db_manager: DatabaseManager | None = None,
     ) -> None:
         """初始化数据抓取器与存储依赖。"""
         self.config = config or get_config()
@@ -51,8 +52,8 @@ class DataAgent:
             return "短期向好 🔼"
         return "震荡整理"
 
-    def _build_analysis_context_from_daily_frame(self, code: str, daily_df) -> dict:
-        rows = []
+    def _build_analysis_context_from_daily_frame(self, code: str, daily_df) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
         for _, row in daily_df.tail(60).iterrows():
             rows.append(
                 {
@@ -77,7 +78,8 @@ class DataAgent:
 
         today = dict(rows[-1])
         yesterday = dict(rows[-2]) if len(rows) > 1 else None
-        context = {
+        # 分析上下文里既有行情原始字典，也有衍生出的数值字段，因此这里统一放宽为 Any。
+        context: dict[str, Any] = {
             "code": code,
             "date": str(today.get("date") or ""),
             "today": today,
@@ -98,7 +100,7 @@ class DataAgent:
 
         return context
 
-    def run(self, code: str, *, runtime_config: Optional[AgentRuntimeConfig] = None) -> DataAgentOutput:
+    def run(self, code: str, *, runtime_config: AgentRuntimeConfig | None = None) -> DataAgentOutput:
         """为单只股票执行一次数据采集。"""
         normalized_code = canonical_stock_code(code)
         trade_date = date.today()
