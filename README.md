@@ -11,6 +11,10 @@
 
 ## 快速上手
 
+如果你是在一台空白机器上同时克隆 `Frontend_stock + Backend_stock + Agent_stock` 三个仓库，请先看：
+
+- [StockSystemHub 主安装文档](https://github.com/HOAONI/StockSystemHub/blob/main/INSTALL_FULL_STACK_FROM_SCRATCH.md)
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate

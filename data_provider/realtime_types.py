@@ -320,7 +320,13 @@ class CircuitBreaker:
     def _get_state(self, source: str) -> dict[str, Any]:
         """获取或初始化数据源状态"""
         if source not in self._states:
-            self._states[source] = {"state": self.CLOSED, "failures": 0, "last_failure_time": 0.0, "half_open_calls": 0}
+            self._states[source] = {
+                "state": self.CLOSED,
+                "failures": 0,
+                "last_failure_time": 0.0,
+                "half_open_calls": 0,
+                "last_error": None,
+            }
         return self._states[source]
 
     def is_available(self, source: str) -> bool:
@@ -370,6 +376,7 @@ class CircuitBreaker:
         state["state"] = self.CLOSED
         state["failures"] = 0
         state["half_open_calls"] = 0
+        state["last_error"] = None
 
     def record_failure(self, source: str, error: str | None = None) -> None:
         """记录失败请求"""
@@ -378,6 +385,7 @@ class CircuitBreaker:
 
         state["failures"] += 1
         state["last_failure_time"] = current_time
+        state["last_error"] = error
 
         if state["state"] == self.HALF_OPEN:
             # 半开状态下失败，继续熔断
@@ -396,6 +404,25 @@ class CircuitBreaker:
     def get_status(self) -> dict[str, str]:
         """获取所有数据源状态"""
         return {source: info["state"] for source, info in self._states.items()}
+
+    def get_state_info(self, source: str) -> dict[str, Any]:
+        """返回数据源当前状态快照，不修改熔断器状态机。"""
+        state = self._get_state(source)
+        current_time = time.time()
+        remaining_cooldown_seconds = 0.0
+
+        if state["state"] == self.OPEN:
+            elapsed = current_time - state["last_failure_time"]
+            remaining_cooldown_seconds = max(0.0, self.cooldown_seconds - elapsed)
+
+        return {
+            "state": state["state"],
+            "failures": int(state["failures"]),
+            "last_failure_time": float(state["last_failure_time"]),
+            "half_open_calls": int(state["half_open_calls"]),
+            "last_error": state.get("last_error"),
+            "remaining_cooldown_seconds": remaining_cooldown_seconds,
+        }
 
     def reset(self, source: str | None = None) -> None:
         """重置熔断器状态"""

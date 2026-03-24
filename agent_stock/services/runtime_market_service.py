@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -11,6 +12,7 @@ from agent_stock.config import ALLOWED_MARKET_SOURCES, Config, get_config
 from agent_stock.time_utils import shanghai_now
 from data_provider import DataFetcherManager
 from data_provider.base import DataSourceUnavailableError, canonical_stock_code, normalize_stock_code
+from data_provider.realtime_types import CircuitBreaker, get_realtime_circuit_breaker
 
 MARKET_SOURCE_META: dict[str, dict[str, str]] = {
     "tencent": {
@@ -33,6 +35,22 @@ MARKET_SOURCE_META: dict[str, dict[str, str]] = {
         "label": "Tushare",
         "description": "Tushare 通道，需先配置 TUSHARE_TOKEN。",
     },
+}
+
+MARKET_SOURCE_REALTIME_BREAKER_KEY: dict[str, str] = {
+    "eastmoney": "akshare_em",
+    "sina": "akshare_sina",
+    "tencent": "tencent",
+    "efinance": "efinance",
+    "tushare": "tushare",
+}
+
+QUOTE_FALLBACK_ORDER: dict[str, tuple[str, ...]] = {
+    "eastmoney": ("tencent", "sina", "efinance", "tushare"),
+    "sina": ("tencent", "efinance", "eastmoney", "tushare"),
+    "tencent": ("sina", "efinance", "eastmoney", "tushare"),
+    "efinance": ("tencent", "sina", "eastmoney", "tushare"),
+    "tushare": ("tencent", "sina", "efinance", "eastmoney"),
 }
 
 _runtime_market_service: RuntimeMarketService | None = None
@@ -89,9 +107,11 @@ class RuntimeMarketService:
         *,
         config: Config | None = None,
         fetcher_manager: DataFetcherManager | None = None,
+        realtime_circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self.config = config or get_config()
         self.fetcher_manager = fetcher_manager or DataFetcherManager()
+        self.realtime_circuit_breaker = realtime_circuit_breaker or get_realtime_circuit_breaker()
 
     def get_market_source_options(self) -> dict[str, Any]:
         available_fetchers = set(self.fetcher_manager.available_fetchers)
@@ -116,6 +136,14 @@ class RuntimeMarketService:
                     available = False
                     reason = "未配置 TUSHARE_TOKEN"
 
+            if available:
+                breaker_key = MARKET_SOURCE_REALTIME_BREAKER_KEY.get(code)
+                if breaker_key:
+                    breaker_state = self.realtime_circuit_breaker.get_state_info(breaker_key)
+                    if breaker_state["state"] == CircuitBreaker.OPEN:
+                        available = False
+                        reason = self._format_circuit_breaker_reason(code, breaker_state)
+
             option = {
                 "code": code,
                 "label": meta["label"],
@@ -130,11 +158,11 @@ class RuntimeMarketService:
 
     def get_quote(self, stock_code: str, market_source: str) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
-        source = self._normalize_market_source(market_source)
-        quote = self.fetcher_manager.get_realtime_quote(code, fixed_source=source)
+        requested_source = self._normalize_market_source(market_source)
+        quote, effective_source = self._get_quote_with_fallback(code, requested_source)
         stock_name = str(getattr(quote, "name", "") or "").strip() or canonical_stock_code(code)
 
-        return {
+        payload = {
             "stock_code": code,
             "stock_name": stock_name,
             "current_price": _to_float(getattr(quote, "price", None)),
@@ -147,58 +175,80 @@ class RuntimeMarketService:
             "volume": _to_int(getattr(quote, "volume", None)),
             "amount": _to_float(getattr(quote, "amount", None)),
             "update_time": self._now_iso(),
-            "source": source,
+            "source": effective_source,
         }
+        if effective_source != requested_source:
+            payload["requested_source"] = requested_source
+            payload["warning"] = self._format_quote_fallback_warning(requested_source, effective_source)
+        return payload
 
     def get_history(self, stock_code: str, days: int, market_source: str) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
-        source = self._normalize_market_source(market_source)
-        frame = self._load_daily_frame(code, source=source, days=max(days, 30))
+        requested_source = self._normalize_market_source(market_source)
+        frame, effective_source = self._get_daily_frame_with_fallback(code, requested_source, days=max(days, 30))
         rows = self._frame_to_history_rows(frame)[-days:]
-        stock_name = self._resolve_stock_name(code, source)
+        stock_name = self._resolve_stock_name(code, effective_source)
 
-        return {
+        payload = {
             "stock_code": code,
             "stock_name": stock_name,
             "period": "daily",
             "data": rows,
-            "source": source,
+            "source": effective_source,
         }
+        return self._attach_requested_source_metadata(
+            payload,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            warning=self._format_daily_fallback_warning(requested_source, effective_source),
+        )
 
     def get_indicators(self, stock_code: str, days: int, windows: list[int], market_source: str) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
-        source = self._normalize_market_source(market_source)
+        requested_source = self._normalize_market_source(market_source)
         normalized_windows = self._normalize_windows(windows)
         lookback_days = max(days + max(normalized_windows, default=0), 120)
-        frame = self._load_daily_frame(code, source=source, days=lookback_days)
+        frame, effective_source = self._get_daily_frame_with_fallback(code, requested_source, days=lookback_days)
         bars = self._frame_to_indicator_bars(frame)
         items = self._build_indicator_items(bars, normalized_windows)[-days:]
 
-        return {
+        payload = {
             "stock_code": code,
             "period": "daily",
             "days": days,
             "windows": normalized_windows,
             "items": items,
-            "source": source,
+            "source": effective_source,
         }
+        return self._attach_requested_source_metadata(
+            payload,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            warning=self._format_daily_fallback_warning(requested_source, effective_source),
+        )
 
     def get_factors(self, stock_code: str, market_source: str, target_date: str | None = None) -> dict[str, Any]:
         code = self._normalize_stock_code(stock_code)
-        source = self._normalize_market_source(market_source)
-        frame = self._load_daily_frame(code, source=source, days=365)
+        requested_source = self._normalize_market_source(market_source)
+        frame, effective_source = self._get_daily_frame_with_fallback(code, requested_source, days=365)
         bars = self._frame_to_indicator_bars(frame)
         index = self._find_nearest_index_by_date(bars, target_date)
         if index < 0:
             raise ValueError("No available daily bar for the specified date")
 
         factors = self._compute_factors_at(bars, index)
-        return {
+        payload = {
             "stock_code": code,
             "date": bars[index]["date"],
             "factors": factors,
-            "source": source,
+            "source": effective_source,
         }
+        return self._attach_requested_source_metadata(
+            payload,
+            requested_source=requested_source,
+            effective_source=effective_source,
+            warning=self._format_daily_fallback_warning(requested_source, effective_source),
+        )
 
     @staticmethod
     def _normalize_market_source(source: str) -> str:
@@ -412,6 +462,82 @@ class RuntimeMarketService:
             "amplitude": self._compute_amplitude_at(bars, index),
         }
 
+    @staticmethod
+    def _dedupe_sources(sources: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for source in sources:
+            if source in ALLOWED_MARKET_SOURCES and source not in deduped:
+                deduped.append(source)
+        return deduped
+
+    def _build_candidate_sources(self, requested_source: str) -> list[str]:
+        return self._dedupe_sources([requested_source, *QUOTE_FALLBACK_ORDER.get(requested_source, ())])
+
+    def _get_quote_from_source(self, stock_code: str, source: str):
+        quote = self.fetcher_manager.get_realtime_quote(stock_code, fixed_source=source)
+        if quote is None or not quote.has_basic_data():
+            raise DataSourceUnavailableError(f"{source} realtime quote returned no usable data for {stock_code}")
+        return quote
+
+    def _get_quote_with_fallback(self, stock_code: str, requested_source: str) -> tuple[Any, str]:
+        errors: list[str] = []
+
+        for source in self._build_candidate_sources(requested_source):
+            try:
+                return self._get_quote_from_source(stock_code, source), source
+            except Exception as error:
+                errors.append(f"{source}: {str(error).strip() or 'unknown error'}")
+
+        joined = "; ".join(errors) if errors else f"{requested_source} realtime quote returned no usable data for {stock_code}"
+        raise DataSourceUnavailableError(joined)
+
+    def _get_daily_frame_with_fallback(self, stock_code: str, requested_source: str, *, days: int) -> tuple[pd.DataFrame, str]:
+        errors: list[str] = []
+
+        for source in self._build_candidate_sources(requested_source):
+            try:
+                return self._load_daily_frame(stock_code, source=source, days=days), source
+            except Exception as error:
+                errors.append(f"{source}: {str(error).strip() or 'unknown error'}")
+
+        joined = "; ".join(errors) if errors else f"{requested_source} daily data returned no usable rows for {stock_code}"
+        raise DataSourceUnavailableError(joined)
+
+    @staticmethod
+    def _attach_requested_source_metadata(
+        payload: dict[str, Any],
+        *,
+        requested_source: str,
+        effective_source: str,
+        warning: str,
+    ) -> dict[str, Any]:
+        if effective_source != requested_source:
+            payload["requested_source"] = requested_source
+            payload["warning"] = warning
+        return payload
+
+    @staticmethod
+    def _market_source_label(source: str) -> str:
+        return MARKET_SOURCE_META.get(source, {}).get("label", source)
+
+    def _format_quote_fallback_warning(self, requested_source: str, effective_source: str) -> str:
+        requested_label = self._market_source_label(requested_source)
+        effective_label = self._market_source_label(effective_source)
+        return f"实时行情源 {requested_label} 暂不可用，已自动降级到 {effective_label}"
+
+    def _format_daily_fallback_warning(self, requested_source: str, effective_source: str) -> str:
+        requested_label = self._market_source_label(requested_source)
+        effective_label = self._market_source_label(effective_source)
+        return f"日线行情源 {requested_label} 暂不可用，已自动降级到 {effective_label}"
+
+    def _format_circuit_breaker_reason(self, market_source: str, state: dict[str, Any]) -> str:
+        remaining_seconds = max(1, math.ceil(float(state.get("remaining_cooldown_seconds") or 0.0)))
+        source_label = self._market_source_label(market_source)
+        last_error = str(state.get("last_error") or "").strip()
+        if last_error:
+            return f"{source_label} 实时行情熔断中，约 {remaining_seconds} 秒后自动恢复；最近错误：{last_error}"
+        return f"{source_label} 实时行情熔断中，约 {remaining_seconds} 秒后自动恢复"
+
 
 def get_runtime_market_service(config: Config | None = None) -> RuntimeMarketService:
     """返回内部市场服务单例。"""
@@ -425,3 +551,4 @@ def reset_runtime_market_service() -> None:
     """重置内部市场服务单例，供测试使用。"""
     global _runtime_market_service
     _runtime_market_service = None
+    get_realtime_circuit_breaker().reset()
