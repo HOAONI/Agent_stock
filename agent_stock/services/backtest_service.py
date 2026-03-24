@@ -587,7 +587,7 @@ class BacktestService:
             strategy_equity = 1.0
             benchmark_equity = 1.0
             peak = 1.0
-            points: list[dict[str, Any]] = []
+            portfolio_points: list[dict[str, Any]] = []
             for point in timeline:
                 strategy_return = sum(point["strategy_returns"]) / len(point["strategy_returns"]) if point["strategy_returns"] else 0.0
                 benchmark_return = sum(point["benchmark_returns"]) / len(point["benchmark_returns"]) if point["benchmark_returns"] else 0.0
@@ -596,7 +596,7 @@ class BacktestService:
                 if strategy_equity > peak:
                     peak = strategy_equity
                 drawdown = ((strategy_equity / peak) - 1) * 100
-                points.append(
+                portfolio_points.append(
                     {
                         "label": point["label"],
                         "strategy_return_pct": cls._round((strategy_equity - 1) * 100, 4),
@@ -604,7 +604,7 @@ class BacktestService:
                         "drawdown_pct": cls._round(drawdown, 4),
                     }
                 )
-            return points
+            return portfolio_points
 
         strategy_equity = 1.0
         benchmark_equity = 1.0
