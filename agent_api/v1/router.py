@@ -5,7 +5,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from agent_api.v1.endpoints import accounts, backtest_internal, backtrader_internal, health, runs, runtime_internal, stocks_internal, tasks
+from agent_api.v1.endpoints import (
+    accounts,
+    backtest_internal,
+    backtrader_internal,
+    chat_internal,
+    health,
+    runs,
+    runtime_internal,
+    stocks_internal,
+    tasks,
+)
 
 api_v1_router = APIRouter(prefix="/api/v1")
 api_v1_router.include_router(runs.router, prefix="/runs", tags=["Runs"])
@@ -26,3 +36,6 @@ internal_runtime_router.include_router(runtime_internal.router, tags=["RuntimeIn
 
 internal_stocks_router = APIRouter(prefix="/internal/v1/stocks")
 internal_stocks_router.include_router(stocks_internal.router, tags=["StocksInternal"])
+
+internal_chat_router = APIRouter(prefix="/internal/v1/chat")
+internal_chat_router.include_router(chat_internal.router, tags=["ChatInternal"])

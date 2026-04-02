@@ -19,6 +19,7 @@ from agent_api.v1.router import (
     health_router,
     internal_backtest_router,
     internal_backtrader_router,
+    internal_chat_router,
     internal_runtime_router,
     internal_stocks_router,
 )
@@ -54,6 +55,7 @@ def create_app() -> FastAPI:
     app.include_router(internal_backtest_router)
     app.include_router(internal_runtime_router)
     app.include_router(internal_stocks_router)
+    app.include_router(internal_chat_router)
     return app
 
 

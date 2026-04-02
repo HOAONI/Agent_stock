@@ -59,6 +59,37 @@ def main() -> int:
             "CREATE INDEX IF NOT EXISTS ix_agent_tasks_request_id ON agent_tasks (request_id)",
             "CREATE INDEX IF NOT EXISTS ix_agent_tasks_status ON agent_tasks (status)",
             "CREATE INDEX IF NOT EXISTS ix_agent_tasks_run_id ON agent_tasks (run_id)",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ADD COLUMN IF NOT EXISTS owner_user_id VARCHAR(64) DEFAULT ''",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ADD COLUMN IF NOT EXISTS latest_message_preview VARCHAR(500)",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ADD COLUMN IF NOT EXISTS context_json TEXT",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+            "ALTER TABLE IF EXISTS agent_chat_messages ADD COLUMN IF NOT EXISTS owner_user_id VARCHAR(64) DEFAULT ''",
+            "ALTER TABLE IF EXISTS agent_chat_messages ADD COLUMN IF NOT EXISTS meta_json TEXT",
+            "ALTER TABLE IF EXISTS agent_chat_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMP",
+            "DO $$ BEGIN "
+            "IF EXISTS ("
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'agent_chat_sessions' AND column_name = 'user_id'"
+            ") THEN "
+            "UPDATE agent_chat_sessions SET owner_user_id = COALESCE(user_id::text, '') "
+            "WHERE owner_user_id IS NULL OR owner_user_id = ''; "
+            "END IF; "
+            "END $$;",
+            "DO $$ BEGIN "
+            "IF EXISTS ("
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'agent_chat_messages' AND column_name = 'user_id'"
+            ") THEN "
+            "UPDATE agent_chat_messages SET owner_user_id = COALESCE(user_id::text, '') "
+            "WHERE owner_user_id IS NULL OR owner_user_id = ''; "
+            "END IF; "
+            "END $$;",
+            "ALTER TABLE IF EXISTS agent_chat_sessions ALTER COLUMN owner_user_id SET NOT NULL",
+            "ALTER TABLE IF EXISTS agent_chat_messages ALTER COLUMN owner_user_id SET NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_agent_chat_sessions_owner_user_id ON agent_chat_sessions (owner_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_agent_chat_messages_owner_user_id ON agent_chat_messages (owner_user_id)",
         ]
         with cast(Any, engine.begin()) as conn:
             for stmt in stmts:

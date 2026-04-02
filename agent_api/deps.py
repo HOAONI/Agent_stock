@@ -16,6 +16,7 @@ from agent_stock.services.backtest_interpretation_service import (
 )
 from agent_stock.services.strategy_backtest_service import StrategyBacktestService, get_strategy_backtest_service
 from agent_stock.services.agent_task_service import AgentTaskService, get_agent_task_service
+from agent_stock.services.agent_chat_service import AgentChatService, get_agent_chat_service
 from agent_stock.services.backtrader_runtime_service import BacktraderRuntimeService, get_backtrader_runtime_service
 from agent_stock.services.runtime_market_service import RuntimeMarketService, get_runtime_market_service
 from agent_stock.config import Config, get_config
@@ -29,6 +30,11 @@ def get_config_dep() -> Config:
 def get_task_service_dep(config: Config = Depends(get_config_dep)) -> AgentTaskService:
     """返回任务服务单例。"""
     return get_agent_task_service(config=config)
+
+
+def get_agent_chat_service_dep(config: Config = Depends(get_config_dep)) -> AgentChatService:
+    """返回 Agent 问股聊天服务单例。"""
+    return get_agent_chat_service(config=config)
 
 
 def get_backtrader_runtime_service_dep() -> BacktraderRuntimeService:

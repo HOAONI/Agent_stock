@@ -29,7 +29,9 @@ from sqlalchemy import (
     and_,
     create_engine,
     desc,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -297,6 +299,35 @@ class AgentTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now, nullable=False, index=True)
 
 
+class AgentChatSession(Base):
+    """聊天会话头信息。"""
+
+    __tablename__ = "agent_chat_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(255))
+    latest_message_preview: Mapped[str | None] = mapped_column(String(500))
+    context_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, onupdate=local_now, nullable=False, index=True)
+
+
+class AgentChatMessage(Base):
+    """聊天消息明细。"""
+
+    __tablename__ = "agent_chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    meta_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=local_now, nullable=False, index=True)
+
+
 class DatabaseManager:
     """Agent_stock 使用的数据库管理器单例。"""
 
@@ -336,6 +367,7 @@ class DatabaseManager:
         )
 
         Base.metadata.create_all(self._engine)
+        self._ensure_chat_schema_compatibility()
         self._initialized = True
         self._recover_inflight_tasks()
         atexit.register(DatabaseManager._cleanup_engine, self._engine)
@@ -385,6 +417,86 @@ class DatabaseManager:
                 row.completed_at = now
                 row.updated_at = now
             session.commit()
+
+    def _ensure_chat_schema_compatibility(self) -> None:
+        """兼容早期聊天表缺列的场景。"""
+        inspector = inspect(self._engine)
+        table_names = set(inspector.get_table_names())
+        if "agent_chat_sessions" in table_names:
+            self._ensure_chat_owner_column(
+                table_name="agent_chat_sessions",
+                index_name="ix_agent_chat_sessions_owner_user_id",
+            )
+            self._ensure_chat_columns(
+                table_name="agent_chat_sessions",
+                columns={
+                    "title": "VARCHAR(255)",
+                    "latest_message_preview": "VARCHAR(500)",
+                    "context_json": "TEXT",
+                    "created_at": "TIMESTAMP",
+                    "updated_at": "TIMESTAMP",
+                },
+            )
+        if "agent_chat_messages" in table_names:
+            self._ensure_chat_owner_column(
+                table_name="agent_chat_messages",
+                index_name="ix_agent_chat_messages_owner_user_id",
+            )
+            self._ensure_chat_columns(
+                table_name="agent_chat_messages",
+                columns={
+                    "meta_json": "TEXT",
+                    "created_at": "TIMESTAMP",
+                },
+            )
+
+    def _ensure_chat_owner_column(self, *, table_name: str, index_name: str) -> None:
+        """为聊天表补齐 owner_user_id，并尝试从旧 user_id 回填。"""
+        inspector = inspect(self._engine)
+        columns = {item["name"] for item in inspector.get_columns(table_name)}
+        if "owner_user_id" not in columns:
+            with self._engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN owner_user_id VARCHAR(64) DEFAULT ''"))
+                if "user_id" in columns:
+                    if self._engine.dialect.name == "postgresql":
+                        conn.execute(
+                            text(
+                                f"UPDATE {table_name} "
+                                "SET owner_user_id = COALESCE(user_id::text, '') "
+                                "WHERE owner_user_id IS NULL OR owner_user_id = ''"
+                            )
+                        )
+                    else:
+                        conn.execute(
+                            text(
+                                f"UPDATE {table_name} "
+                                "SET owner_user_id = CAST(user_id AS TEXT) "
+                                "WHERE owner_user_id IS NULL OR owner_user_id = ''"
+                            )
+                        )
+
+                if self._engine.dialect.name == "postgresql":
+                    conn.execute(text(f"UPDATE {table_name} SET owner_user_id = '' WHERE owner_user_id IS NULL"))
+                    conn.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN owner_user_id SET NOT NULL"))
+
+        with self._engine.begin() as conn:
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} (owner_user_id)"))
+
+    def _ensure_chat_columns(self, *, table_name: str, columns: dict[str, str]) -> None:
+        """为聊天表补齐 ORM 查询依赖的兼容列。"""
+        inspector = inspect(self._engine)
+        existing_columns = {item["name"] for item in inspector.get_columns(table_name)}
+        missing_columns = {
+            column_name: definition
+            for column_name, definition in columns.items()
+            if column_name not in existing_columns
+        }
+        if not missing_columns:
+            return
+
+        with self._engine.begin() as conn:
+            for column_name, definition in missing_columns.items():
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"))
 
     def get_session(self) -> Session:
         """创建一个新的 SQLAlchemy 会话。"""
