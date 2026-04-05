@@ -422,6 +422,7 @@ class FakeBackendClient:
         self.preference_calls: list[dict[str, Any]] = []
         self.saved_analysis_calls: list[dict[str, Any]] = []
         self.portfolio_health_calls: list[dict[str, Any]] = []
+        self.strategy_backtest_calls: list[dict[str, Any]] = []
         self.blocked_order_codes: set[str] = set()
         self.order_result_overrides: dict[str, dict[str, Any]] = {}
 
@@ -659,6 +660,89 @@ class FakeBackendClient:
     async def get_backtest_summary(self, *, owner_user_id: int, stock_codes: list[str] | None = None, limit: int = 6):
         return {"total": 0, "items": []}
 
+    async def run_strategy_backtest(
+        self,
+        *,
+        owner_user_id: int,
+        code: str,
+        start_date: str,
+        end_date: str,
+        strategies: list[dict[str, Any]],
+        initial_capital: float | None = None,
+        commission_rate: float | None = None,
+        slippage_bps: float | None = None,
+    ):
+        self.strategy_backtest_calls.append(
+            {
+                "owner_user_id": owner_user_id,
+                "code": code,
+                "start_date": start_date,
+                "end_date": end_date,
+                "strategies": [dict(item) for item in strategies],
+                "initial_capital": initial_capital,
+                "commission_rate": commission_rate,
+                "slippage_bps": slippage_bps,
+            }
+        )
+        items: list[dict[str, Any]] = []
+        for index, strategy in enumerate(strategies):
+            template_code = str(strategy.get("template_code") or "")
+            strategy_name = str(strategy.get("strategy_name") or template_code or f"策略{index + 1}")
+            total_return = {
+                "macd_cross": 18.6,
+                "rsi_threshold": 12.4,
+                "ma_cross": 9.8,
+            }.get(template_code, 8.0 + index)
+            max_drawdown = {
+                "macd_cross": -9.4,
+                "rsi_threshold": -12.1,
+                "ma_cross": -8.2,
+            }.get(template_code, -10.0)
+            sharpe_ratio = {
+                "macd_cross": 1.34,
+                "rsi_threshold": 0.96,
+                "ma_cross": 0.88,
+            }.get(template_code, 0.7)
+            items.append(
+                {
+                    "strategy_id": strategy.get("strategy_id"),
+                    "run_id": 100 + index,
+                    "strategy_code": template_code,
+                    "strategy_name": strategy_name,
+                    "template_code": template_code,
+                    "template_name": strategy_name,
+                    "strategy_version": "v1",
+                    "params": dict(strategy.get("params") or {}),
+                    "metrics": {
+                        "total_return_pct": total_return,
+                        "benchmark_return_pct": 10.5,
+                        "excess_return_pct": round(total_return - 10.5, 2),
+                        "max_drawdown_pct": max_drawdown,
+                        "sharpe_ratio": sharpe_ratio,
+                        "total_trades": 6 + index,
+                        "win_rate_pct": 58.3,
+                    },
+                    "benchmark": {
+                        "initial_equity": float(initial_capital or 100000.0),
+                        "final_equity": 110500.0,
+                        "total_return_pct": 10.5,
+                    },
+                    "trades": [],
+                    "equity": [
+                        {"trade_date": start_date, "equity": float(initial_capital or 100000.0), "drawdown_pct": 0.0, "benchmark_equity": float(initial_capital or 100000.0)},
+                        {"trade_date": end_date, "equity": float(initial_capital or 100000.0) * (1 + total_return / 100), "drawdown_pct": max_drawdown, "benchmark_equity": 110500.0},
+                    ],
+                }
+            )
+        return {
+            "run_group_id": 901,
+            "code": code,
+            "requested_range": {"start_date": start_date, "end_date": end_date},
+            "effective_range": {"start_date": start_date, "end_date": end_date},
+            "created_at": "2026-04-05T10:00:00+08:00",
+            "items": items,
+        }
+
     async def save_analysis_records(
         self,
         *,
@@ -789,6 +873,30 @@ class FakeAgentService:
         )
 
 
+class FakeBacktestInterpretationService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def interpret(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(dict(payload))
+        items: list[dict[str, Any]] = []
+        for row in payload.get("items") or []:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get("label") or "策略").strip()
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            total_return = metrics.get("total_return_pct")
+            items.append(
+                {
+                    "item_key": row.get("item_key"),
+                    "status": "ready",
+                    "verdict": "表现较强" if float(total_return or 0) >= 15 else "表现中等",
+                    "summary": f"{label} 在这段历史里收益和回撤匹配度尚可，适合继续观察其稳定性。",
+                }
+            )
+        return {"items": items}
+
+
 class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -801,12 +909,14 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.repo = AgentChatRepository(self.db)
         self.backend_client = FakeBackendClient()
         self.agent_service = FakeAgentService()
+        self.backtest_interpretation_service = FakeBacktestInterpretationService()
         self.service = AgentChatService(
             config=Config.get_instance(),
             db_manager=self.db,
             chat_repo=self.repo,
             agent_service=self.agent_service,
             backend_client=self.backend_client,
+            backtest_interpretation_service=self.backtest_interpretation_service,
             analyzer=FakePlannerAnalyzer(),
         )
 
@@ -817,6 +927,7 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
             chat_repo=self.repo,
             agent_service=self.agent_service,
             backend_client=self.backend_client,
+            backtest_interpretation_service=self.backtest_interpretation_service,
             analyzer=analyzer,
             analyzer_factory=analyzer_factory,
             board_catalog_provider=fake_board_catalog_provider,
@@ -910,6 +1021,83 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
             [item["code"] for item in detail["context"]["conversation_state"]["pending_actions"]],
             ["600519", "300750"],
         )
+
+    async def test_strategy_backtest_request_reuses_focus_stock_and_interprets_result(self):
+        first = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "帮我分析一下今天的 600519 行情",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        second = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "如果我在每次MACD金叉时买入，过去一年收益怎样",
+                "session_id": first["session_id"],
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(second["status"], "analysis_only")
+        self.assertEqual(second["structured_result"]["intent"], "backtest")
+        self.assertEqual(second["structured_result"]["backtest_mode"], "strategy_run")
+        self.assertIn("account_state", second["structured_result"]["loaded_context_keys"])
+        self.assertEqual(len(self.backend_client.strategy_backtest_calls), 1)
+        backtest_call = self.backend_client.strategy_backtest_calls[0]
+        self.assertEqual(backtest_call["code"], "600519")
+        self.assertEqual(backtest_call["strategies"][0]["template_code"], "macd_cross")
+        self.assertEqual(backtest_call["strategies"][0]["params"], {"macdFast": 12, "macdSlow": 26, "macdSignal": 9})
+        self.assertEqual(backtest_call["end_date"], date.today().isoformat())
+        self.assertIn("策略回测结论", second["content"])
+        self.assertIn("MACD 金叉", second["content"])
+        self.assertIn("AI 解读", second["content"])
+        self.assertEqual(len(self.backtest_interpretation_service.calls), 1)
+
+    async def test_strategy_backtest_compare_request_runs_multiple_templates(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "用 600519 对比一下 MACD 金叉 和 RSI 超卖策略，看看过去一年谁更好",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "backtest")
+        self.assertEqual(payload["structured_result"]["backtest_mode"], "strategy_run")
+        self.assertEqual(len(self.backend_client.strategy_backtest_calls), 1)
+        strategy_codes = [item["template_code"] for item in self.backend_client.strategy_backtest_calls[0]["strategies"]]
+        self.assertEqual(strategy_codes, ["macd_cross", "rsi_threshold"])
+        self.assertIn("策略对比", payload["content"])
+
+    async def test_strategy_backtest_supports_combined_rule_dsl(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "用 600519 看下 MACD 金叉且 RSI<30 时买入，跌破 5 日线止损，过去一年收益怎样",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "backtest")
+        self.assertEqual(len(self.backend_client.strategy_backtest_calls), 1)
+        strategy = self.backend_client.strategy_backtest_calls[0]["strategies"][0]
+        self.assertEqual(strategy["template_code"], "rule_dsl")
+        self.assertEqual(strategy["params"]["entry"]["operator"], "and")
+        self.assertEqual(
+            [item["kind"] for item in strategy["params"]["entry"]["conditions"]],
+            ["macd_cross", "rsi_threshold"],
+        )
+        self.assertEqual(strategy["params"]["exit"]["conditions"][0]["kind"], "price_ma_relation")
+        self.assertEqual(strategy["params"]["exit"]["conditions"][0]["maWindow"], 5)
+        self.assertIn("策略回测结论", payload["content"])
 
     async def test_follow_up_order_executes_single_candidate(self):
         first = await self.service.handle_chat(

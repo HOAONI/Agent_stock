@@ -140,6 +140,41 @@ def _state_entry_frame() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _dsl_combo_frame() -> pd.DataFrame:
+    """构造先超卖反弹、再跌破短均线的样本，用于验证组合规则 DSL。"""
+    rows = []
+    start = pd.Timestamp("2024-01-01")
+    price = 22.0
+    trading_index = 0
+    for i in range(220):
+        day = start + pd.Timedelta(days=i)
+        if day.weekday() >= 5:
+            continue
+
+        if trading_index < 45:
+            price -= 0.22
+        elif trading_index < 65:
+            price += 0.42
+        elif trading_index < 85:
+            price += 0.12
+        else:
+            price -= 0.28
+
+        price = max(4.0, price)
+        rows.append(
+            {
+                "date": day.date().isoformat(),
+                "open": round(price * 0.997, 4),
+                "high": round(price * 1.015, 4),
+                "low": round(price * 0.985, 4),
+                "close": round(price, 4),
+                "volume": 1000000,
+            }
+        )
+        trading_index += 1
+    return pd.DataFrame(rows)
+
+
 def test_strategy_backtest_requires_backtrader(monkeypatch):
     """未安装 Backtrader 时应明确报错，而不是默默返回空结果。"""
     service = StrategyBacktestService(fetcher_manager=_StubFetcher(_sample_frame()))
@@ -314,16 +349,85 @@ def test_strategy_backtest_supports_parameterized_template_payload():
                     "template_code": "rsi_threshold",
                     "params": {"rsiPeriod": 10, "oversoldThreshold": 25, "overboughtThreshold": 75},
                 },
+                {
+                    "strategy_id": 13,
+                    "strategy_name": "MACD 金叉",
+                    "template_code": "macd_cross",
+                    "params": {"macdFast": 8, "macdSlow": 21, "macdSignal": 5},
+                },
             ],
         }
     )
 
-    assert [item["strategy_id"] for item in result["items"]] == [11, 12]
-    assert [item["strategy_name"] for item in result["items"]] == ["Fast MA", "Wide RSI"]
+    assert [item["strategy_id"] for item in result["items"]] == [11, 12, 13]
+    assert [item["strategy_name"] for item in result["items"]] == ["Fast MA", "Wide RSI", "MACD 金叉"]
     assert result["items"][0]["params"]["maWindow"] == 10
     assert result["items"][1]["params"]["rsiPeriod"] == 10
     assert result["items"][1]["params"]["oversoldThreshold"] == 25
     assert result["items"][1]["params"]["overboughtThreshold"] == 75
+    assert result["items"][2]["params"]["macdFast"] == 8
+    assert result["items"][2]["params"]["macdSlow"] == 21
+    assert result["items"][2]["params"]["macdSignal"] == 5
+
+
+@pytest.mark.skipif(strategy_module.bt is None, reason="backtrader not installed")
+def test_strategy_backtest_supports_rule_dsl_payload():
+    service = StrategyBacktestService(fetcher_manager=_StubFetcher(_dsl_combo_frame()))
+    result = service.run(
+        {
+            "code": "600519",
+            "start_date": "2024-02-01",
+            "end_date": "2024-08-30",
+            "strategies": [
+                {
+                    "strategy_id": 21,
+                    "strategy_name": "MACD+RSI 组合止损",
+                    "template_code": "rule_dsl",
+                    "params": {
+                        "entry": {
+                            "operator": "and",
+                            "conditions": [
+                                {
+                                    "kind": "macd_cross",
+                                    "direction": "bullish",
+                                    "fast": 12,
+                                    "slow": 26,
+                                    "signal": 9,
+                                },
+                                {
+                                    "kind": "rsi_threshold",
+                                    "period": 14,
+                                    "operator": "lt",
+                                    "threshold": 45,
+                                },
+                            ],
+                        },
+                        "exit": {
+                            "operator": "or",
+                            "conditions": [
+                                {
+                                    "kind": "price_ma_relation",
+                                    "maWindow": 5,
+                                    "relation": "cross_below",
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    item = result["items"][0]
+    assert item["strategy_id"] == 21
+    assert item["strategy_code"] == "rule_dsl"
+    assert item["template_code"] == "rule_dsl"
+    assert item["params"]["entry"]["conditions"][0]["kind"] == "macd_cross"
+    assert item["params"]["exit"]["conditions"][0]["relation"] == "cross_below"
+    assert item["params"]["dsl_summary"].startswith("入场：")
+    assert item["metrics"]["entry_signal_count"] >= 1
+    assert item["metrics"]["total_trades"] >= 1
+    assert any("MA5" in str(trade["exit_reason"]) for trade in item["trades"])
 
 
 def test_strategy_backtest_rejects_invalid_template_params():

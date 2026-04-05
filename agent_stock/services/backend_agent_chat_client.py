@@ -141,6 +141,33 @@ class BackendAgentChatClient:
             },
         )
 
+    async def run_strategy_backtest(
+        self,
+        *,
+        owner_user_id: int,
+        code: str,
+        start_date: str,
+        end_date: str,
+        strategies: list[dict[str, Any]],
+        initial_capital: float | None = None,
+        commission_rate: float | None = None,
+        slippage_bps: float | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "owner_user_id": owner_user_id,
+            "code": code,
+            "start_date": start_date,
+            "end_date": end_date,
+            "strategies": strategies,
+        }
+        if initial_capital is not None:
+            payload["initial_capital"] = float(initial_capital)
+        if commission_rate is not None:
+            payload["commission_rate"] = float(commission_rate)
+        if slippage_bps is not None:
+            payload["slippage_bps"] = float(slippage_bps)
+        return await self._post("/internal/v1/agent-chat/strategy-backtest", payload)
+
     async def place_simulated_order(
         self,
         *,

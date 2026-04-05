@@ -19,6 +19,14 @@ import pandas as pd
 from data_provider import DataFetcherManager
 from data_provider.base import canonical_stock_code, normalize_stock_code
 from agent_stock.protocols import SupportsDailyDataFetcher
+from agent_stock.services.strategy_rule_dsl import (
+    RULE_DSL_TEMPLATE_CODE,
+    RULE_DSL_TEMPLATE_NAME,
+    normalize_rule_dsl_params,
+    summarize_rule_condition,
+    summarize_rule_dsl,
+    summarize_rule_group,
+)
 
 try:
     import backtrader as bt  # type: ignore
@@ -60,6 +68,8 @@ LEGACY_STRATEGY_NAMES: dict[str, str] = {
 TEMPLATE_NAMES: dict[str, str] = {
     "ma_cross": "MA Cross",
     "rsi_threshold": "RSI Threshold",
+    "macd_cross": "MACD Cross",
+    RULE_DSL_TEMPLATE_CODE: RULE_DSL_TEMPLATE_NAME,
 }
 LEGACY_STRATEGY_TEMPLATE_MAP: dict[str, dict[str, Any]] = {
     "ma20_trend": {
@@ -102,7 +112,7 @@ class StrategyDefinition:
     strategy_name: str
     template_code: str
     template_name: str
-    params: dict[str, float]
+    params: dict[str, Any]
 
 
 class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
@@ -401,6 +411,243 @@ class _RSIThresholdStrategy(_BaseTrackedStrategy):
         return f"rsi_gt_{int(self.overbought_threshold)}"
 
 
+class _MACDCrossStrategy(_BaseTrackedStrategy):
+    """可配置快慢线与信号线的 MACD 金叉策略。"""
+
+    params = dict(
+        initial_capital=100000.0,
+        trade_start=None,
+        trade_end=None,
+        macd_fast=12,
+        macd_slow=26,
+        macd_signal=9,
+    )
+
+    def __init__(self):  # type: ignore[override]
+        """初始化 MACD 指标与金叉/死叉信号。"""
+        super().__init__()
+        indicators = _bt_indicators()
+        self.macd_fast = max(5, int(getattr(self.p, "macd_fast", 12) or 12))
+        self.macd_slow = max(self.macd_fast + 1, int(getattr(self.p, "macd_slow", 26) or 26))
+        self.macd_signal = max(3, int(getattr(self.p, "macd_signal", 9) or 9))
+        self.macd = indicators.MACD(
+            self.data.close,
+            period_me1=self.macd_fast,
+            period_me2=self.macd_slow,
+            period_signal=self.macd_signal,
+        )
+        self.cross_up = indicators.CrossUp(self.macd.macd, self.macd.signal)
+        self.cross_down = indicators.CrossDown(self.macd.macd, self.macd.signal)
+
+    def _should_buy(self) -> bool:
+        """判断是否满足 MACD 金叉买入条件。"""
+        if _strategy_bar_count(self) < self.macd_slow + self.macd_signal:
+            return False
+        return float(self.cross_up[0]) > 0
+
+    def _should_sell(self) -> bool:
+        """判断是否满足 MACD 死叉卖出条件。"""
+        if _strategy_bar_count(self) < self.macd_slow + self.macd_signal:
+            return False
+        return float(self.cross_down[0]) > 0
+
+    def _signal_exit_reason(self) -> str:
+        """返回 MACD 策略离场原因。"""
+        return (
+            f"macd_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}_death_cross"
+        )
+
+
+class _RuleDslStrategy(_BaseTrackedStrategy):
+    """支持组合条件入场/离场的 DSL 策略。"""
+
+    params = dict(
+        initial_capital=100000.0,
+        trade_start=None,
+        trade_end=None,
+        dsl_payload=None,
+    )
+
+    def __init__(self):  # type: ignore[override]
+        super().__init__()
+        indicators = _bt_indicators()
+        self.dsl_payload = normalize_rule_dsl_params(getattr(self.p, "dsl_payload", None) or {})
+        self._indicator_ns = indicators
+        self._ma_cache: dict[int, Any] = {}
+        self._rsi_cache: dict[int, Any] = {}
+        self._macd_cache: dict[tuple[int, int, int], Any] = {}
+        self._cross_up_cache: dict[tuple[str, ...], Any] = {}
+        self._cross_down_cache: dict[tuple[str, ...], Any] = {}
+        self._last_exit_reason = "rule_dsl_exit"
+
+    def _get_ma(self, window: int) -> Any:
+        if window not in self._ma_cache:
+            self._ma_cache[window] = self._indicator_ns.SimpleMovingAverage(self.data.close, period=window)
+        return self._ma_cache[window]
+
+    def _get_rsi(self, period: int) -> Any:
+        if period not in self._rsi_cache:
+            self._rsi_cache[period] = self._indicator_ns.RSI_Safe(self.data.close, period=period)
+        return self._rsi_cache[period]
+
+    def _get_macd(self, fast: int, slow: int, signal: int) -> Any:
+        key = (fast, slow, signal)
+        if key not in self._macd_cache:
+            self._macd_cache[key] = self._indicator_ns.MACD(
+                self.data.close,
+                period_me1=fast,
+                period_me2=slow,
+                period_signal=signal,
+            )
+        return self._macd_cache[key]
+
+    def _get_cross_up(self, key: tuple[str, ...], left: Any, right: Any) -> Any:
+        if key not in self._cross_up_cache:
+            self._cross_up_cache[key] = self._indicator_ns.CrossUp(left, right)
+        return self._cross_up_cache[key]
+
+    def _get_cross_down(self, key: tuple[str, ...], left: Any, right: Any) -> Any:
+        if key not in self._cross_down_cache:
+            self._cross_down_cache[key] = self._indicator_ns.CrossDown(left, right)
+        return self._cross_down_cache[key]
+
+    def _evaluate_condition(self, condition: dict[str, Any]) -> bool:
+        kind = str(condition.get("kind") or "").strip()
+
+        if kind == "macd_cross":
+            fast = int(condition.get("fast") or 12)
+            slow = int(condition.get("slow") or 26)
+            signal = int(condition.get("signal") or 9)
+            if _strategy_bar_count(self) < slow + signal:
+                return False
+            macd = self._get_macd(fast, slow, signal)
+            if str(condition.get("direction") or "bullish") == "bearish":
+                cross = self._get_cross_down(
+                    ("macd", "down", str(fast), str(slow), str(signal)),
+                    macd.macd,
+                    macd.signal,
+                )
+            else:
+                cross = self._get_cross_up(
+                    ("macd", "up", str(fast), str(slow), str(signal)),
+                    macd.macd,
+                    macd.signal,
+                )
+            return float(cross[0]) > 0
+
+        if kind == "rsi_threshold":
+            period = int(condition.get("period") or 14)
+            if _strategy_bar_count(self) < period + 1:
+                return False
+            rsi = self._get_rsi(period)
+            value = float(rsi[0])
+            if not math.isfinite(value):
+                return False
+            threshold = float(condition.get("threshold") or 0.0)
+            operator = str(condition.get("operator") or "lt")
+            if operator == "lt":
+                return value < threshold
+            if operator == "lte":
+                return value <= threshold
+            if operator == "gt":
+                return value > threshold
+            if operator == "gte":
+                return value >= threshold
+            return False
+
+        if kind == "price_ma_relation":
+            ma_window = int(condition.get("maWindow") or 5)
+            if _strategy_bar_count(self) < ma_window:
+                return False
+            moving_average = self._get_ma(ma_window)
+            ma_value = float(moving_average[0])
+            close_value = float(self.data.close[0])
+            if not math.isfinite(ma_value) or not math.isfinite(close_value):
+                return False
+            relation = str(condition.get("relation") or "cross_below")
+            if relation == "above":
+                return close_value > ma_value
+            if relation == "below":
+                return close_value < ma_value
+            if _strategy_bar_count(self) < ma_window + 1:
+                return False
+            if relation == "cross_above":
+                cross_up = self._get_cross_up(
+                    ("price_ma", "up", str(ma_window)),
+                    self.data.close,
+                    moving_average,
+                )
+                return float(cross_up[0]) > 0
+            if relation == "cross_below":
+                cross_down = self._get_cross_down(
+                    ("price_ma", "down", str(ma_window)),
+                    self.data.close,
+                    moving_average,
+                )
+                return float(cross_down[0]) > 0
+            return False
+
+        if kind == "stop_loss_pct":
+            if not self.position or self.current_entry is None:
+                return False
+            entry_price = float(self.current_entry.get("entry_price") or 0.0)
+            if entry_price <= 0:
+                return False
+            threshold = entry_price * (1.0 - (float(condition.get("pct") or 0.0) / 100.0))
+            low_value = float(self.data.low[0])
+            return math.isfinite(low_value) and low_value <= threshold
+
+        if kind == "take_profit_pct":
+            if not self.position or self.current_entry is None:
+                return False
+            entry_price = float(self.current_entry.get("entry_price") or 0.0)
+            if entry_price <= 0:
+                return False
+            threshold = entry_price * (1.0 + (float(condition.get("pct") or 0.0) / 100.0))
+            high_value = float(self.data.high[0])
+            return math.isfinite(high_value) and high_value >= threshold
+
+        return False
+
+    def _evaluate_group(self, group: dict[str, Any] | None) -> tuple[bool, list[dict[str, Any]]]:
+        if not isinstance(group, dict):
+            return False, []
+        conditions = [item for item in group.get("conditions") or [] if isinstance(item, dict)]
+        if not conditions:
+            return False, []
+
+        matched: list[dict[str, Any]] = []
+        operator = str(group.get("operator") or "and").lower()
+        if operator == "or":
+            for condition in conditions:
+                if self._evaluate_condition(condition):
+                    matched.append(condition)
+                    return True, matched
+            return False, []
+
+        for condition in conditions:
+            if not self._evaluate_condition(condition):
+                return False, []
+            matched.append(condition)
+        return True, matched
+
+    def _should_buy(self) -> bool:
+        matched, _ = self._evaluate_group(self.dsl_payload.get("entry"))
+        return matched
+
+    def _should_sell(self) -> bool:
+        matched, matched_conditions = self._evaluate_group(self.dsl_payload.get("exit"))
+        if matched and matched_conditions:
+            if len(matched_conditions) == 1:
+                self._last_exit_reason = summarize_rule_condition(matched_conditions[0])
+            else:
+                self._last_exit_reason = summarize_rule_group(self.dsl_payload.get("exit")) or "rule_dsl_exit"
+        return matched
+
+    def _signal_exit_reason(self) -> str:
+        return str(self._last_exit_reason or "rule_dsl_exit")
+
+
 class StrategyBacktestService:
     """执行模板化策略的区间回测，并输出标准指标。"""
 
@@ -449,7 +696,7 @@ class StrategyBacktestService:
         return normalize_stock_code(code)
 
     @staticmethod
-    def _normalize_template_params(template_code: str, raw_params: Any) -> dict[str, float]:
+    def _normalize_template_params(template_code: str, raw_params: Any) -> dict[str, Any]:
         """按模板类型归一化策略参数。"""
         source = raw_params if isinstance(raw_params, dict) else {}
 
@@ -481,6 +728,29 @@ class StrategyBacktestService:
                 "overboughtThreshold": float(overbought_threshold),
             }
 
+        if template_code == "macd_cross":
+            macd_fast = int(StrategyBacktestService._to_float(source.get("macdFast"), 12))
+            macd_slow = int(StrategyBacktestService._to_float(source.get("macdSlow"), 26))
+            macd_signal = int(StrategyBacktestService._to_float(source.get("macdSignal"), 9))
+
+            if macd_fast < 5 or macd_fast > 60:
+                raise ValueError("validation_error: macdFast must be between 5 and 60")
+            if macd_slow < 10 or macd_slow > 120:
+                raise ValueError("validation_error: macdSlow must be between 10 and 120")
+            if macd_signal < 3 or macd_signal > 30:
+                raise ValueError("validation_error: macdSignal must be between 3 and 30")
+            if macd_fast >= macd_slow:
+                raise ValueError("validation_error: macdFast must be less than macdSlow")
+
+            return {
+                "macdFast": float(macd_fast),
+                "macdSlow": float(macd_slow),
+                "macdSignal": float(macd_signal),
+            }
+
+        if template_code == RULE_DSL_TEMPLATE_CODE:
+            return normalize_rule_dsl_params(source)
+
         raise ValueError(f"validation_error: unsupported template_code={template_code}")
 
     def _normalize_strategy_definitions(self, payload: dict[str, Any]) -> list[StrategyDefinition]:
@@ -488,7 +758,7 @@ class StrategyBacktestService:
         raw_strategies = payload.get("strategies")
         if isinstance(raw_strategies, list) and raw_strategies:
             definitions: list[StrategyDefinition] = []
-            seen: set[tuple[int | None, str, str]] = set()
+            seen: set[tuple[int | None, str, str, str]] = set()
             for item in raw_strategies:
                 if not isinstance(item, dict):
                     raise ValueError("validation_error: strategies must be objects")
@@ -501,7 +771,12 @@ class StrategyBacktestService:
                 if strategy_id is not None and strategy_id <= 0:
                     raise ValueError("validation_error: strategy_id must be positive integer")
                 params = self._normalize_template_params(template_code, item.get("params"))
-                dedupe_key = (strategy_id, strategy_name, template_code)
+                dedupe_key = (
+                    strategy_id,
+                    strategy_name,
+                    template_code,
+                    repr(sorted(params.items())) if all(isinstance(key, str) for key in params.keys()) else str(params),
+                )
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
@@ -741,6 +1016,18 @@ class StrategyBacktestService:
                 "oversold_threshold": float(strategy.params.get("oversoldThreshold", 30)),
                 "overbought_threshold": float(strategy.params.get("overboughtThreshold", 70)),
             }
+        elif strategy.template_code == "macd_cross":
+            strategy_cls = _MACDCrossStrategy
+            strategy_kwargs = {
+                "macd_fast": int(strategy.params.get("macdFast", 12)),
+                "macd_slow": int(strategy.params.get("macdSlow", 26)),
+                "macd_signal": int(strategy.params.get("macdSignal", 9)),
+            }
+        elif strategy.template_code == RULE_DSL_TEMPLATE_CODE:
+            strategy_cls = _RuleDslStrategy
+            strategy_kwargs = {
+                "dsl_payload": dict(strategy.params),
+            }
         else:
             raise ValueError(f"validation_error: unsupported template_code={strategy.template_code}")
 
@@ -858,20 +1145,40 @@ class StrategyBacktestService:
             "commission_rate": self._round(params.commission_rate, 6),
             "slippage_bps": self._round(params.slippage_bps, 4),
             "entry_rule": (
-                f"window_start: close[t] > ma{int(strategy.params.get('maWindow', 20))}[t] => t+1 open buy; otherwise cross above MA => t+1 open buy"
-                if strategy.template_code == "ma_cross"
+                summarize_rule_group(strategy.params.get("entry"))
+                if strategy.template_code == RULE_DSL_TEMPLATE_CODE
                 else (
-                    f"rsi{int(strategy.params.get('rsiPeriod', 14))}[t] < {int(strategy.params.get('oversoldThreshold', 30))}, t+1 open buy"
+                    f"window_start: close[t] > ma{int(strategy.params.get('maWindow', 20))}[t] => t+1 open buy; otherwise cross above MA => t+1 open buy"
+                    if strategy.template_code == "ma_cross"
+                    else (
+                        f"rsi{int(strategy.params.get('rsiPeriod', 14))}[t] < {int(strategy.params.get('oversoldThreshold', 30))}, t+1 open buy"
+                        if strategy.template_code == "rsi_threshold"
+                        else (
+                            f"macd({int(strategy.params.get('macdFast', 12))},{int(strategy.params.get('macdSlow', 26))},{int(strategy.params.get('macdSignal', 9))}) "
+                            "golden cross, t+1 open buy"
+                        )
+                    )
                 )
             ),
             "exit_rule": (
-                f"cross below MA{int(strategy.params.get('maWindow', 20))}, t+1 open sell"
-                if strategy.template_code == "ma_cross"
+                summarize_rule_group(strategy.params.get("exit")) or "window_end_close"
+                if strategy.template_code == RULE_DSL_TEMPLATE_CODE
                 else (
-                    f"rsi{int(strategy.params.get('rsiPeriod', 14))}[t] > {int(strategy.params.get('overboughtThreshold', 70))}, t+1 open sell"
+                    f"cross below MA{int(strategy.params.get('maWindow', 20))}, t+1 open sell"
+                    if strategy.template_code == "ma_cross"
+                    else (
+                        f"rsi{int(strategy.params.get('rsiPeriod', 14))}[t] > {int(strategy.params.get('overboughtThreshold', 70))}, t+1 open sell"
+                        if strategy.template_code == "rsi_threshold"
+                        else (
+                            f"macd({int(strategy.params.get('macdFast', 12))},{int(strategy.params.get('macdSlow', 26))},{int(strategy.params.get('macdSignal', 9))}) "
+                            "death cross, t+1 open sell"
+                        )
+                    )
                 )
             ),
         }
+        if strategy.template_code == RULE_DSL_TEMPLATE_CODE:
+            params_payload["dsl_summary"] = summarize_rule_dsl(strategy.params)
 
         return {
             "strategy_id": strategy.strategy_id,

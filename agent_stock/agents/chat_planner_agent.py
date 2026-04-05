@@ -30,6 +30,7 @@ ALLOWED_REQUIRED_TOOLS = {
     "load_stage_memory",
     "load_history",
     "load_backtest",
+    "run_strategy_backtest",
     "run_multi_stock_analysis",
     "place_simulated_order",
     "batch_execute_candidate_orders",
@@ -223,7 +224,9 @@ class ChatPlannerAgent:
             "3. 如果用户想看账户/持仓/资金，使用 account。\n"
             "4. 如果用户说“再试一次/按刚才的来”，优先使用 focus 或 pending_actions，而不是虚构新股票代码。\n"
             "5. 无法确定就返回 clarify，并填写 clarification。\n"
-            "6. analysis / analysis_then_execute 必须包含 run_multi_stock_analysis；history 必须包含 load_history；backtest 必须包含 load_backtest；account 必须包含 load_account_state。\n"
+            "6. analysis / analysis_then_execute 必须包含 run_multi_stock_analysis；history 必须包含 load_history；"
+            "account 必须包含 load_account_state；如果是查看历史回测摘要，backtest 使用 load_backtest；"
+            "如果是执行新的策略回测，backtest 使用 run_strategy_backtest，并在必要时补 load_account_state。\n"
             "7. 如果需要系统态、会话态、偏好态或阶段记忆，请把对应 load_* 工具加入 required_tools。\n\n"
             "8. 当 stock_scope.mode=explicit 时，stock_refs 可以包含股票代码、股票名称、行业板块名或概念板块名；如果提取不出来，就返回 clarify。\n"
             "9. “全市场/所有股票/A股全市场/沪深两市” 这类范围不是普通 stock_refs，不要把它们当成具体股票、行业或概念板块。\n\n"
@@ -253,7 +256,7 @@ class ChatPlannerAgent:
             return None
         if intent == "history" and "load_history" not in required_tools:
             return None
-        if intent == "backtest" and "load_backtest" not in required_tools:
+        if intent == "backtest" and not any(tool in required_tools for tool in {"load_backtest", "run_strategy_backtest"}):
             return None
         if intent == "account" and "load_account_state" not in required_tools:
             return None

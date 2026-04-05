@@ -183,8 +183,8 @@ class StrategyTemplateRunDefinition(BaseModel):
 
     strategy_id: int | None = Field(default=None, ge=1)
     strategy_name: str = Field(min_length=1, max_length=64)
-    template_code: Literal["ma_cross", "rsi_threshold"]
-    params: dict[str, float] = Field(default_factory=dict)
+    template_code: Literal["ma_cross", "rsi_threshold", "macd_cross", "rule_dsl"]
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyRangeRunRequest(BaseModel):

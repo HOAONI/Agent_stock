@@ -10,6 +10,7 @@ import re
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Any, Awaitable, Callable
 
 from data_provider.base import canonical_stock_code
@@ -28,10 +29,16 @@ from agent_stock.agents.planner_runtime import compile_message_conditions
 from agent_stock.analyzer import STOCK_NAME_MAP, get_analyzer
 from agent_stock.config import Config, RuntimeLlmConfig, get_config, redact_sensitive_text
 from agent_stock.repositories.chat_repo import AgentChatRepository
+from agent_stock.services.backtest_interpretation_service import BacktestInterpretationService
 from agent_stock.services.agent_service import AgentService
 from agent_stock.services.agent_task_service import get_agent_task_service
 from agent_stock.services.backend_agent_chat_client import BackendAgentChatClient
 from agent_stock.services.runtime_market_service import RuntimeMarketService
+from agent_stock.services.strategy_rule_dsl import (
+    RULE_DSL_TEMPLATE_CODE,
+    build_rule_dsl_from_text,
+    build_rule_dsl_strategy_name,
+)
 from agent_stock.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -67,6 +74,41 @@ _BUY_KEYWORDS = ("买入", "买进", "买", "加仓")
 _SELL_KEYWORDS = ("卖出", "卖掉", "卖", "减仓")
 _HISTORY_KEYWORDS = ("历史分析", "分析记录", "最近分析", "上次分析", "之前分析")
 _BACKTEST_KEYWORDS = ("回测", "胜率", "收益", "策略表现")
+_STRATEGY_COMPARE_KEYWORDS = ("对比", "比较", "哪个好", "哪个更好", "优劣", "胜出")
+_STRATEGY_BACKTEST_SIGNAL_KEYWORDS = (
+    "macd",
+    "金叉",
+    "死叉",
+    "均线",
+    "ma",
+    "rsi",
+    "超卖",
+    "超买",
+)
+_STRATEGY_BACKTEST_PERFORMANCE_KEYWORDS = (
+    "回测",
+    "历史",
+    "过去",
+    "最近",
+    "近一年",
+    "近半年",
+    "近三个月",
+    "近3个月",
+    "近一个月",
+    "近30天",
+    "一年",
+    "半年",
+    "一个月",
+    "三个月",
+    "收益",
+    "胜率",
+    "回撤",
+    "夏普",
+    "表现",
+    "怎样",
+    "怎么样",
+    "如何",
+)
 _ACCOUNT_KEYWORDS = ("持仓", "账户", "仓位", "资金", "模拟盘情况", "现金")
 _PORTFOLIO_HEALTH_KEYWORDS = (
     "仓位健康",
@@ -312,6 +354,7 @@ class AgentChatService:
         chat_repo: AgentChatRepository | None = None,
         agent_service: AgentService | None = None,
         backend_client: BackendAgentChatClient | None = None,
+        backtest_interpretation_service: BacktestInterpretationService | None = None,
         analyzer=None,
         analyzer_factory: Callable[[RuntimeLlmConfig | None], Any] | None = None,
         board_catalog_provider: BoardCatalogProvider | None = None,
@@ -322,6 +365,9 @@ class AgentChatService:
         self.repo = chat_repo or AgentChatRepository(self.db)
         self.agent_service = agent_service or AgentService(config=self.config, db_manager=self.db)
         self.backend_client = backend_client or BackendAgentChatClient(config=self.config)
+        self.backtest_interpretation_service = backtest_interpretation_service or BacktestInterpretationService(
+            config=self.config,
+        )
         self._analyzer_factory = analyzer_factory or (
             lambda runtime_llm=None: get_analyzer(config=self.config, runtime_llm=runtime_llm)
         )
@@ -346,6 +392,7 @@ class AgentChatService:
             "load_stage_memory": self._tool_load_stage_memory,
             "load_history": self._tool_load_history,
             "load_backtest": self._tool_load_backtest,
+            "run_strategy_backtest": self._tool_run_strategy_backtest,
             "run_multi_stock_analysis": self._tool_run_multi_stock_analysis,
             "place_simulated_order": self._tool_place_simulated_order,
             "batch_execute_candidate_orders": self._tool_batch_execute_candidate_orders,
@@ -678,6 +725,81 @@ class AgentChatService:
                     "execution_result": None,
                     "status": "analysis_only",
                 }
+            elif plan.primary_intent == "backtest" and "run_strategy_backtest" in plan.required_tools:
+                try:
+                    strategy_backtest_request = self._build_strategy_backtest_request(
+                        message=message,
+                        stock_codes=plan.stock_codes,
+                        runtime_config=runtime_config,
+                        account_state_payload=account_state_payload,
+                    )
+                except ValueError as exc:
+                    content = self._build_strategy_backtest_clarification(str(exc))
+                    final_payload = {
+                        "session_id": session_id,
+                        "content": content,
+                        "structured_result": {
+                            "intent": "clarify",
+                            "message": content,
+                            "blocked_code": "strategy_backtest_request_invalid",
+                            "supported": True,
+                            "loaded_context_keys": list(context_bundle.loaded_keys),
+                            "effective_preferences": effective_preferences_payload,
+                            "stage_memory": stage_memory_payload,
+                            "intent_source": plan.intent_source,
+                        },
+                        "candidate_orders": [],
+                        "execution_result": None,
+                        "status": "blocked",
+                    }
+                else:
+                    strategy_backtest_payload = await self._run_tool(
+                        "run_strategy_backtest",
+                        {
+                            "owner_user_id": owner_user_id,
+                            "code": strategy_backtest_request["code"],
+                            "start_date": strategy_backtest_request["start_date"],
+                            "end_date": strategy_backtest_request["end_date"],
+                            "strategies": strategy_backtest_request["strategies"],
+                            "initial_capital": strategy_backtest_request.get("initial_capital"),
+                        },
+                        tool_context,
+                        event_handler,
+                    )
+                    interpretation_payload = self._interpret_strategy_backtest_result(
+                        strategy_backtest_payload,
+                        runtime_config=runtime_config,
+                    )
+                    next_stage_memory = self._merge_stage_memory(
+                        stage_memory_payload,
+                        self._build_strategy_backtest_stage_memory(
+                            backtest_request=strategy_backtest_request,
+                            backtest_result=strategy_backtest_payload,
+                        ),
+                    )
+                    content = self._render_strategy_backtest_content(
+                        backtest_request=strategy_backtest_request,
+                        backtest_result=strategy_backtest_payload,
+                        interpretation_payload=interpretation_payload,
+                    )
+                    final_payload = {
+                        "session_id": session_id,
+                        "content": content,
+                        "structured_result": {
+                            "intent": "backtest",
+                            "backtest_mode": "strategy_run",
+                            "backtest_request": strategy_backtest_request,
+                            "strategy_backtest": strategy_backtest_payload,
+                            "interpretation": interpretation_payload,
+                            "loaded_context_keys": list(context_bundle.loaded_keys),
+                            "effective_preferences": effective_preferences_payload,
+                            "stage_memory": next_stage_memory,
+                            "intent_source": plan.intent_source,
+                        },
+                        "candidate_orders": [],
+                        "execution_result": None,
+                        "status": "analysis_only",
+                    }
             elif plan.primary_intent in {"history", "backtest", "account"}:
                 content = self._render_context_only_content(
                     account_state_payload=account_state_payload,
@@ -1778,6 +1900,238 @@ class AgentChatService:
         return any(keyword in compact for keyword in _MARKET_WIDE_SELECTION_KEYWORDS)
 
     @classmethod
+    def _contains_strategy_backtest_run_intent(cls, message: str) -> bool:
+        compact = cls._compact_message_text(message)
+        if not compact:
+            return False
+        has_strategy_signal = any(keyword in compact for keyword in _STRATEGY_BACKTEST_SIGNAL_KEYWORDS)
+        if not has_strategy_signal:
+            return False
+        return any(keyword in compact for keyword in _STRATEGY_BACKTEST_PERFORMANCE_KEYWORDS)
+
+    @staticmethod
+    def _parse_strategy_backtest_date_token(value: str) -> date | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        for pattern in (
+            r"(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})",
+            r"(?P<year>\d{4})年(?P<month>\d{1,2})月(?P<day>\d{1,2})日?",
+        ):
+            matched = re.search(pattern, text)
+            if not matched:
+                continue
+            try:
+                return date(
+                    int(matched.group("year")),
+                    int(matched.group("month")),
+                    int(matched.group("day")),
+                )
+            except Exception:
+                return None
+        return None
+
+    def _extract_strategy_backtest_window(self, message: str) -> dict[str, str]:
+        today = date.today()
+        absolute_range = re.search(
+            r"((?:\d{4}[-/]\d{1,2}[-/]\d{1,2})|(?:\d{4}年\d{1,2}月\d{1,2}日?))\s*(?:到|至|-|~|—)\s*"
+            r"((?:\d{4}[-/]\d{1,2}[-/]\d{1,2})|(?:\d{4}年\d{1,2}月\d{1,2}日?))",
+            str(message or ""),
+        )
+        if absolute_range:
+            start_date = self._parse_strategy_backtest_date_token(absolute_range.group(1))
+            end_date = self._parse_strategy_backtest_date_token(absolute_range.group(2))
+            if start_date is not None and end_date is not None and start_date <= end_date:
+                return {
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "window_label": f"{start_date.isoformat()} 到 {end_date.isoformat()}",
+                }
+
+        compact = self._compact_message_text(message)
+        day_span = 365
+        window_label = "过去一年"
+        if any(token in compact for token in ("过去两年", "最近两年", "近两年", "2年")):
+            day_span = 730
+            window_label = "过去两年"
+        elif any(token in compact for token in ("过去半年", "最近半年", "近半年", "6个月")):
+            day_span = 182
+            window_label = "过去半年"
+        elif any(token in compact for token in ("过去三个月", "最近三个月", "近三个月", "最近3个月", "近3个月", "3个月")):
+            day_span = 90
+            window_label = "过去三个月"
+        elif any(token in compact for token in ("过去一个月", "最近一个月", "近一个月", "最近30天", "近30天", "30天")):
+            day_span = 30
+            window_label = "过去一个月"
+
+        start_date = today - timedelta(days=day_span)
+        return {
+            "start_date": start_date.isoformat(),
+            "end_date": today.isoformat(),
+            "window_label": window_label,
+        }
+
+    @staticmethod
+    def _extract_first_number(patterns: list[str], message: str) -> int | None:
+        for pattern in patterns:
+            matched = re.search(pattern, message, flags=re.I)
+            if matched:
+                try:
+                    return int(matched.group(1))
+                except Exception:
+                    continue
+        return None
+
+    def _extract_strategy_definitions_from_message(self, message: str) -> list[dict[str, Any]]:
+        compact = self._compact_message_text(message)
+        raw_message = str(message or "")
+        compare_requested = any(keyword in compact for keyword in _STRATEGY_COMPARE_KEYWORDS)
+        if not compare_requested:
+            dsl_params = build_rule_dsl_from_text(raw_message)
+            if dsl_params is not None:
+                return [
+                    {
+                        "strategy_name": build_rule_dsl_strategy_name(dsl_params),
+                        "template_code": RULE_DSL_TEMPLATE_CODE,
+                        "params": dsl_params,
+                    }
+                ]
+
+        strategies: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_strategy(template_code: str, strategy_name: str, params: dict[str, Any]) -> None:
+            if template_code in seen:
+                return
+            seen.add(template_code)
+            strategies.append(
+                {
+                    "strategy_name": strategy_name,
+                    "template_code": template_code,
+                    "params": params,
+                }
+            )
+
+        macd_tuple = re.search(r"macd[\(\[]?\s*(\d{1,2})\s*[,/，]\s*(\d{1,3})\s*[,/，]\s*(\d{1,2})", compact, flags=re.I)
+        if "macd" in compact and any(token in compact for token in ("金叉", "死叉", "上穿", "下穿")):
+            macd_fast = int(macd_tuple.group(1)) if macd_tuple else 12
+            macd_slow = int(macd_tuple.group(2)) if macd_tuple else 26
+            macd_signal = int(macd_tuple.group(3)) if macd_tuple else 9
+            add_strategy(
+                "macd_cross",
+                "MACD 金叉",
+                {
+                    "macdFast": macd_fast,
+                    "macdSlow": macd_slow,
+                    "macdSignal": macd_signal,
+                },
+            )
+
+        if "rsi" in compact or ("超卖" in compact and "超买" in compact):
+            rsi_period = self._extract_first_number([r"rsi\s*(\d{1,2})"], compact) or 14
+            oversold_threshold = self._extract_first_number(
+                [r"超卖(?:阈值)?\D{0,4}(\d{1,2})", r"低于\D{0,2}(\d{1,2})买入"],
+                str(message or ""),
+            ) or 30
+            overbought_threshold = self._extract_first_number(
+                [r"超买(?:阈值)?\D{0,4}(\d{1,2})", r"高于\D{0,2}(\d{1,2})卖出"],
+                str(message or ""),
+            ) or 70
+            add_strategy(
+                "rsi_threshold",
+                "RSI 阈值",
+                {
+                    "rsiPeriod": rsi_period,
+                    "oversoldThreshold": oversold_threshold,
+                    "overboughtThreshold": overbought_threshold,
+                },
+            )
+
+        has_ma_token = "均线" in compact or bool(re.search(r"(?i)\bma(?:\s*\d{1,3})?\b", raw_message))
+        if has_ma_token and any(
+            token in compact for token in ("上穿", "跌破", "交叉", "金叉", "死叉", "突破")
+        ):
+            ma_window = self._extract_first_number(
+                [
+                    r"(\d{1,3})\s*(?:日|天)?均线",
+                    r"ma\s*(\d{1,3})",
+                ],
+                str(message or ""),
+            ) or 20
+            add_strategy(
+                "ma_cross",
+                f"MA{ma_window} 交叉",
+                {"maWindow": ma_window},
+            )
+
+        return strategies
+
+    def _extract_strategy_backtest_initial_capital(
+        self,
+        *,
+        message: str,
+        runtime_config: dict[str, Any] | None,
+        account_state_payload: dict[str, Any] | None,
+    ) -> float | None:
+        capital_match = re.search(r"本金\s*(\d+(?:\.\d+)?)\s*(万|元)?", str(message or ""))
+        if not capital_match:
+            capital_match = re.search(r"(\d+(?:\.\d+)?)\s*(万|元)\s*本金", str(message or ""))
+        if capital_match:
+            base = float(capital_match.group(1))
+            unit = str(capital_match.group(2) or "元").strip()
+            return base * 10000.0 if unit == "万" else base
+
+        runtime_account = runtime_config.get("account") if isinstance(runtime_config, dict) and isinstance(runtime_config.get("account"), dict) else {}
+        runtime_initial = self._safe_number(runtime_account.get("initial_cash") or runtime_account.get("initialCapital"))
+        if runtime_initial is not None and runtime_initial > 0:
+            return runtime_initial
+
+        account_state = account_state_payload.get("account_state") if isinstance(account_state_payload, dict) and isinstance(account_state_payload.get("account_state"), dict) else {}
+        runtime_context = account_state_payload.get("runtime_context") if isinstance(account_state_payload, dict) and isinstance(account_state_payload.get("runtime_context"), dict) else {}
+        runtime_summary = runtime_context.get("summary") if isinstance(runtime_context.get("summary"), dict) else {}
+        for candidate in (
+            runtime_summary.get("initial_capital"),
+            runtime_summary.get("initial_cash"),
+            account_state.get("total_asset"),
+        ):
+            value = self._safe_number(candidate)
+            if value is not None and value > 0:
+                return value
+        return None
+
+    def _build_strategy_backtest_request(
+        self,
+        *,
+        message: str,
+        stock_codes: list[str],
+        runtime_config: dict[str, Any] | None,
+        account_state_payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        normalized_codes = self._normalize_stock_codes(stock_codes)
+        if len(normalized_codes) != 1:
+            raise ValueError("strategy_backtest_requires_single_stock")
+
+        strategies = self._extract_strategy_definitions_from_message(message)
+        if not strategies:
+            raise ValueError("strategy_backtest_strategy_unrecognized")
+
+        window = self._extract_strategy_backtest_window(message)
+        initial_capital = self._extract_strategy_backtest_initial_capital(
+            message=message,
+            runtime_config=runtime_config,
+            account_state_payload=account_state_payload,
+        )
+        return {
+            "code": normalized_codes[0],
+            "start_date": window["start_date"],
+            "end_date": window["end_date"],
+            "window_label": window["window_label"],
+            "strategies": strategies,
+            "initial_capital": initial_capital,
+            "compare_requested": any(keyword in self._compact_message_text(message) for keyword in _STRATEGY_COMPARE_KEYWORDS) or len(strategies) > 1,
+        }
+
+    @classmethod
     def _stock_scope_refs_hit_market_wide_boundary(cls, stock_refs: Any) -> bool:
         refs = stock_refs if isinstance(stock_refs, list) else []
         for item in refs:
@@ -2811,6 +3165,90 @@ class AgentChatService:
                 stock_scope={"mode": "none", "stock_refs": []},
                 followup_target={"mode": "none", "stock_refs": []},
             )
+        if self._contains_strategy_backtest_run_intent(message):
+            explicit_stock_codes, unresolved_stock_names = self._extract_explicit_stock_references(message)
+            explicit_stock_codes = [
+                code
+                for code in explicit_stock_codes
+                if re.fullmatch(r"\d{6}", str(code or "").strip())
+            ]
+            if unresolved_stock_names and not explicit_stock_codes:
+                clarification = self._build_stock_name_clarification(unresolved_stock_names)
+                return ChatPlan(
+                    primary_intent="clarify",
+                    clarification=clarification,
+                    planner_source="rule",
+                    intent_source="rule",
+                    intent_resolution=self._build_intent_resolution(
+                        intent="clarify",
+                        stock_codes=[],
+                        requested_order_side=None,
+                        requested_quantity=None,
+                        conditions=[],
+                        followup_reference=None,
+                        confidence=0.94,
+                        missing_slots=["stock_codes"],
+                        source="rule",
+                    ),
+                    pending_actions=pending_actions,
+                )
+            stock_scope_mode = "explicit" if explicit_stock_codes else "focus"
+            requested_refs = explicit_stock_codes if explicit_stock_codes else []
+            scope_resolution = self._resolve_stock_codes_from_refs(
+                requested_refs,
+                fallback_focus_codes=default_focus_codes,
+                stock_scope_mode=stock_scope_mode,
+                pending_actions=pending_actions,
+            )
+            stock_codes = self._normalize_stock_codes(scope_resolution.get("stock_codes"))
+            if len(stock_codes) != 1:
+                clarification = (
+                    "策略回测当前一次只支持 1 只股票。请直接告诉我一只股票代码，"
+                    "或者先选定一只股票后再问“这只股票用 MACD 金叉策略过去一年收益怎样”。"
+                )
+                return ChatPlan(
+                    primary_intent="clarify",
+                    clarification=clarification,
+                    planner_source="rule",
+                    intent_source="rule",
+                    intent_resolution=self._build_intent_resolution(
+                        intent="clarify",
+                        stock_codes=stock_codes,
+                        requested_order_side=None,
+                        requested_quantity=None,
+                        conditions=[],
+                        followup_reference=None,
+                        confidence=0.9,
+                        missing_slots=["stock_codes"],
+                        source="rule",
+                    ),
+                    pending_actions=pending_actions,
+                )
+            intent_resolution = self._build_intent_resolution(
+                intent="backtest",
+                stock_codes=stock_codes,
+                requested_order_side=None,
+                requested_quantity=None,
+                conditions=[],
+                followup_reference=None,
+                confidence=0.98,
+                missing_slots=[],
+                source="rule",
+            )
+            intent_resolution["scope_resolution"] = dict(scope_resolution.get("scope_resolution") or {})
+            intent_resolution["resolved_scope_entities"] = list(scope_resolution.get("resolved_scope_entities") or [])
+            return ChatPlan(
+                primary_intent="backtest",
+                stock_codes=stock_codes,
+                include_runtime_context=True,
+                planner_source="rule",
+                intent_source="rule",
+                intent_resolution=intent_resolution,
+                pending_actions=pending_actions,
+                required_tools=["load_account_state", "run_strategy_backtest"],
+                stock_scope={"mode": stock_scope_mode, "stock_refs": requested_refs},
+                followup_target={"mode": "none", "stock_refs": []},
+            )
         if self._is_market_wide_selection_request(message):
             clarification = self._build_market_wide_scope_unsupported_message()
             intent_resolution = self._build_intent_resolution(
@@ -3762,6 +4200,10 @@ class AgentChatService:
             return "读取历史分析记录"
         if tool_name == "load_backtest":
             return "读取回测摘要"
+        if tool_name == "run_strategy_backtest":
+            code = str(args.get("code") or "").strip()
+            strategy_count = len(args.get("strategies") or [])
+            return f"执行 {code or '--'} 的策略回测（{strategy_count} 个策略）"
         if tool_name == "place_simulated_order":
             order = args.get("candidate_order") if isinstance(args.get("candidate_order"), dict) else {}
             return f"向模拟盘提交 {order.get('code') or ''} 候选订单"
@@ -3806,6 +4248,10 @@ class AgentChatService:
         if tool_name == "load_backtest":
             items = result.get("items") if isinstance(result.get("items"), list) else []
             return f"已读取 {len(items)} 条回测摘要"
+        if tool_name == "run_strategy_backtest":
+            items = result.get("items") if isinstance(result.get("items"), list) else []
+            code = result.get("code") or "--"
+            return f"已完成 {code} 的策略回测，输出 {len(items)} 组策略结果"
         if tool_name == "place_simulated_order":
             if AgentChatService._is_outside_trading_session_execution(result):
                 return AgentChatService._extract_execution_message(result) or "非交易时段，模拟盘订单未执行"
@@ -3946,6 +4392,26 @@ class AgentChatService:
             owner_user_id=int(args.get("owner_user_id") or 0),
             stock_codes=list(args.get("stock_codes") or []),
             limit=int(args.get("limit") or 6),
+        )
+
+    async def _tool_run_strategy_backtest(
+        self,
+        args: dict[str, Any],
+        _tool_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self.backend_client.run_strategy_backtest(
+            owner_user_id=int(args.get("owner_user_id") or 0),
+            code=str(args.get("code") or "").strip(),
+            start_date=str(args.get("start_date") or "").strip(),
+            end_date=str(args.get("end_date") or "").strip(),
+            strategies=[
+                dict(item)
+                for item in (args.get("strategies") or [])
+                if isinstance(item, dict)
+            ],
+            initial_capital=self._safe_number(args.get("initial_capital")),
+            commission_rate=self._safe_number(args.get("commission_rate")),
+            slippage_bps=self._safe_number(args.get("slippage_bps")),
         )
 
     async def _tool_run_multi_stock_analysis(
@@ -5002,6 +5468,177 @@ class AgentChatService:
                 lines.append(f"- {item}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_strategy_backtest_clarification(error_code: str) -> str:
+        normalized = str(error_code or "").strip()
+        if normalized == "strategy_backtest_requires_single_stock":
+            return (
+                "策略回测当前一次只支持 1 只股票。请直接告诉我股票代码，"
+                "或者先分析一只股票后再问“这只股票用 MACD 金叉策略过去一年收益怎样”。"
+            )
+        if normalized == "strategy_backtest_strategy_unrecognized":
+            return (
+                "我暂时没能把这条策略描述稳定解析成可执行回测模板。"
+                "现在除了单一模板，也支持像“MACD 金叉且 RSI<30，跌破 5 日线止损”这样的组合规则；"
+                "如果这次没识别出来，你可以把买入条件和止损/止盈条件说得更直白一些。"
+            )
+        return "这条策略回测请求还缺少关键信息，请补充股票代码或更明确的策略规则。"
+
+    def _interpret_strategy_backtest_result(
+        self,
+        backtest_result: dict[str, Any],
+        *,
+        runtime_config: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        items = [dict(item) for item in backtest_result.get("items") or [] if isinstance(item, dict)]
+        if not items:
+            return {"items": []}
+
+        runtime_llm = self._extract_runtime_llm(runtime_config if isinstance(runtime_config, dict) else {})
+        payload: dict[str, Any] = {
+            "language": "zh-CN",
+            "items": [
+                {
+                    "item_key": f"strategy-run-{item.get('run_id') or index}",
+                    "item_type": "strategy",
+                    "label": str(item.get("strategy_name") or item.get("template_name") or item.get("strategy_code") or f"策略 {index + 1}"),
+                    "code": str(backtest_result.get("code") or ""),
+                    "requested_range": dict(backtest_result.get("requested_range") or {}),
+                    "effective_range": dict(backtest_result.get("effective_range") or {}),
+                    "metrics": dict(item.get("metrics") or {}),
+                    "benchmark": dict(item.get("benchmark") or {}),
+                    "context": {
+                        "strategy_code": item.get("strategy_code"),
+                        "template_code": item.get("template_code"),
+                        "params": dict(item.get("params") or {}),
+                    },
+                }
+                for index, item in enumerate(items)
+            ],
+        }
+        if runtime_llm is not None:
+            payload["runtime_llm"] = {
+                "provider": runtime_llm.provider,
+                "base_url": runtime_llm.base_url,
+                "model": runtime_llm.model,
+                "has_token": runtime_llm.has_token,
+                **({"api_token": runtime_llm.api_token} if runtime_llm.api_token else {}),
+            }
+        return self.backtest_interpretation_service.interpret(payload)
+
+    def _build_strategy_backtest_stage_memory(
+        self,
+        *,
+        backtest_request: dict[str, Any],
+        backtest_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        items = [dict(item) for item in backtest_result.get("items") or [] if isinstance(item, dict)]
+        return {
+            "backtest": {
+                "mode": "strategy_run",
+                "code": backtest_request.get("code"),
+                "window": {
+                    "start_date": backtest_request.get("start_date"),
+                    "end_date": backtest_request.get("end_date"),
+                },
+                "strategy_names": [
+                    str(item.get("strategy_name") or item.get("template_name") or item.get("strategy_code") or "").strip()
+                    for item in items
+                    if str(item.get("strategy_name") or item.get("template_name") or item.get("strategy_code") or "").strip()
+                ],
+                "run_group_id": backtest_result.get("run_group_id"),
+            }
+        }
+
+    def _render_strategy_backtest_content(
+        self,
+        *,
+        backtest_request: dict[str, Any],
+        backtest_result: dict[str, Any],
+        interpretation_payload: dict[str, Any] | None,
+    ) -> str:
+        items = [dict(item) for item in backtest_result.get("items") or [] if isinstance(item, dict)]
+        interpretation_items = [
+            dict(item) for item in (interpretation_payload or {}).get("items") or [] if isinstance(item, dict)
+        ]
+        interpretation_map = {
+            str(item.get("item_key") or "").strip(): item
+            for item in interpretation_items
+            if str(item.get("item_key") or "").strip()
+        }
+        requested_range = backtest_result.get("requested_range") if isinstance(backtest_result.get("requested_range"), dict) else {}
+        effective_range = backtest_result.get("effective_range") if isinstance(backtest_result.get("effective_range"), dict) else {}
+        code = str(backtest_result.get("code") or backtest_request.get("code") or "--").strip() or "--"
+        lines = [
+            "## 策略回测结论",
+            f"我已对 {code} 在 {requested_range.get('start_date') or backtest_request.get('start_date') or '--'} 到 "
+            f"{requested_range.get('end_date') or backtest_request.get('end_date') or '--'} 这段区间完成 "
+            f"{len(items)} 个策略回测。",
+        ]
+        effective_start = str(effective_range.get("start_date") or "").strip()
+        effective_end = str(effective_range.get("end_date") or "").strip()
+        if effective_start or effective_end:
+            lines.append(f"实际可用行情区间是 {effective_start or '--'} 到 {effective_end or '--'}。")
+
+        if not items:
+            lines.append("这轮没有返回有效的策略结果，建议稍后重试，或缩小回测区间再看一次。")
+            return "\n".join(lines)
+
+        lines.append("")
+        lines.append("## 策略表现")
+        best_return_item = max(
+            items,
+            key=lambda item: self._safe_number((item.get("metrics") or {}).get("total_return_pct")) or float("-inf"),
+        )
+        best_drawdown_item = max(
+            items,
+            key=lambda item: -(abs(self._safe_number((item.get("metrics") or {}).get("max_drawdown_pct")) or float("inf"))),
+        )
+        for index, item in enumerate(items):
+            metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+            label = str(item.get("strategy_name") or item.get("template_name") or item.get("strategy_code") or f"策略 {index + 1}").strip()
+            item_key = f"strategy-run-{item.get('run_id') or index}"
+            interpretation = interpretation_map.get(item_key, {})
+            total_trades = int(metrics.get("total_trades") or 0)
+            max_drawdown = self._safe_number(metrics.get("max_drawdown_pct"))
+            lines.append(f"### {label}")
+            if total_trades <= 0:
+                lines.append(
+                    f"这段区间没有形成完整成交，累计收益 {self._format_percent(metrics.get('total_return_pct'))}，"
+                    f"最大回撤 {self._format_percent(abs(max_drawdown) if max_drawdown is not None else None)}。"
+                )
+            else:
+                lines.append(
+                    f"累计收益 {self._format_percent(metrics.get('total_return_pct'))}，"
+                    f"跑赢基准 {self._format_percent(metrics.get('excess_return_pct'))}，"
+                    f"最大回撤 {self._format_percent(abs(max_drawdown) if max_drawdown is not None else None)}，"
+                    f"夏普比率 {self._format_price(metrics.get('sharpe_ratio'))}，"
+                    f"共完成 {total_trades} 笔交易。"
+                )
+            if interpretation:
+                verdict = str(interpretation.get("verdict") or "").strip()
+                summary = str(interpretation.get("summary") or "").strip()
+                if verdict:
+                    lines.append(f"AI 解读：{verdict}。{summary}")
+                elif summary:
+                    lines.append(f"AI 解读：{summary}")
+            lines.append("")
+
+        if len(items) > 1:
+            best_return_label = str(
+                best_return_item.get("strategy_name") or best_return_item.get("template_name") or best_return_item.get("strategy_code") or "--"
+            ).strip() or "--"
+            best_drawdown_label = str(
+                best_drawdown_item.get("strategy_name") or best_drawdown_item.get("template_name") or best_drawdown_item.get("strategy_code") or "--"
+            ).strip() or "--"
+            lines.append("## 策略对比")
+            lines.append(
+                f"按累计收益看，{best_return_label} 这组策略表现最好；"
+                f"按回撤控制看，{best_drawdown_label} 相对更稳。"
+            )
+
+        return "\n".join(lines).strip()
 
     def _render_analysis_template(
         self,
