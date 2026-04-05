@@ -10,9 +10,15 @@ from typing import cast
 
 import pandas as pd
 
+from agent_stock.agents.risk_agent import RiskAgent
 from agent_stock.protocols import SupportsDailyDataFetcher, SupportsTrendAnalyzer
 from agent_stock.services.agent_historical_backtest_service import AgentHistoricalBacktestService
 from agent_stock.stock_analyzer import BuySignal, TrendAnalysisResult
+
+
+class _UnavailableAnalyzer:
+    def is_available(self) -> bool:
+        return False
 
 
 def _build_days(count: int) -> list[date]:
@@ -87,7 +93,8 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
             ]
         )
         service = AgentHistoricalBacktestService(
-            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame))
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
+            risk_agent=RiskAgent(analyzer=_UnavailableAnalyzer()),
         )
 
         with warnings.catch_warnings(record=True) as caught:
@@ -131,6 +138,7 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
         service = AgentHistoricalBacktestService(
             fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
             trend_analyzer=cast(SupportsTrendAnalyzer, trend),
+            risk_agent=RiskAgent(analyzer=_UnavailableAnalyzer()),
         )
 
         result = service.run(
@@ -174,7 +182,8 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
             },
         ]
         service = AgentHistoricalBacktestService(
-            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame))
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
+            risk_agent=RiskAgent(analyzer=_UnavailableAnalyzer()),
         )
 
         result = service.run(
@@ -220,7 +229,8 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
             },
         ]
         service = AgentHistoricalBacktestService(
-            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame))
+            fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
+            risk_agent=RiskAgent(analyzer=_UnavailableAnalyzer()),
         )
 
         result = service.run(
@@ -264,6 +274,7 @@ class AgentHistoricalBacktestServiceTestCase(unittest.TestCase):
         service = AgentHistoricalBacktestService(
             fetcher_manager=cast(SupportsDailyDataFetcher, _FakeFetcher(frame)),
             ai_analyzer_factory=lambda: _FakeAiAnalyzer(calls),
+            risk_agent=RiskAgent(analyzer=_UnavailableAnalyzer()),
         )
 
         result = service.run(

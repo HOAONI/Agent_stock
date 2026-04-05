@@ -12,15 +12,18 @@ from typing import Any
 
 
 from agent_stock.agents.contracts import AgentState, RiskAgentOutput, SignalAgentOutput
+from agent_stock.agents.agentic_decision import generate_structured_decision
+from agent_stock.analyzer import get_analyzer
 from agent_stock.config import Config, RuntimeStrategyConfig, get_config
 
 
 class RiskAgent:
     """应用固定仓位映射与账户级限制。"""
 
-    def __init__(self, config: Config | None = None) -> None:
+    def __init__(self, config: Config | None = None, analyzer=None) -> None:
         """初始化风控配置。"""
         self.config = config or get_config()
+        self.analyzer = analyzer or get_analyzer()
 
     def run(
         self,
@@ -35,6 +38,14 @@ class RiskAgent:
     ) -> RiskAgentOutput:
         """计算目标持仓金额，并应用账户级风险限制。"""
         if current_price <= 0:
+            decision = {
+                "action": "abort",
+                "summary": "当前价格无效，风控阶段中止。",
+                "reason": "invalid_price",
+                "next_action": "abort",
+                "confidence": 0.05,
+                "warnings": ["invalid_price"],
+            }
             return RiskAgentOutput(
                 code=code,
                 trade_date=trade_date,
@@ -45,6 +56,20 @@ class RiskAgent:
                 hard_risk_triggered=True,
                 risk_flags=["invalid_price"],
                 error_message="current price is invalid",
+                observations=[{"current_price": current_price, "signal_advice": signal_output.operation_advice}],
+                decision=decision,
+                confidence=0.05,
+                warnings=["invalid_price"],
+                llm_used=False,
+                fallback_chain=["risk_rule"],
+                next_action="abort",
+                status="failed",
+                risk_level="high",
+                execution_allowed=False,
+                hard_blocks=["invalid_price"],
+                soft_flags=[],
+                review_reason="invalid_price",
+                suggested_next="abort",
             )
 
         flags = []
@@ -142,12 +167,148 @@ class RiskAgent:
 
         target_weight = (target_notional / total_asset) if total_asset > 0 else 0.0
 
+        observations = [
+            {
+                "signal_advice": signal_output.operation_advice,
+                "sentiment_score": signal_output.sentiment_score,
+                "current_price": current_price,
+                "current_position_value": current_position_value,
+                "cash": float(account_snapshot.get("cash") or 0.0),
+                "total_asset": total_asset,
+                "total_market_value": total_market_value,
+                "position_qty": position_qty,
+                "base_weight": base_weight,
+                "resolved_weight": round(target_weight, 6),
+                "resolved_notional": round(target_notional, 2),
+                "risk_flags": list(flags),
+            }
+        ]
+        flatten_reason_flags = {
+            "sell_signal",
+            "stop_loss_triggered",
+            "take_profit_triggered",
+            "runtime_stop_loss_triggered",
+            "runtime_take_profit_triggered",
+        }
+        should_flatten_position = position_qty > 0 and any(flag in flatten_reason_flags for flag in flags)
+
+        if target_notional <= 0 or target_weight <= 0:
+            if should_flatten_position:
+                default_decision = {
+                    "action": "continue_execution",
+                    "summary": "风控要求对现有持仓执行减仓或清仓，可继续进入执行阶段。",
+                    "reason": "flatten_position",
+                    "next_action": "execution",
+                    "confidence": 0.93,
+                    "warnings": list(flags),
+                    "requested_target_weight_pct": 0.0,
+                }
+            else:
+                default_decision = {
+                    "action": "skip_execution",
+                    "summary": "风控判断当前不应继续下单，本轮只保留分析与警告。",
+                    "reason": "risk_blocked",
+                    "next_action": "skip_execution",
+                    "confidence": 0.9,
+                    "warnings": list(flags),
+                }
+        else:
+            default_decision = {
+                "action": "continue_execution",
+                "summary": "风控已完成，可进入执行阶段。",
+                "reason": "risk_ready",
+                "next_action": "execution",
+                "confidence": 0.8 if not flags else 0.64,
+                "warnings": list(flags),
+                "requested_target_weight_pct": round(target_weight * 100.0, 4),
+            }
+
+        decision, llm_used = generate_structured_decision(
+            analyzer=self.analyzer,
+            stage="risk",
+            prompt=self._build_risk_stage_prompt(
+                code=code,
+                signal_output=signal_output,
+                observations=observations,
+                target_weight=target_weight,
+                target_notional=target_notional,
+                flags=flags,
+            ),
+            allowed_actions={"continue_execution", "skip_execution", "request_signal_review", "abort"},
+            default_decision=default_decision,
+        )
+        warnings = list(flags)
+        for item in decision.get("warnings") or []:
+            if isinstance(item, str) and item not in warnings:
+                warnings.append(item)
+
+        action = str(decision.get("action") or default_decision["action"]).strip() or default_decision["action"]
+        final_target_weight = float(target_weight)
+        final_target_notional = float(target_notional)
+        next_action = "execution"
+        state = AgentState.READY
+        if action == "skip_execution":
+            final_target_weight = 0.0
+            final_target_notional = 0.0
+            next_action = "skip_execution"
+            state = AgentState.SKIPPED
+        elif action == "request_signal_review":
+            final_target_weight = 0.0
+            final_target_notional = 0.0
+            warnings.append("request_signal_review")
+            next_action = "signal"
+            state = AgentState.SKIPPED
+        elif action == "continue_execution":
+            requested_weight_pct = decision.get("requested_target_weight_pct")
+            try:
+                requested_weight = max(0.0, min(float(requested_weight_pct) / 100.0, final_target_weight))
+            except (TypeError, ValueError):
+                requested_weight = final_target_weight
+            if requested_weight < final_target_weight and final_target_weight > 0:
+                final_target_weight = requested_weight
+                final_target_notional = round(total_asset * final_target_weight, 2)
+                warnings.append("llm_weight_reduced")
+        else:
+            final_target_weight = 0.0
+            final_target_notional = 0.0
+            next_action = "abort"
+            state = AgentState.FAILED
+            if "risk_aborted" not in warnings:
+                warnings.append("risk_aborted")
+
+        hard_block_tokens = {
+            "invalid_price",
+            "risk_aborted",
+            "stop_loss_triggered",
+            "take_profit_triggered",
+            "runtime_stop_loss_triggered",
+            "runtime_take_profit_triggered",
+            "sell_signal",
+        }
+        hard_blocks = [item for item in warnings if item in hard_block_tokens]
+        soft_flags = [item for item in warnings if item not in hard_blocks]
+        execution_allowed = state == AgentState.READY and (
+            final_target_notional > 0 or (should_flatten_position and any(flag in hard_blocks for flag in flatten_reason_flags))
+        )
+        if state == AgentState.FAILED or hard_blocks:
+            risk_level = "high"
+        elif execution_allowed and not soft_flags:
+            risk_level = "low"
+        elif execution_allowed:
+            risk_level = "medium"
+        elif state == AgentState.SKIPPED:
+            risk_level = "high" if warnings else "medium"
+        else:
+            risk_level = "medium"
+        review_reason = str(decision.get("reason") or "").strip() or None
+        status = "failed" if state == AgentState.FAILED else "review_required" if action == "request_signal_review" else "ready" if execution_allowed else "blocked"
+
         return RiskAgentOutput(
             code=code,
             trade_date=trade_date,
-            state=AgentState.READY,
-            target_weight=round(target_weight, 6),
-            target_notional=round(target_notional, 2),
+            state=state,
+            target_weight=round(final_target_weight, 6),
+            target_notional=round(final_target_notional, 2),
             current_price=current_price,
             stop_loss=round(effective_stop_loss, 4) if effective_stop_loss is not None else None,
             take_profit=round(effective_take_profit, 4) if effective_take_profit is not None else None,
@@ -155,8 +316,46 @@ class RiskAgent:
             effective_take_profit=round(effective_take_profit, 4) if effective_take_profit is not None else None,
             position_cap_pct=round(position_cap_pct, 4),
             strategy_applied=strategy_applied,
-            hard_risk_triggered=bool(flags),
-            risk_flags=flags,
+            hard_risk_triggered=bool(warnings) or state != AgentState.READY,
+            risk_flags=warnings,
+            observations=observations,
+            decision=decision,
+            confidence=float(decision.get("confidence") or default_decision["confidence"]),
+            warnings=warnings,
+            llm_used=llm_used,
+            fallback_chain=["risk_rule", *(("llm_risk_planner",) if llm_used else ())],
+            next_action=next_action,
+            status=status,
+            risk_level=risk_level,
+            execution_allowed=execution_allowed,
+            hard_blocks=hard_blocks,
+            soft_flags=soft_flags,
+            review_reason=review_reason if action == "request_signal_review" else None,
+            suggested_next=next_action,
+        )
+
+    @staticmethod
+    def _build_risk_stage_prompt(
+        *,
+        code: str,
+        signal_output: SignalAgentOutput,
+        observations: list[dict[str, Any]],
+        target_weight: float,
+        target_notional: float,
+        flags: list[str],
+    ) -> str:
+        return (
+            "你是股票风控代理，只输出严格 JSON，不要输出解释、Markdown 或代码块。\n"
+            "允许 action 只有：continue_execution, skip_execution, request_signal_review, abort。\n"
+            "规则：1. 不能提高风险，只能维持或降低仓位；2. 若仓位、止盈止损或总暴露受限，可直接 skip_execution；"
+            "3. 如需回到信号阶段，只能返回 request_signal_review。\n\n"
+            f"股票代码：{code}\n"
+            f"信号输出：{signal_output.to_dict()}\n"
+            f"风险观测：{observations}\n"
+            f"当前目标仓位：{round(target_weight * 100.0, 4)}%\n"
+            f"当前目标金额：{round(target_notional, 2)}\n"
+            f"风险标记：{flags}\n\n"
+            "输出 JSON 字段：action, summary, reason, next_action, confidence, warnings, requested_target_weight_pct。"
         )
 
     def _weight_from_advice(self, advice: str) -> float:

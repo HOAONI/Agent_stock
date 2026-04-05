@@ -44,6 +44,8 @@ class _TestOrchestrator(AgentOrchestrator):
         initial_cash_override=None,
         runtime_config=None,
         account_name=None,
+        planning_context=None,
+        stage_observer=None,
     ):
         now = self._now()
         return AgentRunResult(

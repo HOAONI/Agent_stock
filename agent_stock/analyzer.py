@@ -52,6 +52,9 @@ STOCK_NAME_MAP = {
     "600900": "长江电力",
     "601166": "兴业银行",
     "600028": "中国石化",
+    "601899": "紫金矿业",
+    "601138": "工业富联",
+    "000333": "美的集团",
     # === 美股 ===
     "AAPL": "苹果",
     "TSLA": "特斯拉",
@@ -1733,9 +1736,13 @@ class GeminiAnalyzer:
 
 
 # 便捷函数
-def get_analyzer() -> GeminiAnalyzer:
-    """获取 LLM 分析器实例"""
-    return GeminiAnalyzer()
+def get_analyzer(
+    *,
+    config: Config | None = None,
+    runtime_llm: RuntimeLlmConfig | None = None,
+) -> GeminiAnalyzer:
+    """获取 LLM 分析器实例。"""
+    return GeminiAnalyzer(config=config, runtime_llm=runtime_llm)
 
 
 if __name__ == "__main__":

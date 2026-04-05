@@ -65,6 +65,26 @@ class BackendAgentChatClient:
             {"owner_user_id": owner_user_id, "refresh": bool(refresh)},
         )
 
+    async def get_account_state(self, *, owner_user_id: int, refresh: bool = True) -> dict[str, Any]:
+        return await self._post(
+            "/internal/v1/agent-chat/account-state",
+            {"owner_user_id": owner_user_id, "refresh": bool(refresh)},
+        )
+
+    async def get_user_preferences(
+        self,
+        *,
+        owner_user_id: int,
+        session_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._post(
+            "/internal/v1/agent-chat/user-preferences",
+            {
+                "owner_user_id": owner_user_id,
+                "session_overrides": session_overrides or {},
+            },
+        )
+
     async def get_analysis_history(
         self,
         *,
@@ -78,6 +98,24 @@ class BackendAgentChatClient:
                 "owner_user_id": owner_user_id,
                 "stock_codes": stock_codes or [],
                 "limit": max(1, min(int(limit), 20)),
+            },
+        )
+
+    async def save_analysis_records(
+        self,
+        *,
+        owner_user_id: int,
+        session_id: str,
+        assistant_message_id: int,
+        analysis_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self._post(
+            "/internal/v1/agent-chat/analysis-records",
+            {
+                "owner_user_id": owner_user_id,
+                "session_id": session_id,
+                "assistant_message_id": int(assistant_message_id),
+                "analysis_result": analysis_result,
             },
         )
 

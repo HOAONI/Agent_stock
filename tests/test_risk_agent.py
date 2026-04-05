@@ -12,6 +12,11 @@ from agent_stock.agents.risk_agent import RiskAgent
 from agent_stock.config import Config, RuntimeStrategyConfig
 
 
+class _UnavailableAnalyzer:
+    def is_available(self) -> bool:
+        return False
+
+
 class RiskAgentTestCase(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["AGENT_WEIGHT_STRONG_BUY"] = "0.5"
@@ -22,7 +27,7 @@ class RiskAgentTestCase(unittest.TestCase):
         os.environ["AGENT_MAX_SINGLE_POSITION_PCT"] = "0.5"
         os.environ["AGENT_MAX_TOTAL_EXPOSURE_PCT"] = "0.9"
         Config.reset_instance()
-        self.agent = RiskAgent()
+        self.agent = RiskAgent(analyzer=_UnavailableAnalyzer())
 
     def tearDown(self) -> None:
         Config.reset_instance()

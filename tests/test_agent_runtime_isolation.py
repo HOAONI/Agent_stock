@@ -38,6 +38,8 @@ class _CaptureOrchestrator:
         request_id=None,
         initial_cash_override=None,
         runtime_config=None,
+        planning_context=None,
+        stage_observer=None,
     ):
         with self._lock:
             self._counter += 1
@@ -49,6 +51,8 @@ class _CaptureOrchestrator:
                     "request_id": request_id,
                     "initial_cash_override": initial_cash_override,
                     "runtime_config": runtime_config,
+                    "planning_context": planning_context,
+                    "stage_observer": stage_observer,
                 }
             )
         now = datetime(2026, 2, 24, 10, 0, 0)
@@ -182,6 +186,10 @@ class AgentRuntimeIsolationTestCase(unittest.TestCase):
         # 确保请求级覆盖后，全局单例配置保持不变。
         self.assertEqual(self.service.config.openai_model, "gpt-env-default")
         self.assertEqual(self.service.config.openai_api_key, "env-openai-token-1234567890")
+
+    def test_run_once_rejects_empty_stock_codes(self):
+        with self.assertRaisesRegex(ValueError, "stock_codes must not be empty"):
+            self.service.run_once([], write_reports=False)
 
 
 if __name__ == "__main__":

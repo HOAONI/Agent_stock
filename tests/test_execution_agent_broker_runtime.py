@@ -15,6 +15,11 @@ from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.storage import DatabaseManager
 
 
+class _UnavailableAnalyzer:
+    def is_available(self) -> bool:
+        return False
+
+
 class _FakeBacktraderRuntimeService:
     def __init__(self) -> None:
         self.cash = 100000.0
@@ -114,7 +119,7 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_runtime_execution_context_remains_paper(self):
-        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
+        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo, analyzer=_UnavailableAnalyzer())
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
@@ -151,6 +156,7 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
             db_manager=self.db,
             execution_repo=self.repo,
             runtime_service=runtime_service,
+            analyzer=_UnavailableAnalyzer(),
         )
         trade_date = date.today()
         risk = RiskAgentOutput(
@@ -193,7 +199,7 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
         self.assertEqual(payload["direction"], "buy")
 
     def test_broker_mode_rejects_when_account_id_missing(self):
-        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo)
+        agent = ExecutionAgent(db_manager=self.db, execution_repo=self.repo, analyzer=_UnavailableAnalyzer())
         trade_date = date.today()
         risk = RiskAgentOutput(
             code="600519",
@@ -224,6 +230,7 @@ class ExecutionAgentBrokerRuntimeTestCase(unittest.TestCase):
             db_manager=self.db,
             execution_repo=self.repo,
             runtime_service=runtime_service,
+            analyzer=_UnavailableAnalyzer(),
         )
         trade_date = date.today()
         risk = RiskAgentOutput(

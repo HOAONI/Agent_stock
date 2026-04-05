@@ -15,6 +15,8 @@ from typing import Any
 from data_provider.base import canonical_stock_code
 
 from agent_stock.agents.contracts import AgentState, ExecutionAgentOutput, RiskAgentOutput
+from agent_stock.agents.agentic_decision import generate_structured_decision
+from agent_stock.analyzer import get_analyzer
 from agent_stock.repositories.execution_repo import ExecutionRepository
 from agent_stock.services.backtrader_runtime_service import get_backtrader_runtime_service
 from agent_stock.storage import DatabaseManager
@@ -30,12 +32,14 @@ class ExecutionAgent:
         db_manager: DatabaseManager | None = None,
         execution_repo: ExecutionRepository | None = None,
         runtime_service: Any | None = None,
+        analyzer=None,
     ) -> None:
         """初始化执行代理及其运行时依赖。"""
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = execution_repo or ExecutionRepository(self.db)
         self.runtime_service = runtime_service or get_backtrader_runtime_service()
+        self.analyzer = analyzer or get_analyzer()
 
     def run(
         self,
@@ -50,6 +54,8 @@ class ExecutionAgent:
         initial_cash_override: float | None = None,
         runtime_execution: RuntimeExecutionConfig | None = None,
         backend_task_id: str | None = None,
+        signal_output: Any | None = None,
+        data_output: Any | None = None,
     ) -> ExecutionAgentOutput:
         """按纸面模式或 broker 模拟模式执行单只股票决策。"""
         normalized_code = canonical_stock_code(code)
@@ -65,7 +71,7 @@ class ExecutionAgent:
         # broker 模式会真实调用本地运行时服务；paper 模式只做意图推演，不落订单。
         if runtime_mode == "broker":
             if broker_account_id <= 0:
-                return ExecutionAgentOutput(
+                output = ExecutionAgentOutput(
                     code=normalized_code,
                     trade_date=trade_date,
                     state=AgentState.FAILED,
@@ -79,27 +85,73 @@ class ExecutionAgent:
                     reason="invalid_broker_account",
                     error_message="runtime_execution.broker_account_id is required for broker mode",
                 )
-            return self._run_broker_execution(
-                run_id=run_id,
+            else:
+                output = self._run_broker_execution(
+                    run_id=run_id,
+                    code=normalized_code,
+                    trade_date=trade_date,
+                    current_price=current_price,
+                    risk_output=risk_output,
+                    account_snapshot=account_snapshot,
+                    account_name=resolved_account_name,
+                    initial_cash=initial_cash,
+                    broker_account_id=broker_account_id,
+                    backend_task_id=backend_task_id,
+                    signal_output=signal_output,
+                    data_output=data_output,
+                )
+        else:
+            output = self._run_paper_intent(
                 code=normalized_code,
                 trade_date=trade_date,
                 current_price=current_price,
                 risk_output=risk_output,
-                account_snapshot=account_snapshot,
                 account_name=resolved_account_name,
                 initial_cash=initial_cash,
-                broker_account_id=broker_account_id,
-                backend_task_id=backend_task_id,
+                account_snapshot=account_snapshot,
+                signal_output=signal_output,
+                data_output=data_output,
             )
+            output.execution_mode = "paper"
+            output.backend_task_id = backend_task_id
+            output.broker_requested = False
+            output.executed_via = "paper"
+            output.broker_ticket_id = None
+            output.fallback_reason = None
 
+        return self._attach_proposal_metadata(output, current_price=current_price)
+
+    def prepare_order(
+        self,
+        *,
+        code: str,
+        trade_date: date,
+        current_price: float,
+        risk_output: RiskAgentOutput,
+        account_snapshot: dict[str, Any] | None = None,
+        account_name: str | None = None,
+        initial_cash_override: float | None = None,
+        backend_task_id: str | None = None,
+        signal_output: Any | None = None,
+        data_output: Any | None = None,
+    ) -> ExecutionAgentOutput:
+        """Prepare a paper order without touching broker runtime side effects."""
+        resolved_account_name = account_name or str(getattr(self.config, "agent_account_name", "paper-default") or "paper-default")
+        initial_cash = (
+            float(initial_cash_override)
+            if initial_cash_override is not None
+            else float(getattr(self.config, "agent_initial_cash", 1_000_000.0))
+        )
         output = self._run_paper_intent(
-            code=normalized_code,
+            code=canonical_stock_code(code),
             trade_date=trade_date,
             current_price=current_price,
             risk_output=risk_output,
             account_name=resolved_account_name,
             initial_cash=initial_cash,
             account_snapshot=account_snapshot,
+            signal_output=signal_output,
+            data_output=data_output,
         )
         output.execution_mode = "paper"
         output.backend_task_id = backend_task_id
@@ -107,7 +159,82 @@ class ExecutionAgent:
         output.executed_via = "paper"
         output.broker_ticket_id = None
         output.fallback_reason = None
+        return self._attach_proposal_metadata(output, current_price=current_price)
+
+    def _attach_proposal_metadata(
+        self,
+        output: ExecutionAgentOutput,
+        *,
+        current_price: float,
+    ) -> ExecutionAgentOutput:
+        paper_submit_result = output.paper_submit_result if isinstance(output.paper_submit_result, dict) else {}
+        provider_status = str(paper_submit_result.get("status") or "").strip().lower()
+
+        if isinstance(output.proposed_order, dict) and output.proposal_state:
+            if not output.proposal_reason:
+                output.proposal_reason = output.adjustment_reason or output.reason
+            if provider_status in {"filled", "submitted"}:
+                output.proposal_state = "executed" if provider_status == "filled" else "submitted"
+            output.status = self._resolve_execution_status(output)
+            output.execution_allowed = output.proposal_state in {"proposed", "submitted", "executed"}
+            return output
+
+        final_order = output.final_order if isinstance(output.final_order, dict) else None
+        proposed_order: dict[str, Any] | None = None
+        proposal_state = output.proposal_state
+        if isinstance(final_order, dict) and int(final_order.get("quantity") or 0) > 0:
+            proposed_order = {
+                "code": str(final_order.get("code") or output.code),
+                "action": str(final_order.get("action") or output.action or ""),
+                "quantity": int(final_order.get("quantity") or 0),
+                "target_qty": int(final_order.get("target_qty") or output.target_qty or 0),
+                "price": round(float(final_order.get("price") or output.fill_price or current_price or 0.0), 4),
+            }
+            if output.execution_mode == "paper":
+                proposal_state = "proposed"
+            elif int(output.traded_qty or 0) > 0:
+                proposal_state = "executed"
+            else:
+                proposal_state = "submitted"
+        elif output.action in {"buy", "sell"} and int(output.traded_qty or 0) > 0:
+            proposed_order = {
+                "code": output.code,
+                "action": output.action,
+                "quantity": int(output.traded_qty or 0),
+                "target_qty": int(output.target_qty or 0),
+                "price": round(float(output.fill_price or current_price or 0.0), 4),
+            }
+            proposal_state = "executed" if output.execution_mode == "broker" else "proposed"
+        elif output.reason == "target_matched":
+            proposal_state = "not_needed"
+        else:
+            proposal_state = "blocked"
+
+        output.proposed_order = proposed_order
+        output.proposal_state = proposal_state
+        output.proposal_reason = output.adjustment_reason or output.reason
+        if provider_status in {"filled", "submitted"}:
+            output.proposal_state = "executed" if provider_status == "filled" else "submitted"
+        output.status = self._resolve_execution_status(output)
+        output.execution_allowed = output.proposal_state in {"proposed", "submitted", "executed"}
         return output
+
+    @staticmethod
+    def _resolve_execution_status(output: ExecutionAgentOutput) -> str:
+        if output.state == AgentState.FAILED:
+            return "failed"
+        proposal_state = str(output.proposal_state or "").strip()
+        if proposal_state == "executed":
+            return "executed"
+        if proposal_state == "submitted":
+            return "submitted"
+        if proposal_state == "proposed":
+            return "prepared"
+        if proposal_state == "not_needed":
+            return "not_needed"
+        if proposal_state == "blocked":
+            return "blocked"
+        return "ready" if output.state == AgentState.READY else "blocked"
 
     def _run_broker_execution(
         self,
@@ -122,6 +249,8 @@ class ExecutionAgent:
         initial_cash: float,
         broker_account_id: int,
         backend_task_id: str | None,
+        signal_output: Any | None,
+        data_output: Any | None,
     ) -> ExecutionAgentOutput:
         """调用本地 broker 运行时执行一笔模拟下单。"""
         # 先用 paper 口径推导出“理论上应该下什么单”，再决定是否真正调用 broker。
@@ -133,6 +262,8 @@ class ExecutionAgent:
             account_name=account_name,
             initial_cash=initial_cash,
             account_snapshot=account_snapshot,
+            signal_output=signal_output,
+            data_output=data_output,
         )
 
         snapshot_before = self._fetch_broker_snapshot(
@@ -378,6 +509,8 @@ class ExecutionAgent:
         account_name: str,
         initial_cash: float,
         account_snapshot: dict[str, Any] | None,
+        signal_output: Any | None = None,
+        data_output: Any | None = None,
     ) -> ExecutionAgentOutput:
         """在不真正下单的情况下推导纸面交易意图。"""
         if current_price <= 0:
@@ -388,6 +521,18 @@ class ExecutionAgent:
                 action="none",
                 reason="invalid_price",
                 error_message="current price is invalid",
+                decision={
+                    "action": "abort",
+                    "summary": "执行阶段拿到无效价格，无法继续生成订单。",
+                    "reason": "invalid_price",
+                    "next_action": "abort",
+                    "confidence": 0.05,
+                    "warnings": ["invalid_price"],
+                },
+                confidence=0.05,
+                warnings=["invalid_price"],
+                fallback_chain=["paper_execution"],
+                next_action="abort",
             )
 
         snapshot_before = self._normalize_snapshot(account_snapshot, account_name=account_name, initial_cash=initial_cash)
@@ -424,6 +569,17 @@ class ExecutionAgent:
                 position_before=current_qty,
                 position_after=current_qty,
                 account_snapshot=snapshot_before,
+                decision={
+                    "action": "continue",
+                    "summary": "当前仓位已与目标仓位一致，无需新增执行动作。",
+                    "reason": "target_matched",
+                    "next_action": "done",
+                    "confidence": 0.95,
+                    "warnings": [],
+                },
+                confidence=0.95,
+                fallback_chain=["paper_execution"],
+                next_action="done",
             )
 
         if delta > 0:
@@ -448,6 +604,18 @@ class ExecutionAgent:
                     position_before=current_qty,
                     position_after=current_qty,
                     account_snapshot=snapshot_before,
+                    decision={
+                        "action": "skip",
+                        "summary": "执行阶段判断当前现金不足，本轮不继续下单。",
+                        "reason": "insufficient_cash",
+                        "next_action": "done",
+                        "confidence": 0.94,
+                        "warnings": ["insufficient_cash"],
+                    },
+                    confidence=0.94,
+                    warnings=["insufficient_cash"],
+                    fallback_chain=["paper_execution"],
+                    next_action="done",
                 )
             fill_price = buy_price
         else:
@@ -467,8 +635,88 @@ class ExecutionAgent:
                     position_before=current_qty,
                     position_after=current_qty,
                     account_snapshot=snapshot_before,
+                    decision={
+                        "action": "skip",
+                        "summary": "执行阶段判断可卖持仓不足，本轮不继续下单。",
+                        "reason": "insufficient_position",
+                        "next_action": "done",
+                        "confidence": 0.94,
+                        "warnings": ["insufficient_position"],
+                    },
+                    confidence=0.94,
+                    warnings=["insufficient_position"],
+                    fallback_chain=["paper_execution"],
+                    next_action="done",
                 )
             fill_price = sell_price
+
+        original_order = {
+            "code": code,
+            "action": side,
+            "quantity": trade_qty,
+            "price": round(fill_price, 4),
+            "target_qty": target_qty,
+        }
+        adjustment = self._resolve_execution_adjustment(
+            code=code,
+            current_price=current_price,
+            lot=lot,
+            original_order=original_order,
+            risk_output=risk_output,
+            signal_output=signal_output,
+            data_output=data_output,
+        )
+        warnings = list(adjustment.get("warnings") or [])
+        decision = adjustment.get("decision") if isinstance(adjustment.get("decision"), dict) else {}
+        llm_used = bool(adjustment.get("llm_used"))
+        adjustment_action = str(adjustment.get("action") or "continue").strip() or "continue"
+        adjusted_qty = int(adjustment.get("quantity") or trade_qty)
+        adjusted_qty = min(trade_qty, max(0, adjusted_qty))
+        adjusted_qty = (adjusted_qty // lot) * lot
+        if adjustment_action == "skip" or adjusted_qty < lot:
+            return ExecutionAgentOutput(
+                code=code,
+                trade_date=trade_date,
+                state=AgentState.SKIPPED,
+                action="none",
+                reason=str(adjustment.get("reason") or "execution_skipped"),
+                target_qty=target_qty,
+                traded_qty=0,
+                cash_before=cash_before,
+                cash_after=cash_before,
+                position_before=current_qty,
+                position_after=current_qty,
+                account_snapshot=snapshot_before,
+                observations=list(adjustment.get("observations") or []),
+                decision=decision or {
+                    "action": "skip",
+                    "summary": "执行阶段因异常波动主动放弃本轮下单。",
+                    "reason": "execution_skipped",
+                    "next_action": "done",
+                    "confidence": 0.88,
+                    "warnings": warnings,
+                },
+                confidence=float((decision or {}).get("confidence") or 0.88),
+                warnings=warnings,
+                llm_used=llm_used,
+                fallback_chain=["paper_execution", *(("llm_execution_planner",) if llm_used else ())],
+                next_action="done",
+                original_order=original_order,
+                final_order=None,
+                adjustment_applied=bool(adjustment.get("adjustment_applied")),
+                adjustment_reason=str(adjustment.get("adjustment_reason") or adjustment.get("reason") or "execution_skipped"),
+                risk_reduction_only=True,
+            )
+
+        trade_qty = adjusted_qty
+        fill_price = float(adjustment.get("price") or fill_price)
+        final_order = {
+            "code": code,
+            "action": side,
+            "quantity": trade_qty,
+            "price": round(fill_price, 4),
+            "target_qty": target_qty,
+        }
 
         gross_amount = fill_price * float(trade_qty)
         fee = gross_amount * fee_rate
@@ -504,7 +752,7 @@ class ExecutionAgent:
             trade_date=trade_date,
             state=AgentState.READY,
             action=side,
-            reason="intent_generated",
+            reason=str(adjustment.get("reason") or "intent_generated"),
             target_qty=target_qty,
             traded_qty=trade_qty,
             fill_price=round(fill_price, 4),
@@ -515,6 +763,164 @@ class ExecutionAgent:
             position_before=current_qty,
             position_after=position_after_qty,
             account_snapshot=snapshot_after,
+            observations=list(adjustment.get("observations") or []),
+            decision=decision or {
+                "action": "continue",
+                "summary": "执行阶段已生成可提交的保守订单。",
+                "reason": "intent_generated",
+                "next_action": "done",
+                "confidence": 0.8,
+                "warnings": warnings,
+            },
+            confidence=float((decision or {}).get("confidence") or 0.8),
+            warnings=warnings,
+            llm_used=llm_used,
+            fallback_chain=["paper_execution", *(("llm_execution_planner",) if llm_used else ())],
+            next_action="done",
+            original_order=original_order,
+            final_order=final_order,
+            adjustment_applied=bool(adjustment.get("adjustment_applied")),
+            adjustment_reason=str(adjustment.get("adjustment_reason") or ""),
+            risk_reduction_only=bool(adjustment.get("risk_reduction_only", False)),
+        )
+
+    def _resolve_execution_adjustment(
+        self,
+        *,
+        code: str,
+        current_price: float,
+        lot: int,
+        original_order: dict[str, Any],
+        risk_output: RiskAgentOutput,
+        signal_output: Any | None,
+        data_output: Any | None,
+    ) -> dict[str, Any]:
+        """根据波动和风险状态，将原始订单调整为更保守的执行计划。"""
+        today = data_output.analysis_context.get("today") if data_output and isinstance(data_output.analysis_context, dict) else {}
+        yesterday = data_output.analysis_context.get("yesterday") if data_output and isinstance(data_output.analysis_context, dict) else {}
+        change_pct = data_output.realtime_quote.get("change_pct") if data_output and isinstance(data_output.realtime_quote, dict) else None
+        if change_pct is None and isinstance(today, dict):
+            change_pct = today.get("pct_chg")
+        open_price = float(today.get("open") or 0.0) if isinstance(today, dict) else 0.0
+        high_price = float(today.get("high") or 0.0) if isinstance(today, dict) else 0.0
+        low_price = float(today.get("low") or 0.0) if isinstance(today, dict) else 0.0
+        previous_close = float(yesterday.get("close") or 0.0) if isinstance(yesterday, dict) else 0.0
+        today_close = float(today.get("close") or 0.0) if isinstance(today, dict) else 0.0
+        reference_price = previous_close or today_close or open_price or current_price
+        amplitude_pct = ((high_price - low_price) / open_price * 100.0) if open_price > 0 and high_price > 0 and low_price > 0 else 0.0
+        deviation_pct = abs((current_price - reference_price) / reference_price * 100.0) if reference_price > 0 else 0.0
+        change_pct_value = abs(float(change_pct or 0.0))
+        volatility_score = max(change_pct_value, amplitude_pct, deviation_pct)
+
+        observations = [
+            {
+                "current_price": round(current_price, 4),
+                "reference_price": round(reference_price, 4),
+                "change_pct": round(float(change_pct or 0.0), 4),
+                "amplitude_pct": round(amplitude_pct, 4),
+                "deviation_pct": round(deviation_pct, 4),
+                "volatility_score": round(volatility_score, 4),
+                "risk_flags": list(risk_output.risk_flags or []),
+                "signal_advice": getattr(signal_output, "operation_advice", None),
+            }
+        ]
+        warnings: list[str] = []
+
+        default_action = "continue"
+        default_factor = 1.0
+        adjustment_reason = ""
+        if volatility_score >= 9.0 or deviation_pct >= 6.0:
+            default_action = "skip"
+            default_factor = 0.0
+            adjustment_reason = "price_anomaly_skip"
+            warnings.append("price_anomaly_skip")
+        elif volatility_score >= 5.0 or deviation_pct >= 3.5:
+            default_action = "split" if int(original_order.get("quantity") or 0) >= lot * 2 else "reduce"
+            default_factor = 0.5
+            adjustment_reason = "price_volatility_reduce"
+            warnings.append("price_volatility_reduce")
+
+        default_decision = {
+            "action": default_action,
+            "summary": (
+                "价格波动在可接受范围内，保留原执行计划。"
+                if default_action == "continue"
+                else "当前价格波动偏大，执行阶段将主动降低风险后再执行。"
+                if default_action in {"reduce", "split"}
+                else "当前价格异常波动较大，执行阶段决定放弃本轮下单。"
+            ),
+            "reason": adjustment_reason or "execution_ready",
+            "next_action": "done",
+            "confidence": 0.86 if default_action == "continue" else 0.73 if default_action in {"reduce", "split"} else 0.91,
+            "warnings": warnings,
+            "requested_notional_factor": default_factor,
+            "adjustment_mode": default_action,
+            "adjustment_reason": adjustment_reason,
+        }
+        decision, llm_used = generate_structured_decision(
+            analyzer=self.analyzer,
+            stage="execution",
+            prompt=self._build_execution_stage_prompt(
+                code=code,
+                original_order=original_order,
+                observations=observations,
+                risk_output=risk_output,
+            ),
+            allowed_actions={"continue", "reduce", "split", "skip"},
+            default_decision=default_decision,
+        )
+        for item in decision.get("warnings") or []:
+            if isinstance(item, str) and item not in warnings:
+                warnings.append(item)
+
+        action = str(decision.get("action") or default_action).strip() or default_action
+        try:
+            factor = float(decision.get("requested_notional_factor") if decision.get("requested_notional_factor") is not None else default_factor)
+        except (TypeError, ValueError):
+            factor = default_factor
+        factor = max(0.0, min(factor, 1.0))
+        original_qty = int(original_order.get("quantity") or 0)
+        adjusted_qty = original_qty if action == "continue" else int((original_qty * factor) // lot) * lot
+        if action == "reduce" and adjusted_qty >= original_qty:
+            adjusted_qty = max(0, original_qty - lot)
+        if action == "split":
+            if original_qty < lot * 2:
+                adjusted_qty = 0
+            elif adjusted_qty >= original_qty:
+                adjusted_qty = max(lot, (original_qty // 2 // lot) * lot)
+
+        return {
+            "action": action,
+            "quantity": adjusted_qty,
+            "price": float(original_order.get("price") or current_price),
+            "reason": str(decision.get("reason") or adjustment_reason or "execution_ready"),
+            "decision": decision,
+            "warnings": warnings,
+            "llm_used": llm_used,
+            "observations": observations,
+            "adjustment_applied": action != "continue" and (adjusted_qty != original_qty or action == "skip"),
+            "adjustment_reason": str(decision.get("adjustment_reason") or adjustment_reason or action),
+            "risk_reduction_only": action in {"reduce", "split", "skip"},
+        }
+
+    @staticmethod
+    def _build_execution_stage_prompt(
+        *,
+        code: str,
+        original_order: dict[str, Any],
+        observations: list[dict[str, Any]],
+        risk_output: RiskAgentOutput,
+    ) -> str:
+        return (
+            "你是股票执行代理，只输出严格 JSON，不要输出解释、Markdown 或代码块。\n"
+            "允许 action 只有：continue, reduce, split, skip。\n"
+            "规则：1. 只能维持或降低风险，绝不能放大数量；2. 波动异常时优先 reduce、split 或 skip；"
+            "3. requested_notional_factor 必须在 0 到 1 之间。\n\n"
+            f"股票代码：{code}\n"
+            f"原始订单：{original_order}\n"
+            f"执行观测：{observations}\n"
+            f"风控输出：{risk_output.to_dict()}\n\n"
+            "输出 JSON 字段：action, summary, reason, next_action, confidence, warnings, requested_notional_factor, adjustment_mode, adjustment_reason。"
         )
 
     @staticmethod

@@ -20,7 +20,7 @@ from agent_api.v1.schemas.chat import (
     InternalChatRequest,
 )
 from agent_api.v1.schemas.common import ErrorResponse
-from agent_stock.services.agent_chat_service import AgentChatService
+from agent_stock.services.agent_chat_service import AgentChatHandledError, AgentChatService
 from agent_stock.config import redact_sensitive_text
 
 router = APIRouter()
@@ -51,6 +51,8 @@ async def create_chat(
             status_code=400,
             detail={"error": "validation_error", "message": redact_sensitive_text(str(exc))},
         ) from exc
+    except AgentChatHandledError as exc:
+        return ChatDoneResponse.model_validate(exc.final_payload)
     except Exception as exc:
         logger.exception("Internal agent chat request failed")
         raise HTTPException(
@@ -86,6 +88,8 @@ async def create_chat_stream(
                     {"message": redact_sensitive_text(str(exc)), "error": "validation_error"},
                 )
             )
+        except AgentChatHandledError as exc:
+            await queue.put(_to_sse("done", ChatDoneResponse.model_validate(exc.final_payload).model_dump()))
         except Exception as exc:
             logger.exception("Internal agent chat stream failed")
             await queue.put(

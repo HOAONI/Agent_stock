@@ -196,6 +196,16 @@ class AgentTaskService:
         """按 `run_id` 查询运行结果。"""
         return self.repo.get_agent_run(run_id)
 
+    def get_runtime_stats(self) -> dict[str, Any]:
+        """返回当前任务池占用情况，供聊天主控和诊断面板使用。"""
+        with self._lock:
+            inflight_count = len(self._futures)
+        return {
+            "max_workers": self._max_workers,
+            "inflight_count": inflight_count,
+            "saturated": inflight_count >= self._max_workers,
+        }
+
     def list_runs(
         self,
         *,

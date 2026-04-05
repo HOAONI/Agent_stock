@@ -116,6 +116,23 @@ class AgentOrchestratorOnceTestCase(unittest.TestCase):
         self.assertEqual(result.results[0].code, "600519")
         self.assertEqual(result.results[1].code, "000001")
 
+    def test_run_once_rejects_empty_stock_codes(self):
+        tz = ZoneInfo("Asia/Shanghai")
+        now = datetime(2026, 2, 23, 10, 0, tzinfo=tz)
+        orchestrator = AgentOrchestrator(
+            data_agent=_FakeDataAgent(),
+            signal_agent=_FakeSignalAgent(),
+            risk_agent=_FakeRiskAgent(),
+            execution_agent=_FakeExecutionAgent(),
+            execution_repo=_DummyRepo(),
+            market_guard=MarketSessionGuard("Asia/Shanghai", "09:30-11:30,13:00-15:00"),
+            now_provider=lambda: now,
+            sleep_func=lambda _: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "stock_codes must not be empty"):
+            orchestrator.run_once([])
+
 
 if __name__ == "__main__":
     unittest.main()

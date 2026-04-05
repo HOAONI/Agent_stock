@@ -17,6 +17,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from agent_stock.agents.contracts import AgentRunResult, StockAgentResult
+from agent_stock.agents.controller_agent import ControllerAgent, ControllerContext
 from agent_stock.agents.data_agent import DataAgent
 from agent_stock.agents.execution_agent import ExecutionAgent
 from agent_stock.agents.risk_agent import RiskAgent
@@ -90,6 +91,7 @@ class AgentOrchestrator:
         signal_agent: SupportsSignalAgent | None = None,
         risk_agent: SupportsRiskAgent | None = None,
         execution_agent: SupportsExecutionAgent | None = None,
+        controller_agent: ControllerAgent | None = None,
         execution_repo: ExecutionRepository | Any | None = None,
         market_guard: SupportsMarketSessionGuard | None = None,
         now_provider: Callable[[], datetime] | None = None,
@@ -108,6 +110,7 @@ class AgentOrchestrator:
         self.execution_agent = execution_agent or ExecutionAgent(
             config=self.config, db_manager=self.db, execution_repo=self.repo
         )
+        self.controller_agent = controller_agent or ControllerAgent(config=self.config)
 
         self.market_guard = market_guard or MarketSessionGuard(
             timezone_name=str(getattr(self.config, "agent_market_timezone", "Asia/Shanghai")),
@@ -126,8 +129,14 @@ class AgentOrchestrator:
         account_name: str | None = None,
         initial_cash_override: float | None = None,
         runtime_config: AgentRuntimeConfig | None = None,
+        planning_context: dict[str, Any] | None = None,
+        paper_order_submitter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        stage_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentRunResult:
         """按顺序执行一次完整的多股票运行周期。"""
+        stock_codes = [str(code or "").strip() for code in stock_codes if str(code or "").strip()]
+        if not stock_codes:
+            raise ValueError("stock_codes must not be empty")
         run_id = uuid.uuid4().hex
         started_at = self._now()
         trade_date = started_at.date()
@@ -145,169 +154,98 @@ class AgentOrchestrator:
             initial_cash=initial_cash,
         )
 
+        controller_context = ControllerContext(
+            stock_codes=list(stock_codes),
+            account_name=account_name,
+            initial_cash=initial_cash,
+            request_id=request_id,
+            runtime_config=runtime_config,
+            planning_context=planning_context,
+            paper_order_submitter=paper_order_submitter,
+        )
+        controller_plan = self.controller_agent.build_plan(context=controller_context)
+        if stage_observer is not None:
+            stage_observer(
+                {
+                    "event": "supervisor_plan",
+                    "goal": controller_plan.get("goal"),
+                    "stock_codes": list(stock_codes),
+                    "stage_priority": controller_plan.get("stage_priority"),
+                    "include_runtime_context": controller_plan.get("include_runtime_context"),
+                    "autonomous_execution_authorized": controller_plan.get("autonomous_execution_authorized"),
+                    "tool_registry": controller_plan.get("tool_registry"),
+                    "policy_snapshot": controller_plan.get("policy_snapshot"),
+                }
+            )
+
         # 这份账户快照会在同一轮多股票执行过程中不断递推，模拟同一账户连续处理多只股票。
         per_stock: list[StockAgentResult] = []
-        fixed_market_source = (
-            runtime_config.data_source.market_source if runtime_config and runtime_config.data_source else None
-        )
+        stage_traces: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+        decision_panel: list[dict[str, Any]] = []
+        planner_trace: list[dict[str, Any]] = []
+        condition_evaluations: list[dict[str, Any]] = []
+        stock_termination_reasons: list[str] = []
+        total_replans = 0
+        execution_orders: list[dict[str, Any]] = []
+        failed_orders: list[dict[str, Any]] = []
 
         for raw_code in stock_codes:
-            # 每只股票都走同一条四阶段链路，并把阶段快照写进最终运行结果。
-            logger.info("[run:%s][%s] data stage start", run_id, raw_code)
-            data_started = time.perf_counter()
-            data_out = self.data_agent.run(raw_code, runtime_config=runtime_config)
-            data_out.duration_ms = int((time.perf_counter() - data_started) * 1000)
-            data_out.input = {"code": raw_code}
-            data_out.output = {
-                "state": data_out.state.value,
-                "data_source": data_out.data_source,
-                "has_analysis_context": bool(data_out.analysis_context),
-                "has_realtime_quote": bool(data_out.realtime_quote),
-            }
-            logger.info(
-                "[run:%s][%s] data stage done duration=%sms state=%s",
-                run_id,
-                data_out.code,
-                data_out.duration_ms,
-                data_out.state.value,
-            )
-            if fixed_market_source and data_out.state.value == "failed":
-                raise RuntimeError(
-                    f"[market_source_unavailable] {data_out.error_message or f'{fixed_market_source} data fetch failed'}"
-                )
-
-            logger.info("[run:%s][%s] signal stage start", run_id, data_out.code)
-            signal_started = time.perf_counter()
-            signal_out = self.signal_agent.run(data_out, runtime_config=runtime_config)
-            signal_out.duration_ms = int((time.perf_counter() - signal_started) * 1000)
-            signal_out.input = {
-                "code": data_out.code,
-                "trade_date": trade_date.isoformat(),
-                "runtime_llm": bool(runtime_config and runtime_config.llm is not None),
-            }
-            signal_out.output = {
-                "operation_advice": signal_out.operation_advice,
-                "sentiment_score": signal_out.sentiment_score,
-                "trend_signal": signal_out.trend_signal,
-                "stop_loss": signal_out.stop_loss,
-                "take_profit": signal_out.take_profit,
-            }
-            logger.info(
-                "[run:%s][%s] signal stage done duration=%sms state=%s advice=%s",
-                run_id,
-                data_out.code,
-                signal_out.duration_ms,
-                signal_out.state.value,
-                signal_out.operation_advice,
-            )
-
-            # 风控与执行都依赖统一价格口径，优先实时价，再退回收盘价/昨收价。
-            current_price = self._resolve_current_price(data_out)
-            account_snapshot = self._normalize_account_snapshot(
-                working_account_snapshot,
-                account_name=account_name,
-                initial_cash=initial_cash,
-            )
-            current_position_value = self._current_position_value(account_snapshot, data_out.code)
-
-            logger.info("[run:%s][%s] risk stage start", run_id, data_out.code)
-            risk_started = time.perf_counter()
-            risk_out = self.risk_agent.run(
-                code=data_out.code,
+            logger.info("[run:%s][%s] controller stock start", run_id, raw_code)
+            result, working_account_snapshot, stock_traces, stock_warnings = self.controller_agent.run_stock(
+                code=raw_code,
                 trade_date=trade_date,
-                current_price=current_price,
-                signal_output=signal_out,
-                account_snapshot=account_snapshot,
-                current_position_value=current_position_value,
-                runtime_strategy=(runtime_config.strategy if runtime_config else None),
-            )
-            risk_out.duration_ms = int((time.perf_counter() - risk_started) * 1000)
-            risk_out.input = {
-                "code": data_out.code,
-                "current_price": current_price,
-                "operation_advice": signal_out.operation_advice,
-                "runtime_strategy_applied": bool(runtime_config and runtime_config.strategy is not None),
-                "current_position_value": current_position_value,
-            }
-            risk_out.output = {
-                "target_weight": risk_out.target_weight,
-                "target_notional": risk_out.target_notional,
-                "risk_flags": risk_out.risk_flags,
-                "effective_stop_loss": risk_out.effective_stop_loss,
-                "effective_take_profit": risk_out.effective_take_profit,
-                "position_cap_pct": risk_out.position_cap_pct,
-                "strategy_applied": risk_out.strategy_applied,
-            }
-            logger.info(
-                "[run:%s][%s] risk stage done duration=%sms target_weight=%s",
-                run_id,
-                data_out.code,
-                risk_out.duration_ms,
-                risk_out.target_weight,
-            )
-
-            logger.info("[run:%s][%s] execution stage start", run_id, data_out.code)
-            execution_started = time.perf_counter()
-            execution_out = self.execution_agent.run(
-                run_id=run_id,
-                code=data_out.code,
-                trade_date=trade_date,
-                current_price=current_price,
-                risk_output=risk_out,
-                account_snapshot=account_snapshot,
-                account_name=account_name,
-                initial_cash_override=initial_cash_override,
-                runtime_execution=(runtime_config.execution if runtime_config else None),
-                backend_task_id=request_id,
-            )
-            execution_out.duration_ms = int((time.perf_counter() - execution_started) * 1000)
-            execution_out.input = {
-                "code": data_out.code,
-                "account_name": account_name,
-                "backend_task_id": request_id,
-                "execution_mode": execution_out.execution_mode,
-                "current_price": current_price,
-                "target_weight": risk_out.target_weight,
-                "target_notional": risk_out.target_notional,
-            }
-            execution_out.output = {
-                "action": execution_out.action,
-                "reason": execution_out.reason,
-                "traded_qty": execution_out.traded_qty,
-                "position_after": execution_out.position_after,
-                "cash_after": execution_out.cash_after,
-                "executed_via": execution_out.executed_via,
-                "broker_requested": execution_out.broker_requested,
-                "broker_ticket_id": execution_out.broker_ticket_id,
-                "fallback_reason": execution_out.fallback_reason,
-            }
-            logger.info(
-                "[run:%s][%s] execution stage done duration=%sms action=%s via=%s",
-                run_id,
-                data_out.code,
-                execution_out.duration_ms,
-                execution_out.action,
-                execution_out.executed_via,
-            )
-            if execution_out.account_snapshot:
-                # 执行阶段可能改变现金和持仓，后续股票要基于最新账户状态继续决策。
-                working_account_snapshot = self._normalize_account_snapshot(
-                    execution_out.account_snapshot,
+                current_account_snapshot=self._normalize_account_snapshot(
+                    working_account_snapshot,
                     account_name=account_name,
                     initial_cash=initial_cash,
-                )
-
-            per_stock.append(
-                StockAgentResult(
-                    code=data_out.code,
-                    data=data_out,
-                    signal=signal_out,
-                    risk=risk_out,
-                    execution=execution_out,
-                )
+                ),
+                context=controller_context,
+                controller_plan=controller_plan,
+                data_agent=self.data_agent,
+                signal_agent=self.signal_agent,
+                risk_agent=self.risk_agent,
+                execution_agent=self.execution_agent,
+                stage_observer=stage_observer,
             )
+            per_stock.append(result)
+            stage_traces.extend(stock_traces)
+            warnings.extend(stock_warnings)
+            planner_trace.extend([dict(item) for item in result.planner_trace if isinstance(item, dict)])
+            condition_evaluations.extend([dict(item) for item in result.condition_evaluations if isinstance(item, dict)])
+            stock_termination_reasons.append(str(result.termination_reason or ""))
+            total_replans += int(result.replan_count or 0)
+            decision_panel.extend(
+                [
+                    {
+                        "stock_code": trace.get("stock_code"),
+                        "stage": trace.get("stage"),
+                        "summary": trace.get("summary"),
+                        "confidence": trace.get("confidence"),
+                        "warnings": trace.get("warnings"),
+                    }
+                    for trace in stock_traces
+                ]
+            )
+            if isinstance(result.execution_result, dict) and result.execution_result:
+                status = str(result.execution_result.get("status") or "").strip().lower()
+                if status in {"filled", "submitted"}:
+                    execution_orders.append(dict(result.execution_result))
+                else:
+                    failed_orders.append(dict(result.execution_result))
+            logger.info("[run:%s][%s] controller stock done", run_id, raw_code)
 
         ended_at = self._now()
+        execution_result: dict[str, Any] | None = None
+        if execution_orders or failed_orders:
+            execution_result = {
+                "mode": "single" if len(execution_orders) + len(failed_orders) == 1 else "batch",
+                "executed_count": len(execution_orders),
+                "failed_count": len(failed_orders),
+                "orders": execution_orders,
+                "failed_orders": failed_orders,
+                "status": "filled" if execution_orders and not failed_orders else "partial" if execution_orders else "failed",
+            }
         return AgentRunResult(
             run_id=run_id,
             mode=mode,
@@ -316,6 +254,21 @@ class AgentOrchestrator:
             trade_date=trade_date,
             results=per_stock,
             account_snapshot=working_account_snapshot,
+            controller_plan=controller_plan,
+            portfolio_decision={
+                "stock_count": len(stock_codes),
+                "executed_stock_count": sum(1 for item in per_stock if item.execution.action in {"buy", "sell"}),
+                "warning_count": len(warnings),
+            },
+            warnings=warnings,
+            stage_traces=stage_traces,
+            decision_panel=decision_panel,
+            planner_trace=planner_trace,
+            condition_evaluations=condition_evaluations,
+            termination_reason="execution_completed" if execution_orders else next((item for item in stock_termination_reasons if item), None),
+            replan_count=total_replans,
+            policy_snapshot=dict(controller_plan.get("policy_snapshot") or {}),
+            execution_result=execution_result,
         )
 
     def run_once(
@@ -326,24 +279,35 @@ class AgentOrchestrator:
         account_name: str | None = None,
         initial_cash_override: float | None = None,
         runtime_config: AgentRuntimeConfig | None = None,
+        planning_context: dict[str, Any] | None = None,
+        paper_order_submitter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        stage_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentRunResult:
         """执行一次不受交易时段约束的单轮运行。"""
         if account_name is None:
-            return self.run_cycle(
-                stock_codes,
-                mode="once",
-                request_id=request_id,
-                initial_cash_override=initial_cash_override,
-                runtime_config=runtime_config,
-            )
-        return self.run_cycle(
-            stock_codes,
-            mode="once",
-            request_id=request_id,
-            account_name=account_name,
-            initial_cash_override=initial_cash_override,
-            runtime_config=runtime_config,
-        )
+            kwargs = {
+                "mode": "once",
+                "request_id": request_id,
+                "initial_cash_override": initial_cash_override,
+                "runtime_config": runtime_config,
+                "planning_context": planning_context,
+                "stage_observer": stage_observer,
+            }
+            if paper_order_submitter is not None:
+                kwargs["paper_order_submitter"] = paper_order_submitter
+            return self.run_cycle(stock_codes, **kwargs)
+        kwargs = {
+            "mode": "once",
+            "request_id": request_id,
+            "account_name": account_name,
+            "initial_cash_override": initial_cash_override,
+            "runtime_config": runtime_config,
+            "planning_context": planning_context,
+            "stage_observer": stage_observer,
+        }
+        if paper_order_submitter is not None:
+            kwargs["paper_order_submitter"] = paper_order_submitter
+        return self.run_cycle(stock_codes, **kwargs)
 
     def run_realtime(
         self,
@@ -356,6 +320,9 @@ class AgentOrchestrator:
         account_name: str | None = None,
         initial_cash_override: float | None = None,
         runtime_config: AgentRuntimeConfig | None = None,
+        planning_context: dict[str, Any] | None = None,
+        paper_order_submitter: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        stage_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[AgentRunResult]:
         """按配置交易时段执行循环运行。"""
         if interval_minutes <= 0:
@@ -370,22 +337,30 @@ class AgentOrchestrator:
             if self.market_guard.is_market_open(now):
                 if next_run_at is None or now >= next_run_at:
                     if account_name is None:
-                        cycle_result = self.run_cycle(
-                            stock_codes,
-                            mode="realtime",
-                            request_id=request_id,
-                            initial_cash_override=initial_cash_override,
-                            runtime_config=runtime_config,
-                        )
+                        kwargs = {
+                            "mode": "realtime",
+                            "request_id": request_id,
+                            "initial_cash_override": initial_cash_override,
+                            "runtime_config": runtime_config,
+                            "planning_context": planning_context,
+                            "stage_observer": stage_observer,
+                        }
+                        if paper_order_submitter is not None:
+                            kwargs["paper_order_submitter"] = paper_order_submitter
+                        cycle_result = self.run_cycle(stock_codes, **kwargs)
                     else:
-                        cycle_result = self.run_cycle(
-                            stock_codes,
-                            mode="realtime",
-                            request_id=request_id,
-                            account_name=account_name,
-                            initial_cash_override=initial_cash_override,
-                            runtime_config=runtime_config,
-                        )
+                        kwargs = {
+                            "mode": "realtime",
+                            "request_id": request_id,
+                            "account_name": account_name,
+                            "initial_cash_override": initial_cash_override,
+                            "runtime_config": runtime_config,
+                            "planning_context": planning_context,
+                            "stage_observer": stage_observer,
+                        }
+                        if paper_order_submitter is not None:
+                            kwargs["paper_order_submitter"] = paper_order_submitter
+                        cycle_result = self.run_cycle(stock_codes, **kwargs)
                     results.append(cycle_result)
                     cycles += 1
                     next_run_at = self._next_aligned_time(now, interval_minutes)

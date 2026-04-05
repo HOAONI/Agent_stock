@@ -57,20 +57,41 @@ class AgentService:
         request_id: str | None = None,
         write_reports: bool | None = None,
         runtime_config: dict[str, Any] | None = None,
+        planning_context: dict[str, Any] | None = None,
+        paper_order_submitter: Any | None = None,
+        stage_observer: Any | None = None,
     ) -> AgentRunResult:
         """执行一次完整周期，并持久化运行快照。"""
+        if not [str(code or "").strip() for code in stock_codes if str(code or "").strip()]:
+            raise ValueError("stock_codes must not be empty")
         # 先把请求级账户、初始资金和 LLM/策略覆盖项解析清楚，再进入主链路。
         runtime_ctx = self._resolve_runtime_context(
             account_name=account_name,
             runtime_config=runtime_config,
         )
-        result = self.orchestrator.run_once(
-            stock_codes,
-            account_name=runtime_ctx.account_name,
-            request_id=request_id,
-            initial_cash_override=runtime_ctx.initial_cash_override,
-            runtime_config=runtime_ctx.runtime_config,
-        )
+        run_once_kwargs = {
+            "account_name": runtime_ctx.account_name,
+            "request_id": request_id,
+            "initial_cash_override": runtime_ctx.initial_cash_override,
+            "runtime_config": runtime_ctx.runtime_config,
+            "planning_context": planning_context,
+            "stage_observer": stage_observer,
+        }
+        if paper_order_submitter is not None:
+            run_once_kwargs["paper_order_submitter"] = paper_order_submitter
+        try:
+            result = self.orchestrator.run_once(
+                stock_codes,
+                **run_once_kwargs,
+            )
+        except TypeError as exc:
+            if "paper_order_submitter" not in str(exc):
+                raise
+            run_once_kwargs.pop("paper_order_submitter", None)
+            result = self.orchestrator.run_once(
+                stock_codes,
+                **run_once_kwargs,
+            )
         self._finalize_run(
             run_result=result,
             account_name=runtime_ctx.account_name,
@@ -87,21 +108,42 @@ class AgentService:
         account_name: str | None = None,
         write_reports: bool | None = None,
         runtime_config: dict[str, Any] | None = None,
+        planning_context: dict[str, Any] | None = None,
+        paper_order_submitter: Any | None = None,
+        stage_observer: Any | None = None,
     ) -> list[AgentRunResult]:
         """执行实时循环，并在每个周期结束后落库。"""
+        if not [str(code or "").strip() for code in stock_codes if str(code or "").strip()]:
+            raise ValueError("stock_codes must not be empty")
         runtime_ctx = self._resolve_runtime_context(
             account_name=account_name,
             runtime_config=runtime_config,
         )
-        run_results = self.orchestrator.run_realtime(
-            stock_codes,
-            interval_minutes=interval_minutes,
-            max_cycles=max_cycles,
-            heartbeat_sleep=5.0,
-            account_name=runtime_ctx.account_name,
-            initial_cash_override=runtime_ctx.initial_cash_override,
-            runtime_config=runtime_ctx.runtime_config,
-        )
+        realtime_kwargs = {
+            "interval_minutes": interval_minutes,
+            "max_cycles": max_cycles,
+            "heartbeat_sleep": 5.0,
+            "account_name": runtime_ctx.account_name,
+            "initial_cash_override": runtime_ctx.initial_cash_override,
+            "runtime_config": runtime_ctx.runtime_config,
+            "planning_context": planning_context,
+            "stage_observer": stage_observer,
+        }
+        if paper_order_submitter is not None:
+            realtime_kwargs["paper_order_submitter"] = paper_order_submitter
+        try:
+            run_results = self.orchestrator.run_realtime(
+                stock_codes,
+                **realtime_kwargs,
+            )
+        except TypeError as exc:
+            if "paper_order_submitter" not in str(exc):
+                raise
+            realtime_kwargs.pop("paper_order_submitter", None)
+            run_results = self.orchestrator.run_realtime(
+                stock_codes,
+                **realtime_kwargs,
+            )
         should_write_reports = self._resolve_write_reports(write_reports)
         # 实时模式会产出多个周期结果，但落库和报表写出规则要保持一致。
         for item in run_results:
@@ -121,6 +163,8 @@ class AgentService:
         runtime_config: dict[str, Any] | None = None,
     ) -> dict:
         """通过任务服务提交异步运行。"""
+        if not [str(code or "").strip() for code in stock_codes if str(code or "").strip()]:
+            raise ValueError("stock_codes must not be empty")
         from agent_stock.services.agent_task_service import get_agent_task_service
 
         # 异步模式只负责投递任务，真正执行仍然回到同一个 AgentService。

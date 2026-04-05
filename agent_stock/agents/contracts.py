@@ -31,6 +31,18 @@ class DataAgentOutput:
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     error_message: str | None = None
+    observations: list[dict[str, Any]] = field(default_factory=list)
+    decision: dict[str, Any] = field(default_factory=dict)
+    confidence: float | None = None
+    warnings: list[str] = field(default_factory=list)
+    llm_used: bool = False
+    fallback_chain: list[str] = field(default_factory=list)
+    next_action: str | None = None
+    status: str = "pending"
+    retryable: bool = False
+    source_attempts: list[dict[str, Any]] = field(default_factory=list)
+    partial_ok: bool = False
+    suggested_next: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """将数据阶段输出转换为可序列化字典。"""
@@ -62,6 +74,17 @@ class SignalAgentOutput:
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     error_message: str | None = None
+    observations: list[dict[str, Any]] = field(default_factory=list)
+    decision: dict[str, Any] = field(default_factory=dict)
+    confidence: float | None = None
+    warnings: list[str] = field(default_factory=list)
+    llm_used: bool = False
+    fallback_chain: list[str] = field(default_factory=list)
+    next_action: str | None = None
+    status: str = "pending"
+    needs_more_data: bool = False
+    review_reason: str | None = None
+    suggested_next: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """将信号阶段输出转换为可序列化字典。"""
@@ -93,6 +116,20 @@ class RiskAgentOutput:
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     error_message: str | None = None
+    observations: list[dict[str, Any]] = field(default_factory=list)
+    decision: dict[str, Any] = field(default_factory=dict)
+    confidence: float | None = None
+    warnings: list[str] = field(default_factory=list)
+    llm_used: bool = False
+    fallback_chain: list[str] = field(default_factory=list)
+    next_action: str | None = None
+    status: str = "pending"
+    risk_level: str = "unknown"
+    execution_allowed: bool = False
+    hard_blocks: list[str] = field(default_factory=list)
+    soft_flags: list[str] = field(default_factory=list)
+    review_reason: str | None = None
+    suggested_next: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """将风控阶段输出转换为可序列化字典。"""
@@ -133,6 +170,24 @@ class ExecutionAgentOutput:
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     error_message: str | None = None
+    observations: list[dict[str, Any]] = field(default_factory=list)
+    decision: dict[str, Any] = field(default_factory=dict)
+    confidence: float | None = None
+    warnings: list[str] = field(default_factory=list)
+    llm_used: bool = False
+    fallback_chain: list[str] = field(default_factory=list)
+    next_action: str | None = None
+    original_order: dict[str, Any] | None = None
+    final_order: dict[str, Any] | None = None
+    adjustment_applied: bool = False
+    adjustment_reason: str | None = None
+    risk_reduction_only: bool = False
+    proposed_order: dict[str, Any] | None = None
+    proposal_state: str | None = None
+    proposal_reason: str | None = None
+    status: str = "pending"
+    execution_allowed: bool = False
+    paper_submit_result: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """将执行阶段输出转换为可序列化字典。"""
@@ -151,6 +206,12 @@ class StockAgentResult:
     signal: SignalAgentOutput
     risk: RiskAgentOutput
     execution: ExecutionAgentOutput
+    planner_trace: list[dict[str, Any]] = field(default_factory=list)
+    condition_evaluations: list[dict[str, Any]] = field(default_factory=list)
+    termination_reason: str | None = None
+    replan_count: int = 0
+    policy_snapshot: dict[str, Any] = field(default_factory=dict)
+    execution_result: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """将单股票运行结果转换为嵌套字典。"""
@@ -160,6 +221,12 @@ class StockAgentResult:
             "signal": self.signal.to_dict(),
             "risk": self.risk.to_dict(),
             "execution": self.execution.to_dict(),
+            "planner_trace": self.planner_trace,
+            "condition_evaluations": self.condition_evaluations,
+            "termination_reason": self.termination_reason,
+            "replan_count": self.replan_count,
+            "policy_snapshot": self.policy_snapshot,
+            "execution_result": self.execution_result,
         }
 
 
@@ -176,6 +243,17 @@ class AgentRunResult:
     account_snapshot: dict[str, Any] = field(default_factory=dict)
     markdown_report_path: str | None = None
     csv_report_path: str | None = None
+    controller_plan: dict[str, Any] = field(default_factory=dict)
+    portfolio_decision: dict[str, Any] = field(default_factory=dict)
+    warnings: list[dict[str, Any]] = field(default_factory=list)
+    stage_traces: list[dict[str, Any]] = field(default_factory=list)
+    decision_panel: list[dict[str, Any]] = field(default_factory=list)
+    planner_trace: list[dict[str, Any]] = field(default_factory=list)
+    condition_evaluations: list[dict[str, Any]] = field(default_factory=list)
+    termination_reason: str | None = None
+    replan_count: int = 0
+    policy_snapshot: dict[str, Any] = field(default_factory=dict)
+    execution_result: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """将整次运行结果转换为可持久化字典。"""
@@ -189,4 +267,15 @@ class AgentRunResult:
             "account_snapshot": self.account_snapshot,
             "markdown_report_path": self.markdown_report_path,
             "csv_report_path": self.csv_report_path,
+            "controller_plan": self.controller_plan,
+            "portfolio_decision": self.portfolio_decision,
+            "warnings": self.warnings,
+            "stage_traces": self.stage_traces,
+            "decision_panel": self.decision_panel,
+            "planner_trace": self.planner_trace,
+            "condition_evaluations": self.condition_evaluations,
+            "termination_reason": self.termination_reason,
+            "replan_count": self.replan_count,
+            "policy_snapshot": self.policy_snapshot,
+            "execution_result": self.execution_result,
         }

@@ -14,6 +14,11 @@ from agent_stock.config import AgentRuntimeConfig, Config, RuntimeLlmConfig
 from agent_stock.storage import DatabaseManager
 
 
+class _UnavailableAnalyzer:
+    def is_available(self) -> bool:
+        return False
+
+
 class _FakeAIResult:
     def __init__(self, operation_advice: str, sentiment_score: int):
         self.operation_advice = operation_advice
@@ -43,7 +48,7 @@ class SignalAgentCacheTestCase(unittest.TestCase):
             self.calls += 1
             return _FakeAIResult(operation_advice="买入", sentiment_score=77)
 
-        self.agent = SignalAgent(db_manager=self.db, ai_resolver=_resolver)
+        self.agent = SignalAgent(db_manager=self.db, ai_resolver=_resolver, analyzer=_UnavailableAnalyzer())
 
     def tearDown(self) -> None:
         DatabaseManager.reset_instance()

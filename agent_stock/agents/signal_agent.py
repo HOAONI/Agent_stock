@@ -16,7 +16,9 @@ from typing import Any, Callable
 import pandas as pd
 
 from agent_stock.agents.contracts import AgentState, DataAgentOutput, SignalAgentOutput
+from agent_stock.agents.agentic_decision import generate_structured_decision
 from agent_stock.analyzer import LlmRequestTimeoutError
+from agent_stock.analyzer import get_analyzer
 from agent_stock.config import AgentRuntimeConfig, Config, get_config, redact_sensitive_text
 from agent_stock.core.pipeline import StockAnalysisPipeline
 from agent_stock.enums import ReportType
@@ -37,6 +39,7 @@ class SignalAgent:
         trend_analyzer: StockTrendAnalyzer | None = None,
         execution_repo: ExecutionRepository | None = None,
         ai_resolver: Callable[[str], Any] | None = None,
+        analyzer=None,
     ) -> None:
         """初始化信号生成所需的趋势分析、缓存和 AI 依赖。"""
         self.config = config or get_config()
@@ -45,6 +48,7 @@ class SignalAgent:
         self.repo = execution_repo or ExecutionRepository(self.db)
         self._ai_resolver = ai_resolver
         self._pipeline: StockAnalysisPipeline | None = None
+        self.analyzer = analyzer or get_analyzer()
 
     def run(
         self,
@@ -102,6 +106,81 @@ class SignalAgent:
             state = AgentState.FAILED
             error_message = "signal generation failed: no trend payload and no AI payload"
 
+        observations = [
+            {
+                "data_state": data_output.state.value,
+                "data_source": data_output.data_source,
+                "data_confidence": data_output.confidence,
+                "has_raw_data": bool((data_output.analysis_context or {}).get("raw_data")),
+                "has_realtime_quote": bool(data_output.realtime_quote),
+                "trend_ready": bool(trend_payload),
+                "ai_ready": bool(ai_payload),
+                "ai_refreshed": ai_refreshed,
+                "data_warnings": list(data_output.warnings or []),
+            }
+        ]
+        fallback_chain: list[str] = []
+        if trend_payload:
+            fallback_chain.append("trend_rule")
+        if ai_payload:
+            fallback_chain.append("ai_analysis")
+
+        if state == AgentState.FAILED:
+            default_decision = {
+                "action": "abort",
+                "summary": "信号阶段未能形成可靠的趋势或 AI 结论，本轮不建议继续执行。",
+                "reason": "signal_unavailable",
+                "next_action": "abort",
+                "confidence": 0.08,
+                "warnings": list(data_output.warnings or []),
+            }
+        elif not trend_payload and bool((data_output.analysis_context or {}).get("raw_data")):
+            default_decision = {
+                "action": "request_more_data",
+                "summary": "当前仅拿到部分有效信号，建议先回到数据阶段补强后再继续。",
+                "reason": "trend_missing",
+                "next_action": "data",
+                "confidence": 0.35,
+                "warnings": list(data_output.warnings or []),
+            }
+        else:
+            base_confidence = 0.82 if trend_payload and ai_payload else 0.62 if (trend_payload or ai_payload) else 0.3
+            if data_output.warnings:
+                base_confidence = max(0.25, base_confidence - 0.18)
+            default_decision = {
+                "action": "continue_risk",
+                "summary": f"已形成 {operation_advice} 信号，可进入风控阶段继续决策。",
+                "reason": "signal_ready",
+                "next_action": "risk",
+                "confidence": base_confidence,
+                "warnings": list(data_output.warnings or []),
+            }
+
+        decision, planner_llm_used = generate_structured_decision(
+            analyzer=self.analyzer,
+            stage="signal",
+            prompt=self._build_signal_stage_prompt(
+                code=code,
+                data_output=data_output,
+                trend_payload=trend_payload,
+                ai_payload=ai_payload,
+                operation_advice=operation_advice,
+                sentiment_score=sentiment_score,
+            ),
+            allowed_actions={"continue_risk", "request_more_data", "abort"},
+            default_decision=default_decision,
+        )
+        warnings = list(data_output.warnings or [])
+        for item in decision.get("warnings") or []:
+            if isinstance(item, str) and item not in warnings:
+                warnings.append(item)
+
+        action = str(decision.get("action") or default_decision["action"]).strip() or default_decision["action"]
+        next_action = str(decision.get("next_action") or default_decision.get("next_action") or "risk")
+        needs_more_data = action == "request_more_data"
+        review_reason = str(decision.get("reason") or "").strip() or None
+        status = "failed" if state == AgentState.FAILED else "needs_more_data" if needs_more_data else "ready"
+
         return SignalAgentOutput(
             code=code,
             trade_date=trade_date,
@@ -118,6 +197,41 @@ class SignalAgent:
             ai_payload=ai_payload,
             trend_payload=trend_payload,
             error_message=error_message,
+            observations=observations,
+            decision=decision,
+            confidence=float(decision.get("confidence") or default_decision["confidence"]),
+            warnings=warnings,
+            llm_used=bool(ai_payload) or planner_llm_used,
+            fallback_chain=fallback_chain,
+            next_action=next_action,
+            status=status,
+            needs_more_data=needs_more_data,
+            review_reason=review_reason if needs_more_data or state == AgentState.FAILED else None,
+            suggested_next=next_action,
+        )
+
+    @staticmethod
+    def _build_signal_stage_prompt(
+        *,
+        code: str,
+        data_output: DataAgentOutput,
+        trend_payload: dict[str, Any],
+        ai_payload: dict[str, Any],
+        operation_advice: str,
+        sentiment_score: int,
+    ) -> str:
+        return (
+            "你是股票信号研判代理，只输出严格 JSON，不要输出解释、Markdown 或代码块。\n"
+            "允许 action 只有：continue_risk, request_more_data, abort。\n"
+            "规则：1. 趋势或 AI 至少有一项有效时，优先 continue_risk；2. 数据明显不足时可 request_more_data；"
+            "3. 没有任何可用信号时必须 abort。\n\n"
+            f"股票代码：{code}\n"
+            f"数据阶段输出：{data_output.to_dict()}\n"
+            f"趋势结果：{trend_payload}\n"
+            f"AI 结果：{ai_payload}\n"
+            f"当前操作建议：{operation_advice}\n"
+            f"当前情绪分：{sentiment_score}\n\n"
+            "输出 JSON 字段：action, summary, reason, next_action, confidence, warnings。"
         )
 
     def _resolve_ai(self, code: str, *, runtime_config: AgentRuntimeConfig | None = None) -> Any:

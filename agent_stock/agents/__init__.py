@@ -10,6 +10,7 @@ from agent_stock.agents.contracts import (
     SignalAgentOutput,
     StockAgentResult,
 )
+from agent_stock.agents.controller_agent import ControllerAgent
 from agent_stock.agents.data_agent import DataAgent
 from agent_stock.agents.execution_agent import ExecutionAgent
 from agent_stock.agents.orchestrator import AgentOrchestrator, MarketSessionGuard
@@ -20,6 +21,7 @@ __all__ = [
     "AgentRunResult",
     "AgentState",
     "AgentOrchestrator",
+    "ControllerAgent",
     "DataAgent",
     "DataAgentOutput",
     "ExecutionAgent",
