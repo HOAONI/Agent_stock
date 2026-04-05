@@ -68,6 +68,23 @@ _SELL_KEYWORDS = ("卖出", "卖掉", "卖", "减仓")
 _HISTORY_KEYWORDS = ("历史分析", "分析记录", "最近分析", "上次分析", "之前分析")
 _BACKTEST_KEYWORDS = ("回测", "胜率", "收益", "策略表现")
 _ACCOUNT_KEYWORDS = ("持仓", "账户", "仓位", "资金", "模拟盘情况", "现金")
+_PORTFOLIO_HEALTH_KEYWORDS = (
+    "仓位健康",
+    "持仓健康",
+    "组合健康",
+    "投资组合",
+    "整体风险",
+    "风险分布",
+    "再平衡",
+    "行业过重",
+    "行业集中",
+    "集中度",
+    "最大回撤",
+    "回撤",
+    "夏普",
+    "夏普比率",
+    "收益率",
+)
 _SAVE_KEYWORDS = ("保存本轮分析", "保存分析", "保存这轮分析")
 _MARKET_WIDE_SCOPE_KEYWORDS = (
     "全市场",
@@ -323,6 +340,7 @@ class AgentChatService:
         self.tools = {
             "load_system_state": self._tool_load_system_state,
             "load_account_state": self._tool_load_account_state,
+            "load_portfolio_health": self._tool_load_portfolio_health,
             "load_session_memory": self._tool_load_session_memory,
             "load_user_preferences": self._tool_load_user_preferences,
             "load_stage_memory": self._tool_load_stage_memory,
@@ -527,6 +545,7 @@ class AgentChatService:
                 event_handler=event_handler,
             )
             account_state_payload = context_bundle.account_state.to_dict() if context_bundle.account_state else {}
+            portfolio_health_payload = dict(context_bundle.portfolio_health or {})
             runtime_context_payload = account_state_payload.get("runtime_context") if isinstance(account_state_payload.get("runtime_context"), dict) else None
             history_payload = context_bundle.history if context_bundle.history else None
             backtest_payload = context_bundle.backtest if context_bundle.backtest else None
@@ -594,6 +613,70 @@ class AgentChatService:
                     "candidate_orders": list(plan.target_candidate_orders),
                     "execution_result": execution_result,
                     "status": self._resolve_execution_status(execution_result),
+                }
+            elif plan.primary_intent == "portfolio_health":
+                portfolio_health_result = portfolio_health_payload.get("portfolio_health") if isinstance(portfolio_health_payload.get("portfolio_health"), dict) else {}
+                portfolio_stock_codes = self._extract_portfolio_health_stock_codes(
+                    account_state_payload=account_state_payload,
+                    portfolio_health=portfolio_health_result,
+                )
+                analysis_payload: dict[str, Any] | None = None
+                candidate_orders: list[dict[str, Any]] = []
+                if portfolio_stock_codes:
+                    analysis_payload = await self._run_tool(
+                        "run_multi_stock_analysis",
+                        {
+                            "stock_codes": portfolio_stock_codes,
+                            "runtime_context_payload": runtime_context_payload,
+                            "runtime_config": runtime_config,
+                            "planning_context": {
+                                "message": message,
+                                "user_message": message,
+                                "intent": plan.primary_intent,
+                                "primary_intent": plan.primary_intent,
+                                "loaded_context": context_bundle.to_dict(),
+                                "session_overrides": dict(plan.session_preference_overrides),
+                                "stage_memory": dict(stage_memory_payload),
+                                "intent_resolution": dict(plan.intent_resolution or {}),
+                            },
+                        },
+                        tool_context,
+                        event_handler,
+                    )
+                    candidate_orders = self._normalize_candidate_orders(analysis_payload.get("candidate_orders"))
+                portfolio_stage_memory = self._build_portfolio_health_stage_memory(
+                    portfolio_health=portfolio_health_result,
+                )
+                next_stage_memory = self._merge_stage_memory(stage_memory_payload, portfolio_stage_memory)
+                if isinstance(analysis_payload, dict):
+                    next_stage_memory = self._merge_stage_memory(
+                        next_stage_memory,
+                        self._build_stage_memory_from_structured_result(
+                            analysis_payload.get("structured_result") if isinstance(analysis_payload.get("structured_result"), dict) else {},
+                            None,
+                        ),
+                    )
+                content = self._render_portfolio_health_content(
+                    portfolio_health=portfolio_health_result,
+                    analysis_payload=analysis_payload,
+                    effective_preferences=effective_preferences_payload,
+                )
+                final_payload = {
+                    "session_id": session_id,
+                    "content": content,
+                    "structured_result": {
+                        "intent": "portfolio_health",
+                        "portfolio_health": portfolio_health_result,
+                        "account_state": account_state_payload if account_state_payload else None,
+                        "analysis": analysis_payload.get("structured_result") if isinstance(analysis_payload, dict) else None,
+                        "loaded_context_keys": list(context_bundle.loaded_keys),
+                        "effective_preferences": effective_preferences_payload,
+                        "stage_memory": next_stage_memory,
+                        "intent_source": plan.intent_source,
+                    },
+                    "candidate_orders": candidate_orders,
+                    "execution_result": None,
+                    "status": "analysis_only",
                 }
             elif plan.primary_intent in {"history", "backtest", "account"}:
                 content = self._render_context_only_content(
@@ -826,7 +909,7 @@ class AgentChatService:
     @staticmethod
     def _extract_analysis_result_for_mirror(structured_result: dict[str, Any]) -> dict[str, Any]:
         intent = str(structured_result.get("intent") or "").strip()
-        if intent not in {"analysis", "analysis_then_execute"}:
+        if intent not in {"analysis", "analysis_then_execute", "portfolio_health"}:
             return {}
         analysis = structured_result.get("analysis")
         if not isinstance(analysis, dict):
@@ -1002,7 +1085,7 @@ class AgentChatService:
         execution_result: dict[str, Any] | None,
         intent: str,
     ) -> list[dict[str, Any]]:
-        if intent in {"analysis", "analysis_then_execute"}:
+        if intent in {"analysis", "analysis_then_execute", "portfolio_health"}:
             if candidate_orders:
                 failed_orders = []
                 if isinstance(execution_result, dict):
@@ -1015,7 +1098,7 @@ class AgentChatService:
                 if executed_count > 0 and not failed_orders:
                     return []
                 return [dict(item) for item in candidate_orders]
-            if plan.stock_codes:
+            if plan.stock_codes or intent == "portfolio_health":
                 return []
             return [dict(item) for item in current_pending]
 
@@ -1669,6 +1752,16 @@ class AgentChatService:
         if bool(stock_codes) and any(keyword in message for keyword in _IMPLICIT_ANALYSIS_KEYWORDS):
             return True
         return bool(stock_codes) and "风险" in message and any(token in message for token in ("吗", "？", "?"))
+
+    @classmethod
+    def _contains_portfolio_health_intent(cls, message: str) -> bool:
+        compact = cls._compact_message_text(message)
+        if not compact:
+            return False
+        portfolio_scope_tokens = ("投资组合", "组合", "持仓", "仓位", "账户")
+        if not any(token in compact for token in portfolio_scope_tokens):
+            return False
+        return any(token in compact for token in _PORTFOLIO_HEALTH_KEYWORDS)
 
     @staticmethod
     def _compact_message_text(message: str) -> str:
@@ -2686,6 +2779,38 @@ class AgentChatService:
         pending_actions = self._normalize_pending_actions(conversation_state.get("pending_actions"))
         candidate_snapshots = self._extract_candidate_snapshots(recent_assistant_messages)
         default_focus_codes = self._extract_default_stock_codes(latest_assistant_meta, frontend_context, conversation_state)
+        if self._contains_portfolio_health_intent(message):
+            intent_resolution = self._build_intent_resolution(
+                intent="portfolio_health",
+                stock_codes=[],
+                requested_order_side=None,
+                requested_quantity=None,
+                conditions=[],
+                followup_reference=None,
+                confidence=0.98,
+                missing_slots=[],
+                source="rule",
+            )
+            intent_resolution["scope_resolution"] = {
+                "mode": "none",
+                "requested_refs": [],
+                "resolved_stock_codes": [],
+                "unresolved_refs": [],
+                "blocked_code": None,
+                "resolver": "portfolio_health_rule",
+            }
+            intent_resolution["resolved_scope_entities"] = []
+            return ChatPlan(
+                primary_intent="portfolio_health",
+                include_runtime_context=True,
+                planner_source="rule",
+                intent_source="rule",
+                intent_resolution=intent_resolution,
+                pending_actions=pending_actions,
+                required_tools=["load_account_state", "load_portfolio_health", "load_user_preferences"],
+                stock_scope={"mode": "none", "stock_refs": []},
+                followup_target={"mode": "none", "stock_refs": []},
+            )
         if self._is_market_wide_selection_request(message):
             clarification = self._build_market_wide_scope_unsupported_message()
             intent_resolution = self._build_intent_resolution(
@@ -3237,6 +3362,7 @@ class AgentChatService:
         loaded_keys: list[str] = []
         system_state_payload: dict[str, Any] = {}
         account_state_payload: dict[str, Any] = {}
+        portfolio_health_payload: dict[str, Any] = {}
         session_memory_payload: dict[str, Any] = {}
         user_preferences_payload: dict[str, Any] = {}
         stage_memory_payload: dict[str, Any] = {}
@@ -3260,6 +3386,15 @@ class AgentChatService:
                 event_handler,
             )
             loaded_keys.append("account_state")
+
+        if "load_portfolio_health" in plan.required_tools:
+            portfolio_health_payload = await self._run_tool(
+                "load_portfolio_health",
+                {"owner_user_id": tool_context.get("owner_user_id"), "refresh": True},
+                tool_context,
+                event_handler,
+            )
+            loaded_keys.append("portfolio_health")
 
         if "load_session_memory" in plan.required_tools:
             session_memory_payload = await self._run_tool(
@@ -3313,6 +3448,7 @@ class AgentChatService:
             loaded_keys=loaded_keys,
             system_state=AgentSystemState(system_state_payload),
             account_state=AgentAccountState(account_state_payload),
+            portfolio_health=dict(portfolio_health_payload),
             session_memory=dict(session_memory_payload),
             effective_user_preferences=EffectiveUserPreferences(user_preferences_payload),
             stage_memory=StageMemorySnapshot(stage_memory_payload),
@@ -3614,6 +3750,8 @@ class AgentChatService:
             return "读取当前 Agent 系统状态"
         if tool_name == "load_account_state":
             return "读取当前账户与持仓状态"
+        if tool_name == "load_portfolio_health":
+            return "执行投资组合健康检查"
         if tool_name == "load_session_memory":
             return "读取当前会话记忆"
         if tool_name == "load_user_preferences":
@@ -3647,6 +3785,12 @@ class AgentChatService:
             account_state = result.get("account_state") if isinstance(result.get("account_state"), dict) else {}
             positions = account_state.get("positions") if isinstance(account_state.get("positions"), list) else []
             return f"已读取账户状态，当前持仓 {len(positions)} 项"
+        if tool_name == "load_portfolio_health":
+            payload = result.get("portfolio_health") if isinstance(result.get("portfolio_health"), dict) else {}
+            diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+            score = diagnostics.get("health_score")
+            level = diagnostics.get("health_level") or "--"
+            return f"已完成组合健康检查，健康度 {score if score is not None else '--'}/100（{level}）"
         if tool_name == "load_session_memory":
             pending = result.get("pending_actions") if isinstance(result.get("pending_actions"), list) else []
             return f"已读取会话记忆，待确认动作 {len(pending)} 项"
@@ -3737,6 +3881,16 @@ class AgentChatService:
         _tool_context: dict[str, Any],
     ) -> dict[str, Any]:
         return await self.backend_client.get_account_state(
+            owner_user_id=int(args.get("owner_user_id") or 0),
+            refresh=bool(args.get("refresh", True)),
+        )
+
+    async def _tool_load_portfolio_health(
+        self,
+        args: dict[str, Any],
+        _tool_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await self.backend_client.get_portfolio_health(
             owner_user_id=int(args.get("owner_user_id") or 0),
             refresh=bool(args.get("refresh", True)),
         )
@@ -4582,6 +4736,272 @@ class AgentChatService:
         except (TypeError, ValueError):
             return "--"
         return f"{number:.2f}%"
+
+    @staticmethod
+    def _safe_number(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number == number else None
+
+    @staticmethod
+    def _format_amount(value: Any) -> str:
+        number = AgentChatService._safe_number(value)
+        if number is None:
+            return "--"
+        return f"{number:,.2f}"
+
+    def _extract_portfolio_health_stock_codes(
+        self,
+        *,
+        account_state_payload: dict[str, Any],
+        portfolio_health: dict[str, Any],
+    ) -> list[str]:
+        raw_positions = portfolio_health.get("positions") if isinstance(portfolio_health.get("positions"), list) else []
+        if not raw_positions:
+            account_state = account_state_payload.get("account_state") if isinstance(account_state_payload.get("account_state"), dict) else {}
+            raw_positions = account_state.get("positions") if isinstance(account_state.get("positions"), list) else []
+        codes: list[str] = []
+        for item in raw_positions:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").strip()
+            if code and code not in codes:
+                codes.append(code)
+        return codes
+
+    @staticmethod
+    def _build_portfolio_health_stage_memory(
+        *,
+        portfolio_health: dict[str, Any],
+    ) -> dict[str, Any]:
+        metrics = portfolio_health.get("metrics") if isinstance(portfolio_health.get("metrics"), dict) else {}
+        diagnostics = portfolio_health.get("diagnostics") if isinstance(portfolio_health.get("diagnostics"), dict) else {}
+        alerts = diagnostics.get("alerts") if isinstance(diagnostics.get("alerts"), list) else []
+        return {
+            "portfolio_health": {
+                "health_score": diagnostics.get("health_score"),
+                "health_level": diagnostics.get("health_level"),
+                "rebalancing_needed": diagnostics.get("rebalancing_needed"),
+                "top_alerts": [
+                    str(item.get("message") or "").strip()
+                    for item in alerts[:3]
+                    if isinstance(item, dict) and str(item.get("message") or "").strip()
+                ],
+                "metrics": {
+                    "total_return_pct": metrics.get("total_return_pct"),
+                    "max_drawdown_pct": metrics.get("max_drawdown_pct"),
+                    "sharpe_ratio": metrics.get("sharpe_ratio"),
+                    "top1_position_pct": metrics.get("top1_position_pct"),
+                    "top3_position_pct": metrics.get("top3_position_pct"),
+                },
+            }
+        }
+
+    @staticmethod
+    def _pick_position_industry_name(position: dict[str, Any]) -> str:
+        for key in ("industry_name", "industry", "sector_name", "sector", "board_name", "board"):
+            text = str(position.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _build_portfolio_industry_exposures(self, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not positions:
+            return []
+        total_market_value = sum(self._safe_number(item.get("market_value")) or 0.0 for item in positions)
+        if total_market_value <= 0:
+            return []
+
+        grouped: dict[str, dict[str, Any]] = {}
+        unresolved_codes: dict[str, dict[str, Any]] = {}
+        for item in positions:
+            code = str(item.get("code") or "").strip()
+            if not code:
+                continue
+            industry_name = self._pick_position_industry_name(item)
+            if industry_name:
+                bucket = grouped.setdefault(
+                    industry_name,
+                    {"industry_name": industry_name, "market_value": 0.0, "codes": [], "stock_count": 0},
+                )
+                bucket["market_value"] += self._safe_number(item.get("market_value")) or 0.0
+                if code not in bucket["codes"]:
+                    bucket["codes"].append(code)
+                bucket["stock_count"] += 1
+            else:
+                unresolved_codes[code] = dict(item)
+
+        if unresolved_codes:
+            try:
+                for board in self._load_board_catalog("industry_board"):
+                    if not unresolved_codes:
+                        break
+                    board_name = str(board.get("board_name") or board.get("board_symbol") or "").strip()
+                    board_symbol = str(board.get("board_symbol") or board_name).strip()
+                    if not board_name or not board_symbol:
+                        continue
+                    members = self._load_board_constituents("industry_board", board_symbol)
+                    member_codes = {
+                        str(item.get("code") or "").strip()
+                        for item in members
+                        if isinstance(item, dict) and str(item.get("code") or "").strip()
+                    }
+                    matched_codes = [code for code in unresolved_codes if code in member_codes]
+                    if not matched_codes:
+                        continue
+                    bucket = grouped.setdefault(
+                        board_name,
+                        {"industry_name": board_name, "market_value": 0.0, "codes": [], "stock_count": 0},
+                    )
+                    for code in matched_codes:
+                        position = unresolved_codes.pop(code)
+                        bucket["market_value"] += self._safe_number(position.get("market_value")) or 0.0
+                        if code not in bucket["codes"]:
+                            bucket["codes"].append(code)
+                        bucket["stock_count"] += 1
+            except Exception as exc:
+                logger.warning("portfolio industry exposure fallback failed: %s", redact_sensitive_text(str(exc)))
+
+        exposures = []
+        for item in grouped.values():
+            market_value = float(item.get("market_value") or 0.0)
+            exposures.append(
+                {
+                    "industry_name": str(item.get("industry_name") or "").strip(),
+                    "market_value": round(market_value, 4),
+                    "weight_pct": round((market_value / total_market_value) * 100, 4) if total_market_value > 0 else None,
+                    "stock_count": int(item.get("stock_count") or 0),
+                    "codes": [str(code).strip() for code in item.get("codes") or [] if str(code).strip()],
+                }
+            )
+        exposures.sort(key=lambda item: float(item.get("market_value") or 0.0), reverse=True)
+        return exposures
+
+    def _render_portfolio_health_content(
+        self,
+        *,
+        portfolio_health: dict[str, Any],
+        analysis_payload: dict[str, Any] | None,
+        effective_preferences: dict[str, Any] | None,
+    ) -> str:
+        positions = [dict(item) for item in portfolio_health.get("positions") or [] if isinstance(item, dict)]
+        metrics = portfolio_health.get("metrics") if isinstance(portfolio_health.get("metrics"), dict) else {}
+        diagnostics = portfolio_health.get("diagnostics") if isinstance(portfolio_health.get("diagnostics"), dict) else {}
+        alerts = [dict(item) for item in diagnostics.get("alerts") or [] if isinstance(item, dict)]
+        suggestions = [str(item).strip() for item in diagnostics.get("suggestions") or [] if str(item).strip()]
+        analysis_structured = analysis_payload.get("structured_result") if isinstance(analysis_payload, dict) and isinstance(analysis_payload.get("structured_result"), dict) else {}
+        stocks = [dict(item) for item in analysis_structured.get("stocks") or [] if isinstance(item, dict)]
+        candidate_orders = [dict(item) for item in analysis_payload.get("candidate_orders") or [] if isinstance(item, dict)] if isinstance(analysis_payload, dict) else []
+        stock_map = {
+            str(item.get("code") or "").strip(): item
+            for item in stocks
+            if str(item.get("code") or "").strip()
+        }
+        position_map = {
+            str(item.get("code") or "").strip(): item
+            for item in positions
+            if str(item.get("code") or "").strip()
+        }
+        industry_exposures = self._build_portfolio_industry_exposures(positions)
+        if not industry_exposures:
+            backend_industry = portfolio_health.get("exposures") if isinstance(portfolio_health.get("exposures"), dict) else {}
+            industry_exposures = [
+                dict(item)
+                for item in backend_industry.get("by_industry") or []
+                if isinstance(item, dict)
+            ]
+
+        effective_root = effective_preferences if isinstance(effective_preferences, dict) else {}
+        effective_trading = effective_root.get("effective") if isinstance(effective_root.get("effective"), dict) else {}
+        trading_prefs = effective_trading.get("trading") if isinstance(effective_trading.get("trading"), dict) else {}
+        position_limit_pct = self._safe_number(trading_prefs.get("positionMaxPct"))
+        health_score = diagnostics.get("health_score")
+        health_level = str(diagnostics.get("health_level") or "unknown").strip() or "unknown"
+        health_label = {"healthy": "健康", "watch": "关注", "risky": "偏高风险"}.get(health_level, health_level)
+
+        lines = [
+            "## 组合结论",
+            f"当前组合健康度约为 {health_score if health_score is not None else '--'}/100，整体处于“{health_label}”状态。"
+            f" 当前总资产约 {self._format_amount(portfolio_health.get('total_asset'))}，"
+            f"持仓市值约 {self._format_amount(portfolio_health.get('total_market_value'))}，"
+            f"可用现金约 {self._format_amount(portfolio_health.get('available_cash'))}。",
+            f"累计收益率 {self._format_percent(metrics.get('total_return_pct'))}，"
+            f"最大回撤 {self._format_percent(metrics.get('max_drawdown_pct'))}，"
+            f"夏普比率 {self._format_price(metrics.get('sharpe_ratio'))}。",
+            f"当前共有 {int(metrics.get('position_count') or len(positions))} 项持仓，"
+            f"单票最高仓位约 {self._format_percent(metrics.get('top1_position_pct'))}，"
+            f"前三大持仓合计约 {self._format_percent(metrics.get('top3_position_pct'))}。",
+        ]
+
+        if not positions:
+            lines.append("当前账户暂无持仓，所以这轮只能给出账户风险与现金状态，无法做逐仓位健康诊断。")
+            return "\n".join(lines)
+
+        if industry_exposures:
+            lines.append("")
+            lines.append("## 行业分布")
+            for item in industry_exposures[:3]:
+                lines.append(
+                    f"- {item.get('industry_name') or '未分类'}：约占持仓 {self._format_percent(item.get('weight_pct'))}"
+                    f"，覆盖 {item.get('stock_count') or 0} 只股票。"
+                )
+
+        if alerts:
+            lines.append("")
+            lines.append("## 主要预警")
+            for item in alerts[:4]:
+                lines.append(f"- {item.get('message') or '--'}")
+
+        lines.append("")
+        lines.append("## 持仓诊断")
+        sorted_codes = sorted(
+            position_map.keys(),
+            key=lambda code: self._safe_number(position_map.get(code, {}).get("weight_pct")) or 0.0,
+            reverse=True,
+        )
+        for code in sorted_codes:
+            position = position_map.get(code, {})
+            stock = stock_map.get(code, {})
+            name = str(position.get("stock_name") or stock.get("name") or code).strip()
+            lines.append(
+                f"- {code} {name}：当前仓位约 {self._format_percent(position.get('weight_pct'))}，"
+                f"浮盈亏 {self._format_amount(position.get('unrealized_pnl'))}，"
+                f"浮动收益率 {self._format_percent(position.get('unrealized_return_pct'))}，"
+                f"Agent 判断为 {stock.get('operation_advice') or '暂未生成新判断'}。"
+            )
+
+        rebalance_suggestions: list[str] = []
+        if position_limit_pct is not None:
+            overweight_positions = [
+                code
+                for code, position in position_map.items()
+                if (self._safe_number(position.get("weight_pct")) or 0.0) > position_limit_pct
+            ]
+            for code in overweight_positions[:3]:
+                position = position_map.get(code, {})
+                stock = stock_map.get(code, {})
+                rebalance_suggestions.append(
+                    f"{code} {position.get('stock_name') or stock.get('name') or ''} 当前仓位已高于你设定的 {position_limit_pct:.0f}% 单票上限，建议优先评估减仓。"
+                )
+        if candidate_orders:
+            for item in candidate_orders[:3]:
+                rebalance_suggestions.append(
+                    f"候选调整：{item.get('code') or '--'} {item.get('action') or '--'} "
+                    f"{item.get('quantity') or '--'} 股，理由是 {item.get('reason') or item.get('proposal_reason') or '组合调仓建议'}。"
+                )
+        for suggestion in suggestions:
+            if suggestion not in rebalance_suggestions:
+                rebalance_suggestions.append(suggestion)
+
+        if rebalance_suggestions:
+            lines.append("")
+            lines.append("## 调整建议")
+            for item in rebalance_suggestions[:5]:
+                lines.append(f"- {item}")
+
+        return "\n".join(lines)
 
     def _render_analysis_template(
         self,

@@ -421,6 +421,7 @@ class FakeBackendClient:
         self.placed_orders: list[dict[str, Any]] = []
         self.preference_calls: list[dict[str, Any]] = []
         self.saved_analysis_calls: list[dict[str, Any]] = []
+        self.portfolio_health_calls: list[dict[str, Any]] = []
         self.blocked_order_codes: set[str] = set()
         self.order_result_overrides: dict[str, dict[str, Any]] = {}
 
@@ -484,6 +485,116 @@ class FakeBackendClient:
                     },
                 ],
             },
+        }
+
+    async def get_portfolio_health(self, *, owner_user_id: int, refresh: bool = True):
+        self.portfolio_health_calls.append(
+            {
+                "owner_user_id": owner_user_id,
+                "refresh": refresh,
+            }
+        )
+        return {
+            "portfolio_health": {
+                "broker_account_id": 7,
+                "provider_code": "backtrader_local",
+                "provider_name": "Backtrader Local Sim",
+                "account_uid": "bt-u1",
+                "account_display_name": "u1",
+                "snapshot_at": "2026-04-02T09:30:00",
+                "data_source": "cache",
+                "positions": [
+                    {
+                        "code": "600519",
+                        "stock_name": "贵州茅台",
+                        "industry_name": "白酒",
+                        "quantity": 200,
+                        "available_qty": 100,
+                        "avg_cost": 1600.0,
+                        "last_price": 1680.0,
+                        "market_value": 336000.0,
+                        "weight_pct": 62.77,
+                        "unrealized_pnl": 16000.0,
+                        "unrealized_return_pct": 5.0,
+                    },
+                    {
+                        "code": "300750",
+                        "stock_name": "宁德时代",
+                        "industry_name": "新能源电池",
+                        "quantity": 500,
+                        "available_qty": 500,
+                        "avg_cost": 180.0,
+                        "last_price": 198.52,
+                        "market_value": 99260.0,
+                        "weight_pct": 18.55,
+                        "unrealized_pnl": 9260.0,
+                        "unrealized_return_pct": 10.29,
+                    },
+                ],
+                "available_cash": 100000.0,
+                "total_market_value": 435260.0,
+                "total_asset": 535260.0,
+                "today_order_count": 2,
+                "today_trade_count": 1,
+                "metrics": {
+                    "total_return_pct": 9.42,
+                    "total_pnl": 37260.0,
+                    "daily_pnl": 6520.0,
+                    "realized_pnl": 12000.0,
+                    "unrealized_pnl": 25260.0,
+                    "max_drawdown_pct": 12.6,
+                    "sharpe_ratio": 1.18,
+                    "win_rate_pct": 66.67,
+                    "cash_ratio_pct": 18.68,
+                    "invested_ratio_pct": 81.32,
+                    "top1_position_pct": 62.77,
+                    "top3_position_pct": 81.32,
+                    "position_count": 2,
+                },
+                "exposures": {
+                    "by_industry": [
+                        {
+                            "industry_name": "白酒",
+                            "market_value": 336000.0,
+                            "weight_pct": 62.77,
+                            "invested_weight_pct": 77.19,
+                            "stock_count": 1,
+                        },
+                        {
+                            "industry_name": "新能源电池",
+                            "market_value": 99260.0,
+                            "weight_pct": 18.55,
+                            "invested_weight_pct": 22.81,
+                            "stock_count": 1,
+                        },
+                    ],
+                    "by_stock": [
+                        {"code": "600519", "stock_name": "贵州茅台", "market_value": 336000.0, "weight_pct": 62.77},
+                        {"code": "300750", "stock_name": "宁德时代", "market_value": 99260.0, "weight_pct": 18.55},
+                    ],
+                },
+                "diagnostics": {
+                    "health_score": 74,
+                    "health_level": "watch",
+                    "rebalancing_needed": True,
+                    "alerts": [
+                        {
+                            "code": "single_stock_concentration",
+                            "severity": "high",
+                            "message": "贵州茅台当前仓位约 62.77%，单票集中度偏高。",
+                        },
+                        {
+                            "code": "industry_overweight",
+                            "severity": "medium",
+                            "message": "白酒行业权重约 62.77%，行业集中度偏高。",
+                        },
+                    ],
+                    "suggestions": [
+                        "白酒行业仓位明显偏重，可考虑逐步降到 40% 以下。",
+                        "适当保留现金或分散到低相关板块，降低组合回撤波动。",
+                    ],
+                },
+            }
         }
 
     async def get_user_preferences(self, *, owner_user_id: int, session_overrides: dict[str, Any] | None = None):
@@ -761,6 +872,44 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前可用资金约为", payload["content"])
         self.assertIn("今日委托 2 次", payload["content"])
         self.assertEqual(self.backend_client.saved_analysis_calls, [])
+
+    async def test_portfolio_health_request_builds_report_and_candidate_orders(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "我的仓位健康吗？",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "portfolio_health")
+        self.assertEqual(payload["structured_result"]["intent_source"], "rule")
+        self.assertIn("account_state", payload["structured_result"]["loaded_context_keys"])
+        self.assertIn("portfolio_health", payload["structured_result"]["loaded_context_keys"])
+        self.assertIn("effective_user_preferences", payload["structured_result"]["loaded_context_keys"])
+        self.assertEqual(len(self.backend_client.portfolio_health_calls), 1)
+        self.assertIn("组合结论", payload["content"])
+        self.assertIn("行业分布", payload["content"])
+        self.assertIn("最大回撤 12.60%", payload["content"])
+        self.assertIn("夏普比率 1.18", payload["content"])
+        self.assertIn("白酒行业权重约 62.77%", payload["content"])
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["600519", "300750"])
+        self.assertIsNotNone(payload["structured_result"]["analysis"])
+        self.assertEqual(len(self.backend_client.saved_analysis_calls), 1)
+        self.assertEqual(
+            [item["code"] for item in self.backend_client.saved_analysis_calls[0]["analysis_result"]["stocks"]],
+            ["600519", "300750"],
+        )
+
+        detail = self.service.get_session_detail(1, payload["session_id"])
+        assert detail is not None
+        self.assertEqual(detail["context"]["conversation_state"]["current_task"]["intent"], "portfolio_health")
+        self.assertEqual(
+            [item["code"] for item in detail["context"]["conversation_state"]["pending_actions"]],
+            ["600519", "300750"],
+        )
 
     async def test_follow_up_order_executes_single_candidate(self):
         first = await self.service.handle_chat(

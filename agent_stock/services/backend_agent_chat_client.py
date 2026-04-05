@@ -71,6 +71,12 @@ class BackendAgentChatClient:
             {"owner_user_id": owner_user_id, "refresh": bool(refresh)},
         )
 
+    async def get_portfolio_health(self, *, owner_user_id: int, refresh: bool = True) -> dict[str, Any]:
+        return await self._post(
+            "/internal/v1/agent-chat/portfolio-health",
+            {"owner_user_id": owner_user_id, "refresh": bool(refresh)},
+        )
+
     async def get_user_preferences(
         self,
         *,

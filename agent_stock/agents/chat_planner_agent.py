@@ -93,6 +93,7 @@ class ChatContextBundle:
     loaded_keys: list[str] = field(default_factory=list)
     system_state: AgentSystemState = field(default_factory=AgentSystemState)
     account_state: AgentAccountState = field(default_factory=AgentAccountState)
+    portfolio_health: dict[str, Any] = field(default_factory=dict)
     session_memory: dict[str, Any] = field(default_factory=dict)
     effective_user_preferences: EffectiveUserPreferences = field(default_factory=EffectiveUserPreferences)
     stage_memory: StageMemorySnapshot = field(default_factory=StageMemorySnapshot)
@@ -104,6 +105,7 @@ class ChatContextBundle:
             "loaded_keys": list(self.loaded_keys),
             "system_state": self.system_state.to_dict(),
             "account_state": self.account_state.to_dict(),
+            "portfolio_health": dict(self.portfolio_health),
             "session_memory": dict(self.session_memory),
             "effective_user_preferences": self.effective_user_preferences.to_dict(),
             "stage_memory": self.stage_memory.to_dict(),
