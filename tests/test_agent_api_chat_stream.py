@@ -6,11 +6,13 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import asyncio
 
 from fastapi.testclient import TestClient
 
 from agent_api.app import create_app
 from agent_api.deps import get_agent_chat_service_dep
+from agent_api.v1.endpoints.chat_internal import get_chat_monitor_stream
 from agent_stock.config import Config
 from agent_stock.services.agent_chat_service import AgentChatHandledError, reset_agent_chat_service
 from agent_stock.services.agent_task_service import reset_agent_task_service
@@ -101,10 +103,53 @@ class _BlockedStreamingChatService:
         }
 
 
+class _MonitorChatService:
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[dict] = asyncio.Queue()
+        self.queue.put_nowait(
+            {
+                "session": {
+                    "session_id": "monitor-session-live-1",
+                    "title": "最近一轮 Agent 协作",
+                    "live_status": "running",
+                },
+                "agent_cards": [
+                    {"code": "data", "title": "数据 Agent", "status": "running", "total_calls": 9},
+                ],
+                "execution_chain": [
+                    {"node_id": "monitor-session-live-1:300750:data:1", "stock_code": "300750", "stage": "data", "visit": 1},
+                ],
+                "stock_details": [],
+            }
+        )
+
+    def get_monitor_snapshot(self, owner_user_id: int) -> dict:
+        return {
+            "session": {
+                "session_id": f"monitor-session-{owner_user_id}",
+                "title": "最近一轮 Agent 协作",
+                "live_status": "completed",
+            },
+            "agent_cards": [
+                {"code": "data", "title": "数据 Agent", "status": "completed", "total_calls": 8},
+                {"code": "signal", "title": "信号 Agent", "status": "completed", "total_calls": 5},
+            ],
+            "execution_chain": [],
+            "stock_details": [],
+        }
+
+    def subscribe_monitor(self, _owner_user_id: int) -> asyncio.Queue[dict]:
+        return self.queue
+
+    def unsubscribe_monitor(self, _owner_user_id: int, _queue: asyncio.Queue[dict]) -> None:
+        return None
+
+
 class AgentApiChatStreamTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         os.environ["DATABASE_PATH"] = os.path.join(self.temp_dir.name, "agent_api_chat_stream.db")
+        os.environ["DATABASE_URL"] = ""
         os.environ["AGENT_SERVICE_AUTH_TOKEN"] = "test-token"
         os.environ["AGENT_SERVICE_MODE"] = "false"
 
@@ -193,6 +238,47 @@ class AgentApiChatStreamTestCase(unittest.TestCase):
         self.assertIn('"stage": "execution"', payload)
         self.assertIn('"status": "blocked"', payload)
         self.assertIn('"session_id": "session-stream-blocked-1"', payload)
+
+    def test_chat_monitor_returns_latest_snapshot(self):
+        self.app.dependency_overrides[get_agent_chat_service_dep] = lambda: _MonitorChatService()
+
+        response = self.client.get(
+            "/internal/v1/chat/monitor",
+            headers={"Authorization": "Bearer test-token"},
+            params={"owner_user_id": 1},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["session"]["session_id"], "monitor-session-1")
+        self.assertEqual(payload["agent_cards"][0]["code"], "data")
+        self.assertEqual(payload["agent_cards"][0]["total_calls"], 8)
+
+    def test_chat_monitor_stream_emits_connected_and_snapshot(self):
+        service = _MonitorChatService()
+        response = asyncio.run(get_chat_monitor_stream(owner_user_id=1, chat_service=service))
+
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(response.headers["Cache-Control"], "no-cache")
+        self.assertEqual(response.headers["Connection"], "keep-alive")
+
+        async def collect_chunks() -> str:
+            chunks: list[str] = []
+            iterator = response.body_iterator
+            try:
+                for _ in range(3):
+                    chunk = await iterator.__anext__()
+                    chunks.append(chunk.decode("utf-8"))
+            finally:
+                if hasattr(iterator, "aclose"):
+                    await iterator.aclose()
+            return "".join(chunks)
+
+        payload = asyncio.run(collect_chunks())
+        self.assertIn("event: connected", payload)
+        self.assertIn("event: snapshot", payload)
+        self.assertIn('"session_id": "monitor-session-1"', payload)
+        self.assertIn('"session_id": "monitor-session-live-1"', payload)
 
 
 if __name__ == "__main__":

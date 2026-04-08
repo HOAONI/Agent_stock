@@ -181,6 +181,37 @@ class AgentChatRepository:
                 for row in rows
             ]
 
+    def list_messages_by_owner(
+        self,
+        owner_user_id: int | str,
+        *,
+        role: str | None = None,
+        descending: bool = True,
+    ) -> list[dict[str, Any]]:
+        owner_id = self._normalize_owner_user_id(owner_user_id)
+        with self.db.get_session() as session:
+            query = select(AgentChatMessage).where(
+                AgentChatMessage.owner_user_id == owner_id,
+            )
+            if role:
+                query = query.where(AgentChatMessage.role == str(role).strip().lower())
+            query = query.order_by(
+                desc(AgentChatMessage.created_at) if descending else AgentChatMessage.created_at.asc(),
+                desc(AgentChatMessage.id) if descending else AgentChatMessage.id.asc(),
+            )
+            rows = session.execute(query).scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "session_id": row.session_id,
+                    "role": row.role,
+                    "content": row.content,
+                    "meta": self._safe_json_loads(row.meta_json),
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
     def add_message(
         self,
         *,

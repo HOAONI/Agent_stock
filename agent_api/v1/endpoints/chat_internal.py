@@ -157,6 +157,51 @@ def get_chat_session(
     return ChatSessionDetailResponse.model_validate(payload)
 
 
+@router.get(
+    "/monitor",
+    responses={400: {"model": ErrorResponse}},
+    summary="Get latest agent chat monitor snapshot",
+)
+def get_chat_monitor(
+    owner_user_id: int = Query(..., ge=1),
+    chat_service: AgentChatService = Depends(get_agent_chat_service_dep),
+) -> dict[str, Any]:
+    """查询当前用户最近一轮 Agent 问股监控快照。"""
+    return chat_service.get_monitor_snapshot(owner_user_id)
+
+
+@router.get(
+    "/monitor/stream",
+    responses={400: {"model": ErrorResponse}},
+    summary="Stream latest agent chat monitor snapshot",
+)
+async def get_chat_monitor_stream(
+    owner_user_id: int = Query(..., ge=1),
+    chat_service: AgentChatService = Depends(get_agent_chat_service_dep),
+) -> StreamingResponse:
+    """按 SSE 推送当前用户最近一轮 Agent 问股监控快照。"""
+    queue = chat_service.subscribe_monitor(owner_user_id)
+
+    async def _stream():
+        try:
+            yield _to_sse("connected", {"message": "Connected to agent chat monitor stream"})
+            yield _to_sse("snapshot", chat_service.get_monitor_snapshot(owner_user_id))
+            while True:
+                payload = await queue.get()
+                yield _to_sse("snapshot", payload)
+        finally:
+            chat_service.unsubscribe_monitor(owner_user_id, queue)
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.delete(
     "/sessions/{session_id}",
     response_model=ChatDeleteResponse,

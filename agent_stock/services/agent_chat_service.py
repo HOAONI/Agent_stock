@@ -30,6 +30,7 @@ from agent_stock.analyzer import STOCK_NAME_MAP, get_analyzer
 from agent_stock.config import Config, RuntimeLlmConfig, get_config, redact_sensitive_text
 from agent_stock.repositories.chat_repo import AgentChatRepository
 from agent_stock.services.backtest_interpretation_service import BacktestInterpretationService
+from agent_stock.services.agent_chat_monitor_service import AgentChatMonitorService
 from agent_stock.services.agent_service import AgentService
 from agent_stock.services.agent_task_service import get_agent_task_service
 from agent_stock.services.backend_agent_chat_client import BackendAgentChatClient
@@ -354,6 +355,7 @@ class AgentChatService:
         chat_repo: AgentChatRepository | None = None,
         agent_service: AgentService | None = None,
         backend_client: BackendAgentChatClient | None = None,
+        monitor_service: AgentChatMonitorService | None = None,
         backtest_interpretation_service: BacktestInterpretationService | None = None,
         analyzer=None,
         analyzer_factory: Callable[[RuntimeLlmConfig | None], Any] | None = None,
@@ -363,6 +365,7 @@ class AgentChatService:
         self.config = config or get_config()
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = chat_repo or AgentChatRepository(self.db)
+        self.monitor_service = monitor_service or AgentChatMonitorService(self.repo)
         self.agent_service = agent_service or AgentService(config=self.config, db_manager=self.db)
         self.backend_client = backend_client or BackendAgentChatClient(config=self.config)
         self.backtest_interpretation_service = backtest_interpretation_service or BacktestInterpretationService(
@@ -509,6 +512,30 @@ class AgentChatService:
             content=message,
             meta={"username": username},
         )
+        session_header = self.repo.get_session(owner_user_id, session_id) or {}
+        self.monitor_service.start_run(
+            owner_user_id=owner_user_id,
+            session_id=session_id,
+            title=str(session_header.get("title") or ""),
+            user_message=message,
+        )
+
+        client_event_handler = event_handler
+
+        async def emit_event(event_name: str, event_payload: dict[str, Any]) -> None:
+            self.monitor_service.record_event(
+                owner_user_id=owner_user_id,
+                session_id=session_id,
+                event_name=event_name,
+                payload=event_payload,
+            )
+            if client_event_handler is None:
+                return
+            maybe_result = client_event_handler(event_name, event_payload)
+            if asyncio.iscoroutine(maybe_result):
+                await maybe_result
+
+        event_handler = emit_event
 
         try:
             await self._emit(event_handler, "thinking", {"message": "正在理解你的问题"})
@@ -1026,6 +1053,7 @@ class AgentChatService:
                 content=content,
                 meta=final_payload,
             )
+            self.monitor_service.finalize_run(owner_user_id, session_id)
             raise AgentChatHandledError(safe_message, final_payload) from exc
 
     @staticmethod
@@ -1124,6 +1152,7 @@ class AgentChatService:
                 assistant_message_id=assistant_message_id,
                 structured_result=structured_result,
             )
+        self.monitor_service.finalize_run(owner_user_id, session_id)
         return final_payload
 
     def _build_next_conversation_state(
@@ -1288,6 +1317,15 @@ class AgentChatService:
             **header,
             "messages": self.repo.list_messages(owner_user_id, session_id),
         }
+
+    def get_monitor_snapshot(self, owner_user_id: int) -> dict[str, Any]:
+        return self.monitor_service.get_snapshot(owner_user_id)
+
+    def subscribe_monitor(self, owner_user_id: int) -> asyncio.Queue[dict[str, Any]]:
+        return self.monitor_service.subscribe(owner_user_id)
+
+    def unsubscribe_monitor(self, owner_user_id: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self.monitor_service.unsubscribe(owner_user_id, queue)
 
     def delete_session(self, owner_user_id: int, session_id: str) -> bool:
         return self.repo.delete_session(owner_user_id, session_id)

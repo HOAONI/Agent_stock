@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
+import copy
 
 from agent_stock.agents.agentic_decision import clamp_confidence, extract_json_object
 from agent_stock.agents.contracts import (
@@ -27,6 +28,7 @@ from agent_stock.agents.planner_runtime import (
 )
 from agent_stock.analyzer import get_analyzer
 from agent_stock.config import Config, get_config, redact_sensitive_text
+from agent_stock.time_utils import local_now
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,12 @@ STAGE_NEXT_TOOL = {
     "evaluate_risk": "prepare_order",
     "prepare_order": "finish",
     "submit_paper_order": "finish",
+}
+STAGE_LABELS = {
+    "data": "数据 Agent",
+    "signal": "信号 Agent",
+    "risk": "风控 Agent",
+    "execution": "执行 Agent",
 }
 
 
@@ -350,10 +358,23 @@ class ControllerAgent:
                     execution_out = None
                 tool_attempts["fetch_market_data"] += 1
                 stage_visits["data"] += 1
+                data_started_at = local_now().isoformat()
+                self._emit_planner_event(
+                    stage_observer,
+                    "stage_start",
+                    {
+                        "stock_code": code,
+                        "stage": "data",
+                        "visit": stage_visits["data"],
+                        "summary": f"{STAGE_LABELS['data']} 运行中",
+                        "started_at": data_started_at,
+                    },
+                )
                 data_out = self._run_data_tool(
                     code=code,
                     data_agent=data_agent,
                     runtime_config=context.runtime_config,
+                    started_at=data_started_at,
                 )
                 trace = self._build_stage_trace(code=code, stage="data", output=data_out, visit=stage_visits["data"])
                 stage_traces.append(trace)
@@ -378,11 +399,24 @@ class ControllerAgent:
                     execution_out = None
                 tool_attempts["derive_signal"] += 1
                 stage_visits["signal"] += 1
+                signal_started_at = local_now().isoformat()
+                self._emit_planner_event(
+                    stage_observer,
+                    "stage_start",
+                    {
+                        "stock_code": code,
+                        "stage": "signal",
+                        "visit": stage_visits["signal"],
+                        "summary": f"{STAGE_LABELS['signal']} 运行中",
+                        "started_at": signal_started_at,
+                    },
+                )
                 signal_out = self._run_signal_tool(
                     data_out=data_out,
                     trade_date=trade_date,
                     signal_agent=signal_agent,
                     runtime_config=context.runtime_config,
+                    started_at=signal_started_at,
                 )
                 trace = self._build_stage_trace(code=code, stage="signal", output=signal_out, visit=stage_visits["signal"])
                 stage_traces.append(trace)
@@ -404,6 +438,18 @@ class ControllerAgent:
                     break
                 tool_attempts["evaluate_risk"] += 1
                 stage_visits["risk"] += 1
+                risk_started_at = local_now().isoformat()
+                self._emit_planner_event(
+                    stage_observer,
+                    "stage_start",
+                    {
+                        "stock_code": code,
+                        "stage": "risk",
+                        "visit": stage_visits["risk"],
+                        "summary": f"{STAGE_LABELS['risk']} 运行中",
+                        "started_at": risk_started_at,
+                    },
+                )
                 risk_out = self._run_risk_tool(
                     code=code,
                     trade_date=trade_date,
@@ -412,6 +458,7 @@ class ControllerAgent:
                     working_snapshot=working_snapshot,
                     risk_agent=risk_agent,
                     runtime_config=context.runtime_config,
+                    started_at=risk_started_at,
                 )
                 trace = self._build_stage_trace(code=code, stage="risk", output=risk_out, visit=stage_visits["risk"])
                 stage_traces.append(trace)
@@ -433,6 +480,18 @@ class ControllerAgent:
                     break
                 tool_attempts["prepare_order"] += 1
                 stage_visits["execution"] += 1
+                execution_started_at = local_now().isoformat()
+                self._emit_planner_event(
+                    stage_observer,
+                    "stage_start",
+                    {
+                        "stock_code": code,
+                        "stage": "execution",
+                        "visit": stage_visits["execution"],
+                        "summary": f"{STAGE_LABELS['execution']} 运行中",
+                        "started_at": execution_started_at,
+                    },
+                )
                 execution_out = self._run_prepare_order_tool(
                     code=code,
                     trade_date=trade_date,
@@ -442,6 +501,7 @@ class ControllerAgent:
                     working_snapshot=working_snapshot,
                     context=context,
                     execution_agent=execution_agent,
+                    started_at=execution_started_at,
                 )
                 execution_out = self._apply_requested_order_constraints(
                     execution_out=execution_out,
@@ -579,9 +639,13 @@ class ControllerAgent:
         code: str,
         data_agent: Any,
         runtime_config: Any,
+        started_at: str | None = None,
     ) -> DataAgentOutput:
+        stage_started_at = started_at or local_now().isoformat()
         started = time.perf_counter()
         data_out = data_agent.run(code, runtime_config=runtime_config)
+        data_out.started_at = stage_started_at
+        data_out.finished_at = local_now().isoformat()
         data_out.duration_ms = int((time.perf_counter() - started) * 1000)
         data_out.input = {"code": code}
         data_out.output = {
@@ -603,9 +667,13 @@ class ControllerAgent:
         trade_date: date,
         signal_agent: Any,
         runtime_config: Any,
+        started_at: str | None = None,
     ) -> SignalAgentOutput:
+        stage_started_at = started_at or local_now().isoformat()
         started = time.perf_counter()
         signal_out = signal_agent.run(data_out, runtime_config=runtime_config)
+        signal_out.started_at = stage_started_at
+        signal_out.finished_at = local_now().isoformat()
         signal_out.duration_ms = int((time.perf_counter() - started) * 1000)
         signal_out.input = {
             "code": data_out.code,
@@ -636,7 +704,9 @@ class ControllerAgent:
         working_snapshot: dict[str, Any],
         risk_agent: Any,
         runtime_config: Any,
+        started_at: str | None = None,
     ) -> RiskAgentOutput:
+        stage_started_at = started_at or local_now().isoformat()
         current_price = self._resolve_current_price(data_out)
         current_position_value = self._current_position_value(working_snapshot, code)
         started = time.perf_counter()
@@ -649,6 +719,8 @@ class ControllerAgent:
             current_position_value=current_position_value,
             runtime_strategy=(runtime_config.strategy if runtime_config else None),
         )
+        risk_out.started_at = stage_started_at
+        risk_out.finished_at = local_now().isoformat()
         risk_out.duration_ms = int((time.perf_counter() - started) * 1000)
         risk_out.input = {
             "code": code,
@@ -684,7 +756,9 @@ class ControllerAgent:
         working_snapshot: dict[str, Any],
         context: ControllerContext,
         execution_agent: Any,
+        started_at: str | None = None,
     ) -> ExecutionAgentOutput:
+        stage_started_at = started_at or local_now().isoformat()
         current_price = self._resolve_current_price(data_out)
         started = time.perf_counter()
         if hasattr(execution_agent, "prepare_order"):
@@ -715,6 +789,8 @@ class ControllerAgent:
                 signal_output=signal_out,
                 data_output=data_out,
             )
+        execution_out.started_at = stage_started_at
+        execution_out.finished_at = local_now().isoformat()
         execution_out.duration_ms = int((time.perf_counter() - started) * 1000)
         execution_out.input = {
             "code": code,
@@ -1150,9 +1226,15 @@ class ControllerAgent:
             "summary": summary,
             "decision": decision,
             "confidence": clamp_confidence(getattr(output, "confidence", None), 0.5),
+            "duration_ms": getattr(output, "duration_ms", None),
+            "input": copy.deepcopy(getattr(output, "input", None)),
+            "output": copy.deepcopy(getattr(output, "output", None)),
+            "error_message": str(getattr(output, "error_message", "") or "").strip() or None,
             "warnings": warnings,
             "observations": list(getattr(output, "observations", []) or []),
             "fallback_chain": list(getattr(output, "fallback_chain", []) or []),
             "next_action": str(getattr(output, "next_action", "") or "").strip(),
             "llm_used": bool(getattr(output, "llm_used", False)),
+            "started_at": str(getattr(output, "started_at", "") or "").strip() or None,
+            "finished_at": str(getattr(output, "finished_at", "") or "").strip() or None,
         }
