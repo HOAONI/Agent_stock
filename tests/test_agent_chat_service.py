@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+from calendar import monthrange
 import json
 import os
 import re
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from agent_stock.agents.contracts import (
@@ -84,6 +85,14 @@ FAKE_BOARD_CONSTITUENTS = {
         {"code": "000333", "name": "美的集团", "total_mv": 900_000_000_000, "amount": 900_000_000},
     ],
 }
+
+
+def _subtract_calendar_months_for_test(base_date: date, months: int) -> date:
+    total_months = base_date.year * 12 + (base_date.month - 1) - months
+    year = total_months // 12
+    month = total_months % 12 + 1
+    day = min(base_date.day, monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 def build_runtime_config() -> dict[str, Any]:
@@ -1057,6 +1066,26 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AI 解读", second["content"])
         self.assertEqual(len(self.backtest_interpretation_service.calls), 1)
 
+    async def test_strategy_backtest_supports_generic_day_span(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "如果我在比亚迪每次MACD金叉买入，过去300天收益怎样",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "backtest")
+        self.assertEqual(len(self.backend_client.strategy_backtest_calls), 1)
+        backtest_call = self.backend_client.strategy_backtest_calls[0]
+        self.assertEqual(backtest_call["code"], "002594")
+        self.assertEqual(backtest_call["strategies"][0]["template_code"], "macd_cross")
+        self.assertEqual(backtest_call["start_date"], (date.today() - timedelta(days=300)).isoformat())
+        self.assertEqual(backtest_call["end_date"], date.today().isoformat())
+        self.assertIn("策略回测结论", payload["content"])
+
     async def test_strategy_backtest_compare_request_runs_multiple_templates(self):
         payload = await self.service.handle_chat(
             {
@@ -1098,6 +1127,64 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy["params"]["exit"]["conditions"][0]["kind"], "price_ma_relation")
         self.assertEqual(strategy["params"]["exit"]["conditions"][0]["maWindow"], 5)
         self.assertIn("策略回测结论", payload["content"])
+
+    async def test_strategy_backtest_supports_embedded_stock_name_with_combined_rule_dsl(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "如果我在比亚迪每次MACD 金叉且 RSI<30 且跌破 5 日线止损，过去一年收益怎样",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "backtest")
+        self.assertEqual(len(self.backend_client.strategy_backtest_calls), 1)
+        backtest_call = self.backend_client.strategy_backtest_calls[0]
+        self.assertEqual(backtest_call["code"], "002594")
+        strategy = backtest_call["strategies"][0]
+        self.assertEqual(strategy["template_code"], "rule_dsl")
+        self.assertEqual(strategy["params"]["entry"]["operator"], "and")
+        self.assertEqual(
+            [item["kind"] for item in strategy["params"]["entry"]["conditions"]],
+            ["macd_cross", "rsi_threshold"],
+        )
+        self.assertEqual(strategy["params"]["exit"]["conditions"][0]["kind"], "price_ma_relation")
+        self.assertEqual(strategy["params"]["exit"]["conditions"][0]["maWindow"], 5)
+        self.assertIn("策略回测结论", payload["content"])
+
+    def test_strategy_backtest_stock_ref_extractor_finds_embedded_name_and_ignores_indicator_tokens(self):
+        refs = self.service._extract_strategy_backtest_stock_refs(
+            "如果我在比亚迪每次MACD 金叉且 RSI<30 且跌破 5 日线止损，过去一年收益怎样",
+        )
+
+        self.assertEqual(refs, ["比亚迪"])
+        self.assertNotIn("RSI", refs)
+        self.assertNotIn("MACD", refs)
+
+    def test_strategy_backtest_window_supports_generic_relative_spans(self):
+        today = date.today()
+
+        day_window = self.service._extract_strategy_backtest_window("如果我在比亚迪每次MACD金叉买入，过去300天收益怎样")
+        self.assertEqual(day_window["start_date"], (today - timedelta(days=300)).isoformat())
+        self.assertEqual(day_window["end_date"], today.isoformat())
+        self.assertEqual(day_window["window_label"], "过去300天")
+
+        week_window = self.service._extract_strategy_backtest_window("最近8周回测收益如何")
+        self.assertEqual(week_window["start_date"], (today - timedelta(days=56)).isoformat())
+        self.assertEqual(week_window["end_date"], today.isoformat())
+        self.assertEqual(week_window["window_label"], "过去8周")
+
+        month_window = self.service._extract_strategy_backtest_window("近15个月表现如何")
+        self.assertEqual(month_window["start_date"], _subtract_calendar_months_for_test(today, 15).isoformat())
+        self.assertEqual(month_window["end_date"], today.isoformat())
+        self.assertEqual(month_window["window_label"], "过去15个月")
+
+        year_window = self.service._extract_strategy_backtest_window("过去两年回测收益怎样")
+        self.assertEqual(year_window["start_date"], _subtract_calendar_months_for_test(today, 24).isoformat())
+        self.assertEqual(year_window["end_date"], today.isoformat())
+        self.assertEqual(year_window["window_label"], "过去两年")
 
     async def test_follow_up_order_executes_single_candidate(self):
         first = await self.service.handle_chat(
@@ -1362,6 +1449,119 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "blocked")
         self.assertEqual(payload["structured_result"]["intent"], "clarify")
         self.assertIn("不存在科技", payload["content"])
+
+    async def test_name_only_query_runs_analysis(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "贵州茅台",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "analysis")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["600519"])
+        self.assertEqual(payload["structured_result"]["conversation_state"]["focus_stocks"], ["600519"])
+
+    async def test_alias_only_query_runs_analysis(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "茅台",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "analysis")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["600519"])
+        self.assertEqual(payload["structured_result"]["conversation_state"]["focus_stocks"], ["600519"])
+
+    async def test_multi_stock_names_run_analysis(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "平安银行和宁德时代",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "analysis")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["000001", "300750"])
+
+    async def test_ambiguous_stock_alias_clarifies_with_candidates(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "平安",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["structured_result"]["intent"], "clarify")
+        self.assertIn("000001 平安银行", payload["content"])
+        self.assertIn("601318 中国平安", payload["content"])
+
+    async def test_llm_clarify_falls_back_to_local_name_resolution(self):
+        service = self.build_service(
+            FakeMappedPlannerAnalyzer(
+                {
+                    "茅台": FakePlannerAnalyzer._plan(
+                        intent="clarify",
+                        required_tools=[],
+                        stock_scope={"mode": "none", "stock_refs": []},
+                        clarification="请补充股票代码。",
+                    ),
+                }
+            )
+        )
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "茅台",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "analysis")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["600519"])
+
+    async def test_route_stock_name_context_persists_focus_as_code(self):
+        first = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "帮我分析一下今天的 贵州茅台 行情",
+                "context": {"stock_code": "贵州茅台", "source_path": "/analysis/agent-chat?stockCode=贵州茅台"},
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(first["structured_result"]["conversation_state"]["focus_stocks"], ["600519"])
+
+        second = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "再试一次",
+                "session_id": first["session_id"],
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(second["status"], "analysis_only")
+        self.assertEqual(second["structured_result"]["intent"], "analysis")
+        self.assertEqual(second["structured_result"]["conversation_state"]["focus_stocks"], ["600519"])
 
     async def test_industry_board_ref_expands_to_top_10_components(self):
         service = self.build_service(

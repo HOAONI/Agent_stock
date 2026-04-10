@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 
 UNAVAILABLE_SUMMARY = "AI 解读暂不可用，请先检查当前运行环境里的模型配置。"
 FAILED_SUMMARY = "AI 解读生成失败，请稍后重试。"
+BACKTEST_INTERPRETATION_SYSTEM_PROMPT = """你是一名量化回测结果解读助手。
+
+你的唯一任务是根据用户给出的结构化回测数据，输出严格 JSON 格式的中文解读结果。
+
+必须遵守：
+1. 只能依据输入中的区间、指标、基准和上下文，不得编造未来预测、新闻、基本面或额外事实。
+2. 仅输出 JSON，不要 Markdown，不要代码块，不要额外解释。
+3. 返回结构必须为 {"items":[{"item_key":"原样返回","verdict":"简短标签","summary":"2-3句中文说明"}]}。
+4. summary 只写 2-3 句中文，优先解释总收益、回撤、夏普、胜率、交易次数等风险收益含义。
+5. 若 total_trades 为 0 或样本明显不足，必须明确说明“无成交”或“样本不足”，不要伪造表现判断。
+6. verdict 控制在 8 个字以内，例如“表现中等”“收益偏弱”“回撤可控”“样本不足”。
+7. 若最大回撤为负数，解读时按其绝对值理解。
+8. 不要给出买卖建议，只解释历史表现。"""
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -63,7 +76,11 @@ class BacktestInterpretationService:
     ) -> None:
         self.config = config or get_config()
         self._analyzer_factory = analyzer_factory or (
-            lambda runtime_llm: GeminiAnalyzer(config=self.config, runtime_llm=runtime_llm)
+            lambda runtime_llm: GeminiAnalyzer(
+                config=self.config,
+                runtime_llm=runtime_llm,
+                system_prompt=BACKTEST_INTERPRETATION_SYSTEM_PROMPT,
+            )
         )
 
     def interpret(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -91,7 +108,7 @@ class BacktestInterpretationService:
             raw_text = analyzer.generate_text(
                 prompt,
                 temperature=0.2,
-                max_output_tokens=2200,
+                max_output_tokens=self._resolve_max_output_tokens(len(items)),
             )
             parsed = self._parse_response(raw_text)
         except Exception as exc:
@@ -193,23 +210,16 @@ class BacktestInterpretationService:
             }
             for item in items
         ]
-        return f"""你是一名量化回测结果解读助手。请基于给定事实，为每个回测结果输出面向普通投资者的中文说明。
+        return (
+            "请基于下面的输入数据返回严格 JSON。"
+            "保持 item_key 原样返回，summary 使用 2-3 句中文，verdict 使用简短中文标签。\n"
+            f"输入数据：\n{json.dumps(prompt_payload, ensure_ascii=False, separators=(',', ':'))}"
+        )
 
-硬性规则：
-1. 只能依据输入中的区间、指标和上下文，不得编造未来预测、未提供的新闻、基本面或额外事实。
-2. 输出中文，不要 Markdown，不要项目符号。
-3. 每个 summary 控制在 2-3 句，优先解释总收益、最大回撤、夏普/胜率/交易次数等关键数字对风险收益的含义。
-4. 如果 total_trades 为 0 或者样本明显不足，要明确说明“无成交/样本不足”，不要伪造表现判断。
-5. verdict 是一句很短的结论标签，例如“表现中等”“收益偏弱”“回撤可控”“样本不足”，控制在 8 个字内。
-6. 最大回撤如果是负数，说明时要按其绝对值理解。
-7. 不要给出买卖建议，只做历史表现解释。
-
-输出必须是严格 JSON，对象结构如下：
-{{"items":[{{"item_key":"原样返回","verdict":"简短标签","summary":"2-3句中文说明"}}]}}
-
-输入数据：
-{json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":"))}
-"""
+    @staticmethod
+    def _resolve_max_output_tokens(item_count: int) -> int:
+        safe_count = max(1, int(item_count or 0))
+        return min(1800, 320 + (220 * safe_count))
 
     def _parse_response(self, raw_text: str) -> list[dict[str, Any]]:
         payload = self._extract_json(raw_text)

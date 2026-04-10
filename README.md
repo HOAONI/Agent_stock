@@ -38,6 +38,10 @@ cp .env.example .env
 - `AGENT_LLM_REQUEST_TIMEOUT_MS`
 - `REALTIME_SOURCE_PRIORITY`
 
+如果和 `Backend_stock` 联调 AI 回测解读，建议同时保证
+`BACKTEST_AGENT_INTERPRET_TIMEOUT_MS >= AGENT_LLM_REQUEST_TIMEOUT_MS + 30000`，
+避免 Backend 先于 Agent 的 LLM 请求超时。
+
 ## 运行方式
 
 启动服务：

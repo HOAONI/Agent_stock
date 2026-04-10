@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import unittest
 
-from agent_stock.services.backtest_interpretation_service import BacktestInterpretationService
+from agent_stock.analyzer import GeminiAnalyzer, LlmRequestTimeoutError
+from agent_stock.config import Config
+from agent_stock.services.backtest_interpretation_service import (
+    BACKTEST_INTERPRETATION_SYSTEM_PROMPT,
+    BacktestInterpretationService,
+)
 
 
 class _UnavailableAnalyzer:
@@ -22,6 +27,54 @@ class _FixedTextAnalyzer:
 
     def generate_text(self, prompt, *, temperature=None, max_output_tokens=4096):  # noqa: ARG002
         return self.text
+
+
+class _RecordingAnalyzer(_FixedTextAnalyzer):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.calls: list[dict[str, object]] = []
+
+    def generate_text(self, prompt, *, temperature=None, max_output_tokens=4096):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "temperature": temperature,
+                "max_output_tokens": max_output_tokens,
+            }
+        )
+        return self.text
+
+
+class _TimeoutAnalyzer:
+    def is_available(self) -> bool:
+        return True
+
+    def generate_text(self, prompt, *, temperature=None, max_output_tokens=4096):  # noqa: ARG002
+        raise LlmRequestTimeoutError(provider="OpenAI-compatible", timeout_ms=120000)
+
+
+class _FakeOpenAiCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+
+        class _Message:
+            content = '{"items":[{"item_key":"strategy-1","verdict":"表现中等","summary":"样本期内收益与回撤匹配度尚可。"}]}'
+
+        class _Choice:
+            message = _Message()
+
+        class _Response:
+            choices = [_Choice()]
+
+        return _Response()
+
+
+class _FakeOpenAiClient:
+    def __init__(self, completions: _FakeOpenAiCompletions) -> None:
+        self.chat = type("_Chat", (), {"completions": completions})()
 
 
 def _sample_payload() -> dict:
@@ -113,6 +166,54 @@ class BacktestInterpretationServiceTestCase(unittest.TestCase):
 
         self.assertTrue(all(item["status"] == "failed" for item in result["items"]))
         self.assertTrue(all(item["summary"] == "AI 解读生成失败，请稍后重试。" for item in result["items"]))
+
+    def test_scales_generation_budget_with_item_count(self):
+        analyzer = _RecordingAnalyzer(
+            """{"items":[{"item_key":"strategy-1","verdict":"表现中等","summary":"策略一表现稳定。"},{"item_key":"strategy-2","verdict":"样本不足","summary":"策略二样本不足。"}]}"""
+        )
+        service = BacktestInterpretationService(
+            analyzer_factory=lambda runtime_llm: analyzer,  # noqa: ARG005
+        )
+
+        result = service.interpret(_sample_payload())
+
+        self.assertEqual(len(analyzer.calls), 1)
+        self.assertEqual(analyzer.calls[0]["temperature"], 0.2)
+        self.assertEqual(analyzer.calls[0]["max_output_tokens"], 760)
+        self.assertEqual(result["items"][0]["status"], "ready")
+        self.assertEqual(result["items"][1]["status"], "ready")
+
+    def test_timeout_errors_fall_back_to_failed_items(self):
+        service = BacktestInterpretationService(
+            analyzer_factory=lambda runtime_llm: _TimeoutAnalyzer(),  # noqa: ARG005
+        )
+
+        result = service.interpret(_sample_payload())
+
+        self.assertTrue(all(item["status"] == "failed" for item in result["items"]))
+        self.assertTrue(all(item["summary"] == "AI 解读生成失败，请稍后重试。" for item in result["items"]))
+        self.assertTrue(
+            all("[llm_request_timeout] OpenAI-compatible request timed out after 120000ms" in str(item["error_message"]) for item in result["items"])
+        )
+
+    def test_dedicated_backtest_prompt_is_sent_to_openai_client(self):
+        completions = _FakeOpenAiCompletions()
+        analyzer = GeminiAnalyzer(config=Config(), system_prompt=BACKTEST_INTERPRETATION_SYSTEM_PROMPT)
+        analyzer._model = None
+        analyzer._anthropic_client = None
+        analyzer._openai_client = _FakeOpenAiClient(completions)
+        analyzer._use_openai = True
+        analyzer._current_model_name = "fake-model"
+
+        text = analyzer.generate_text("回测输入", temperature=0.2, max_output_tokens=512)
+
+        self.assertIn('"items"', text)
+        self.assertEqual(len(completions.calls), 1)
+        messages = completions.calls[0]["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[0]["content"], BACKTEST_INTERPRETATION_SYSTEM_PROMPT)
+        self.assertNotIn("决策仪表盘", str(messages[0]["content"]))
+        self.assertEqual(messages[1]["content"], "回测输入")
 
 
 if __name__ == "__main__":

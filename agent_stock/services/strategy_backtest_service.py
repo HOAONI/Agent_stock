@@ -59,6 +59,17 @@ def _strategy_bar_count(strategy: Any) -> int:
     return int(len(strategy))
 
 
+def _safe_line_value(line: Any) -> float | None:
+    """安全读取当前 Backtrader line 值，未就绪时返回 None。"""
+    try:
+        value = float(line[0])
+    except (IndexError, KeyError, OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
 # 兼容旧接口仍在使用的策略编码，进入服务后会统一映射为新的模板编码。
 LEGACY_STRATEGY_CODES = ["ma20_trend", "rsi14_mean_reversion"]
 LEGACY_STRATEGY_NAMES: dict[str, str] = {
@@ -135,9 +146,9 @@ class _BaseTrackedStrategy(bt.Strategy if bt is not None else object):
 
     def _next_open_price(self) -> float:
         """读取下一次下单参考价，优先开盘价。"""
-        value = float(self.data.open[0])
-        if not math.isfinite(value) or value <= 0:
-            value = float(self.data.close[0])
+        value = _safe_line_value(self.data.open)
+        if value is None or value <= 0:
+            value = _safe_line_value(self.data.close) or 0.01
         return max(0.01, value)
 
     def _track_equity(self) -> None:
@@ -352,19 +363,25 @@ class _MACrossStrategy(_BaseTrackedStrategy):
         if _strategy_bar_count(self) < self.ma_window:
             return False
 
-        ma_value = float(self.moving_average[0])
-        if not math.isfinite(ma_value):
+        ma_value = _safe_line_value(self.moving_average)
+        if ma_value is None:
             return False
 
         if self._is_window_start_bar():
-            close_value = float(self.data.close[0])
-            return math.isfinite(close_value) and close_value > ma_value
+            close_value = _safe_line_value(self.data.close)
+            return close_value is not None and close_value > ma_value
 
-        return _strategy_bar_count(self) >= self.ma_window + 1 and float(self.cross_up[0]) > 0
+        if _strategy_bar_count(self) < self.ma_window + 1:
+            return False
+        cross_value = _safe_line_value(self.cross_up)
+        return cross_value is not None and cross_value > 0
 
     def _should_sell(self) -> bool:
         """判断是否满足均线下穿卖出条件。"""
-        return _strategy_bar_count(self) >= self.ma_window + 1 and float(self.cross_down[0]) > 0
+        if _strategy_bar_count(self) < self.ma_window + 1:
+            return False
+        cross_value = _safe_line_value(self.cross_down)
+        return cross_value is not None and cross_value > 0
 
     def _signal_exit_reason(self) -> str:
         """返回均线策略离场原因。"""
@@ -396,15 +413,15 @@ class _RSIThresholdStrategy(_BaseTrackedStrategy):
         """判断是否满足 RSI 超卖买入条件。"""
         if _strategy_bar_count(self) < self.rsi_period + 1:
             return False
-        value = float(self.rsi[0])
-        return math.isfinite(value) and value < self.oversold_threshold
+        value = _safe_line_value(self.rsi)
+        return value is not None and value < self.oversold_threshold
 
     def _should_sell(self) -> bool:
         """判断是否满足 RSI 超买卖出条件。"""
         if _strategy_bar_count(self) < self.rsi_period + 1:
             return False
-        value = float(self.rsi[0])
-        return math.isfinite(value) and value > self.overbought_threshold
+        value = _safe_line_value(self.rsi)
+        return value is not None and value > self.overbought_threshold
 
     def _signal_exit_reason(self) -> str:
         """返回 RSI 策略离场原因。"""
@@ -443,13 +460,15 @@ class _MACDCrossStrategy(_BaseTrackedStrategy):
         """判断是否满足 MACD 金叉买入条件。"""
         if _strategy_bar_count(self) < self.macd_slow + self.macd_signal:
             return False
-        return float(self.cross_up[0]) > 0
+        cross_value = _safe_line_value(self.cross_up)
+        return cross_value is not None and cross_value > 0
 
     def _should_sell(self) -> bool:
         """判断是否满足 MACD 死叉卖出条件。"""
         if _strategy_bar_count(self) < self.macd_slow + self.macd_signal:
             return False
-        return float(self.cross_down[0]) > 0
+        cross_value = _safe_line_value(self.cross_down)
+        return cross_value is not None and cross_value > 0
 
     def _signal_exit_reason(self) -> str:
         """返回 MACD 策略离场原因。"""
@@ -479,6 +498,10 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
         self._cross_up_cache: dict[tuple[str, ...], Any] = {}
         self._cross_down_cache: dict[tuple[str, ...], Any] = {}
         self._last_exit_reason = "rule_dsl_exit"
+        # Backtrader 指标必须在 __init__ 阶段创建，才能基于整段预热历史累计。
+        # 若在 next() 中首次懒创建，短有效窗口下会丢失前序 bar，甚至触发 buffer 越界。
+        self._prime_group_indicators(self.dsl_payload.get("entry"))
+        self._prime_group_indicators(self.dsl_payload.get("exit"))
 
     def _get_ma(self, window: int) -> Any:
         if window not in self._ma_cache:
@@ -511,6 +534,57 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
             self._cross_down_cache[key] = self._indicator_ns.CrossDown(left, right)
         return self._cross_down_cache[key]
 
+    def _prime_group_indicators(self, group: dict[str, Any] | None) -> None:
+        if not isinstance(group, dict):
+            return
+        for condition in group.get("conditions") or []:
+            if isinstance(condition, dict):
+                self._prime_condition_indicators(condition)
+
+    def _prime_condition_indicators(self, condition: dict[str, Any]) -> None:
+        kind = str(condition.get("kind") or "").strip()
+
+        if kind == "macd_cross":
+            fast = int(condition.get("fast") or 12)
+            slow = int(condition.get("slow") or 26)
+            signal = int(condition.get("signal") or 9)
+            macd = self._get_macd(fast, slow, signal)
+            if str(condition.get("direction") or "bullish") == "bearish":
+                self._get_cross_down(
+                    ("macd", "down", str(fast), str(slow), str(signal)),
+                    macd.macd,
+                    macd.signal,
+                )
+            else:
+                self._get_cross_up(
+                    ("macd", "up", str(fast), str(slow), str(signal)),
+                    macd.macd,
+                    macd.signal,
+                )
+            return
+
+        if kind == "rsi_threshold":
+            period = int(condition.get("period") or 14)
+            self._get_rsi(period)
+            return
+
+        if kind == "price_ma_relation":
+            ma_window = int(condition.get("maWindow") or 5)
+            moving_average = self._get_ma(ma_window)
+            relation = str(condition.get("relation") or "cross_below")
+            if relation == "cross_above":
+                self._get_cross_up(
+                    ("price_ma", "up", str(ma_window)),
+                    self.data.close,
+                    moving_average,
+                )
+            elif relation == "cross_below":
+                self._get_cross_down(
+                    ("price_ma", "down", str(ma_window)),
+                    self.data.close,
+                    moving_average,
+                )
+
     def _evaluate_condition(self, condition: dict[str, Any]) -> bool:
         kind = str(condition.get("kind") or "").strip()
 
@@ -533,15 +607,16 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
                     macd.macd,
                     macd.signal,
                 )
-            return float(cross[0]) > 0
+            cross_value = _safe_line_value(cross)
+            return cross_value is not None and cross_value > 0
 
         if kind == "rsi_threshold":
             period = int(condition.get("period") or 14)
             if _strategy_bar_count(self) < period + 1:
                 return False
             rsi = self._get_rsi(period)
-            value = float(rsi[0])
-            if not math.isfinite(value):
+            value = _safe_line_value(rsi)
+            if value is None:
                 return False
             threshold = float(condition.get("threshold") or 0.0)
             operator = str(condition.get("operator") or "lt")
@@ -560,9 +635,9 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
             if _strategy_bar_count(self) < ma_window:
                 return False
             moving_average = self._get_ma(ma_window)
-            ma_value = float(moving_average[0])
-            close_value = float(self.data.close[0])
-            if not math.isfinite(ma_value) or not math.isfinite(close_value):
+            ma_value = _safe_line_value(moving_average)
+            close_value = _safe_line_value(self.data.close)
+            if ma_value is None or close_value is None:
                 return False
             relation = str(condition.get("relation") or "cross_below")
             if relation == "above":
@@ -577,14 +652,16 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
                     self.data.close,
                     moving_average,
                 )
-                return float(cross_up[0]) > 0
+                cross_value = _safe_line_value(cross_up)
+                return cross_value is not None and cross_value > 0
             if relation == "cross_below":
                 cross_down = self._get_cross_down(
                     ("price_ma", "down", str(ma_window)),
                     self.data.close,
                     moving_average,
                 )
-                return float(cross_down[0]) > 0
+                cross_value = _safe_line_value(cross_down)
+                return cross_value is not None and cross_value > 0
             return False
 
         if kind == "stop_loss_pct":
@@ -594,8 +671,8 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
             if entry_price <= 0:
                 return False
             threshold = entry_price * (1.0 - (float(condition.get("pct") or 0.0) / 100.0))
-            low_value = float(self.data.low[0])
-            return math.isfinite(low_value) and low_value <= threshold
+            low_value = _safe_line_value(self.data.low)
+            return low_value is not None and low_value <= threshold
 
         if kind == "take_profit_pct":
             if not self.position or self.current_entry is None:
@@ -604,8 +681,8 @@ class _RuleDslStrategy(_BaseTrackedStrategy):
             if entry_price <= 0:
                 return False
             threshold = entry_price * (1.0 + (float(condition.get("pct") or 0.0) / 100.0))
-            high_value = float(self.data.high[0])
-            return math.isfinite(high_value) and high_value >= threshold
+            high_value = _safe_line_value(self.data.high)
+            return high_value is not None and high_value >= threshold
 
         return False
 

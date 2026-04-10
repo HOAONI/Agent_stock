@@ -540,6 +540,7 @@ class GeminiAnalyzer:
         api_key: str | None = None,
         config: Config | None = None,
         runtime_llm: RuntimeLlmConfig | None = None,
+        system_prompt: str | None = None,
     ):
         """
         初始化 AI 分析器
@@ -552,6 +553,7 @@ class GeminiAnalyzer:
         base_config = config or get_config()
         self._config = base_config.clone_for_runtime_llm(runtime_llm)
         self._runtime_llm = runtime_llm
+        self._system_prompt = str(system_prompt or "").strip() or self.SYSTEM_PROMPT
 
         config = self._config
         self._llm_timeout_ms = max(1000, int(getattr(config, "agent_llm_request_timeout_ms", 120000) or 120000))
@@ -712,7 +714,7 @@ class GeminiAnalyzer:
             try:
                 self._model = genai.GenerativeModel(
                     model_name=model_name,
-                    system_instruction=self.SYSTEM_PROMPT,
+                    system_instruction=self._system_prompt,
                 )
                 self._current_model_name = model_name
                 self._using_fallback = False
@@ -727,7 +729,7 @@ class GeminiAnalyzer:
                 )
                 self._model = genai.GenerativeModel(
                     model_name=fallback_model,
-                    system_instruction=self.SYSTEM_PROMPT,
+                    system_instruction=self._system_prompt,
                 )
                 self._current_model_name = fallback_model
                 self._using_fallback = True
@@ -753,7 +755,7 @@ class GeminiAnalyzer:
             logger.warning(f"[LLM] 切换到备选模型: {fallback_model}")
             self._model = genai.GenerativeModel(
                 model_name=fallback_model,
-                system_instruction=self.SYSTEM_PROMPT,
+                system_instruction=self._system_prompt,
             )
             self._current_model_name = fallback_model
             self._using_fallback = True
@@ -843,7 +845,7 @@ class GeminiAnalyzer:
                 message = client.messages.create(
                     model=model_name,
                     max_tokens=max_tokens,
-                    system=self.SYSTEM_PROMPT,
+                    system=self._system_prompt,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
                     timeout=self._llm_timeout_seconds,
@@ -898,7 +900,7 @@ class GeminiAnalyzer:
             kwargs = {
                 "model": model_name,
                 "messages": [
-                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "system", "content": self._system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 "temperature": generation_config.get("temperature", config.openai_temperature),
@@ -1740,9 +1742,10 @@ def get_analyzer(
     *,
     config: Config | None = None,
     runtime_llm: RuntimeLlmConfig | None = None,
+    system_prompt: str | None = None,
 ) -> GeminiAnalyzer:
     """获取 LLM 分析器实例。"""
-    return GeminiAnalyzer(config=config, runtime_llm=runtime_llm)
+    return GeminiAnalyzer(config=config, runtime_llm=runtime_llm, system_prompt=system_prompt)
 
 
 if __name__ == "__main__":

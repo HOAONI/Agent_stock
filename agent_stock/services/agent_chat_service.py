@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from calendar import monthrange
 import asyncio
 import json
 import logging
@@ -43,6 +44,27 @@ from agent_stock.services.strategy_rule_dsl import (
 from agent_stock.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+_CHINESE_NUMERAL_DIGITS: dict[str, int] = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CHINESE_NUMERAL_UNITS: dict[str, int] = {
+    "十": 10,
+    "百": 100,
+    "千": 1000,
+    "万": 10000,
+}
 
 ChatEventHandler = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 BoardCatalogProvider = Callable[[str], list[dict[str, Any]]]
@@ -109,6 +131,28 @@ _STRATEGY_BACKTEST_PERFORMANCE_KEYWORDS = (
     "怎样",
     "怎么样",
     "如何",
+)
+_STRATEGY_BACKTEST_STOCK_REF_IGNORE_TOKENS = frozenset(
+    {
+        "MACD",
+        "RSI",
+        "MA",
+        "EMA",
+        "KDJ",
+        "BOLL",
+        "DIF",
+        "DEA",
+        "金叉",
+        "死叉",
+        "均线",
+        "超卖",
+        "超买",
+        "止损",
+        "止盈",
+        "收益",
+        "回测",
+        "胜率",
+    }
 )
 _ACCOUNT_KEYWORDS = ("持仓", "账户", "仓位", "资金", "模拟盘情况", "现金")
 _PORTFOLIO_HEALTH_KEYWORDS = (
@@ -222,6 +266,54 @@ _STOCK_NAME_SPLIT_RE = re.compile(r"(?:、|,|，|/|以及|还有|和|及|与|跟
 _STOCK_NAME_CONTEXT_SUFFIX_RE = re.compile(
     r"(?:的?(?:行情|走势|情况|表现|风险|机会|标的|研报|财报|基本面|技术面|消息面|股价)|怎么样|如何|咋样|大吗|高吗|呢|吗|吧|呀|啊|啦|了|？|\?)+$"
 )
+_STOCK_NAME_ALIAS_SUFFIXES = (
+    "股份有限公司",
+    "有限责任公司",
+    "控股集团",
+    "控股股份",
+    "集团股份",
+    "股份",
+    "集团",
+    "控股",
+    "有限公司",
+    "公司",
+)
+_DIRECT_STOCK_QUERY_FILLER_TOKENS = (
+    "帮我分析一下",
+    "帮我分析",
+    "分析一下",
+    "分析",
+    "看一下",
+    "看下",
+    "看看",
+    "研究一下",
+    "研究",
+    "聊聊",
+    "聊下",
+    "今天的",
+    "今天",
+    "当前的",
+    "当前",
+    "这个",
+    "那个",
+    "这只",
+    "那只",
+    "帮我",
+    "给我",
+    "请",
+    "一下",
+    "再",
+    "呢",
+    "吗",
+    "吧",
+    "呀",
+    "啊",
+    "啦",
+    "了",
+    "如何",
+    "怎么样",
+    "咋样",
+)
 _BOARD_SCOPE_SUFFIX_RE = re.compile(r"(?:行业板块|概念板块|行业|板块|概念|赛道)+$")
 _BOARD_NAME_COLUMNS = ("板块名称", "板块", "名称", "name", "label", "board_name")
 _BOARD_CODE_COLUMNS = ("板块代码", "代码", "board_code", "symbol", "code", "board_symbol")
@@ -261,6 +353,9 @@ _GENERIC_STOCK_NAME_EXACT_BLOCKLIST = {
     "去下单吧",
     "就按刚才的来",
     "按刚才的来",
+    "试一次",
+    "再试一次",
+    "再来一次",
 }
 _GENERIC_STOCK_NAME_FRAGMENT_KEYWORDS = (
     "分析",
@@ -379,8 +474,10 @@ class AgentChatService:
         self.runtime_market_service = RuntimeMarketService(config=self.config)
         self._stock_name_lookup_lock = threading.Lock()
         self._board_lookup_lock = threading.Lock()
+        self._static_stock_name_profiles = self._build_static_stock_name_profiles()
         self._static_stock_name_index = self._build_static_stock_name_index()
-        self._dynamic_stock_name_index: dict[str, str] | None = None
+        self._dynamic_stock_name_profiles: dict[str, dict[str, Any]] | None = None
+        self._dynamic_stock_name_index: dict[str, list[str]] | None = None
         self._stock_name_lookup_manager: Any | None = None
         self._board_catalog_provider = board_catalog_provider or self._default_board_catalog_provider
         self._board_constituents_provider = board_constituents_provider or self._default_board_constituents_provider
@@ -1969,6 +2066,106 @@ class AgentChatService:
                 return None
         return None
 
+    @staticmethod
+    def _parse_chinese_numeral_integer(value: str) -> int | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        total = 0
+        section = 0
+        number = 0
+        seen_token = False
+        for char in text:
+            if char in _CHINESE_NUMERAL_DIGITS:
+                number = _CHINESE_NUMERAL_DIGITS[char]
+                seen_token = True
+                continue
+            unit = _CHINESE_NUMERAL_UNITS.get(char)
+            if unit is None:
+                return None
+            seen_token = True
+            if unit == 10000:
+                section = (section + number) or 1
+                total += section * unit
+                section = 0
+                number = 0
+                continue
+            current = number or 1
+            section += current * unit
+            number = 0
+
+        if not seen_token:
+            return None
+        return total + section + number
+
+    @classmethod
+    def _parse_strategy_backtest_relative_quantity(cls, value: str) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d+", text):
+            return float(int(text))
+        if text == "半":
+            return 0.5
+        parsed = cls._parse_chinese_numeral_integer(text)
+        return float(parsed) if parsed is not None else None
+
+    @staticmethod
+    def _subtract_calendar_months(base_date: date, months: int) -> date:
+        if months <= 0:
+            return base_date
+        total_months = base_date.year * 12 + (base_date.month - 1) - months
+        year = total_months // 12
+        month = total_months % 12 + 1
+        day = min(base_date.day, monthrange(year, month)[1])
+        return date(year, month, day)
+
+    @classmethod
+    def _build_strategy_backtest_relative_window(
+        cls,
+        matched: re.Match[str],
+        today: date,
+    ) -> dict[str, str] | None:
+        quantity_text = str(matched.group("quantity") or "").strip()
+        quantity = cls._parse_strategy_backtest_relative_quantity(quantity_text)
+        if quantity is None or quantity <= 0:
+            return None
+
+        unit = str(matched.group("unit") or "").strip()
+        if unit in {"天", "日", "交易日"}:
+            start_date = today - timedelta(days=max(1, int(round(quantity))))
+            window_label = f"过去{quantity_text}天"
+        elif unit in {"周", "星期"}:
+            start_date = today - timedelta(days=max(1, int(round(quantity * 7))))
+            window_label = f"过去{quantity_text}周"
+        elif unit in {"个月", "月"}:
+            if quantity == 0.5:
+                start_date = today - timedelta(days=15)
+                window_label = "过去半个月"
+            elif quantity.is_integer():
+                start_date = cls._subtract_calendar_months(today, int(quantity))
+                window_label = f"过去{quantity_text}个月"
+            else:
+                return None
+        elif unit == "年":
+            if quantity == 0.5:
+                start_date = cls._subtract_calendar_months(today, 6)
+                window_label = "过去半年"
+            elif quantity.is_integer():
+                start_date = cls._subtract_calendar_months(today, int(quantity) * 12)
+                window_label = f"过去{quantity_text}年"
+            else:
+                return None
+        else:
+            return None
+
+        return {
+            "start_date": start_date.isoformat(),
+            "end_date": today.isoformat(),
+            "window_label": window_label,
+        }
+
     def _extract_strategy_backtest_window(self, message: str) -> dict[str, str]:
         today = date.today()
         absolute_range = re.search(
@@ -1987,26 +2184,21 @@ class AgentChatService:
                 }
 
         compact = self._compact_message_text(message)
-        day_span = 365
-        window_label = "过去一年"
-        if any(token in compact for token in ("过去两年", "最近两年", "近两年", "2年")):
-            day_span = 730
-            window_label = "过去两年"
-        elif any(token in compact for token in ("过去半年", "最近半年", "近半年", "6个月")):
-            day_span = 182
-            window_label = "过去半年"
-        elif any(token in compact for token in ("过去三个月", "最近三个月", "近三个月", "最近3个月", "近3个月", "3个月")):
-            day_span = 90
-            window_label = "过去三个月"
-        elif any(token in compact for token in ("过去一个月", "最近一个月", "近一个月", "最近30天", "近30天", "30天")):
-            day_span = 30
-            window_label = "过去一个月"
+        relative_range = re.search(
+            r"(?:(?:过去|最近|近))(?P<quantity>\d+|[零〇一二两三四五六七八九十百千万半]+)"
+            r"(?P<connector>个)?(?P<unit>交易日|天|日|周|星期|个月|月|年)",
+            compact,
+        )
+        if relative_range:
+            window = self._build_strategy_backtest_relative_window(relative_range, today)
+            if window is not None:
+                return window
 
-        start_date = today - timedelta(days=day_span)
+        start_date = self._subtract_calendar_months(today, 12)
         return {
             "start_date": start_date.isoformat(),
             "end_date": today.isoformat(),
-            "window_label": window_label,
+            "window_label": "过去一年",
         }
 
     @staticmethod
@@ -2657,15 +2849,85 @@ class AgentChatService:
     def _normalize_stock_name_key(value: Any) -> str:
         return re.sub(r"\s+", "", str(value or "").strip()).upper()
 
+    @classmethod
+    def _build_stock_name_aliases(cls, value: Any) -> list[str]:
+        raw_name = str(value or "").strip()
+        if not raw_name:
+            return []
+
+        aliases: list[str] = []
+        seen: set[str] = set()
+
+        def push(alias: str) -> None:
+            key = cls._normalize_stock_name_key(alias)
+            if key and key not in seen:
+                seen.add(key)
+                aliases.append(key)
+
+        push(raw_name)
+
+        compact = re.sub(r"\s+", "", raw_name)
+        push(compact)
+
+        current = compact
+        while len(current) >= 2:
+            stripped = current
+            for suffix in _STOCK_NAME_ALIAS_SUFFIXES:
+                if stripped.endswith(suffix) and len(stripped) > len(suffix):
+                    stripped = stripped[: -len(suffix)].strip()
+                    break
+            if stripped == current:
+                break
+            current = stripped
+            push(current)
+
+        return aliases
+
+    @classmethod
+    def _build_stock_name_profile(cls, raw_code: Any, raw_name: Any) -> dict[str, Any] | None:
+        code = canonical_stock_code(str(raw_code or "").strip())
+        name = str(raw_name or "").strip()
+        aliases = cls._build_stock_name_aliases(name)
+        if not code or not name or not aliases:
+            return None
+        return {
+            "code": code,
+            "name": name,
+            "aliases": aliases,
+        }
+
     @staticmethod
-    def _build_static_stock_name_index() -> dict[str, str]:
-        index: dict[str, str] = {}
-        for raw_code, raw_name in STOCK_NAME_MAP.items():
-            code = canonical_stock_code(str(raw_code or "").strip())
-            name_key = AgentChatService._normalize_stock_name_key(raw_name)
-            if code and name_key and name_key not in index:
-                index[name_key] = code
+    def _append_stock_name_index(index: dict[str, list[str]], alias: str, code: str) -> None:
+        if not alias or not code:
+            return
+        bucket = index.setdefault(alias, [])
+        if code not in bucket:
+            bucket.append(code)
+
+    @classmethod
+    def _build_stock_name_index_from_profiles(cls, profiles: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+        index: dict[str, list[str]] = {}
+        for profile in profiles.values():
+            code = str(profile.get("code") or "").strip()
+            for alias in profile.get("aliases") or []:
+                cls._append_stock_name_index(index, str(alias or "").strip(), code)
         return index
+
+    @classmethod
+    def _build_static_stock_name_profiles(cls) -> dict[str, dict[str, Any]]:
+        profiles: dict[str, dict[str, Any]] = {}
+        for raw_code, raw_name in STOCK_NAME_MAP.items():
+            profile = cls._build_stock_name_profile(raw_code, raw_name)
+            if profile is None:
+                continue
+            code = str(profile.get("code") or "").strip()
+            if code and code not in profiles:
+                profiles[code] = profile
+        return profiles
+
+    @classmethod
+    def _build_static_stock_name_index(cls) -> dict[str, list[str]]:
+        return cls._build_stock_name_index_from_profiles(cls._build_static_stock_name_profiles())
 
     def _get_stock_name_lookup_manager(self) -> Any | None:
         if self._stock_name_lookup_manager is not None:
@@ -2687,39 +2949,183 @@ class AgentChatService:
             self._stock_name_lookup_manager = None
         return self._stock_name_lookup_manager
 
-    def _get_dynamic_stock_name_index(self) -> dict[str, str]:
-        if self._dynamic_stock_name_index is not None:
-            return self._dynamic_stock_name_index
+    def _ensure_dynamic_stock_name_lookup_cache(self) -> None:
+        if self._dynamic_stock_name_index is not None and self._dynamic_stock_name_profiles is not None:
+            return
 
         with self._stock_name_lookup_lock:
-            if self._dynamic_stock_name_index is not None:
-                return self._dynamic_stock_name_index
+            if self._dynamic_stock_name_index is not None and self._dynamic_stock_name_profiles is not None:
+                return
 
-            dynamic_index: dict[str, str] = {}
+            dynamic_profiles: dict[str, dict[str, Any]] = {}
+            dynamic_index: dict[str, list[str]] = {}
             fetcher_manager = self._get_stock_name_lookup_manager()
             if fetcher_manager is None or not hasattr(fetcher_manager, "get_stock_list"):
+                self._dynamic_stock_name_profiles = dynamic_profiles
                 self._dynamic_stock_name_index = dynamic_index
-                return self._dynamic_stock_name_index
+                return
 
             try:
                 stock_list = fetcher_manager.get_stock_list()
             except Exception as exc:
                 logger.warning("stock list lazy load failed: %s", redact_sensitive_text(str(exc)))
+                self._dynamic_stock_name_profiles = dynamic_profiles
                 self._dynamic_stock_name_index = dynamic_index
-                return self._dynamic_stock_name_index
+                return
 
             if stock_list is None or getattr(stock_list, "empty", True):
+                self._dynamic_stock_name_profiles = dynamic_profiles
                 self._dynamic_stock_name_index = dynamic_index
-                return self._dynamic_stock_name_index
+                return
 
             for _index, row in stock_list.iterrows():
-                code = canonical_stock_code(str(row.get("code") or "").strip())
-                name_key = self._normalize_stock_name_key(row.get("name"))
-                if code and name_key and name_key not in dynamic_index:
-                    dynamic_index[name_key] = code
+                profile = self._build_stock_name_profile(row.get("code"), row.get("name"))
+                if profile is None:
+                    continue
+                code = str(profile.get("code") or "").strip()
+                if not code or code in dynamic_profiles:
+                    continue
+                dynamic_profiles[code] = profile
+                for alias in profile.get("aliases") or []:
+                    self._append_stock_name_index(dynamic_index, str(alias or "").strip(), code)
 
+            self._dynamic_stock_name_profiles = dynamic_profiles
             self._dynamic_stock_name_index = dynamic_index
-            return self._dynamic_stock_name_index
+
+    def _get_dynamic_stock_name_profiles(self) -> dict[str, dict[str, Any]]:
+        self._ensure_dynamic_stock_name_lookup_cache()
+        return dict(self._dynamic_stock_name_profiles or {})
+
+    def _get_dynamic_stock_name_index(self) -> dict[str, list[str]]:
+        self._ensure_dynamic_stock_name_lookup_cache()
+        return dict(self._dynamic_stock_name_index or {})
+
+    def _get_stock_name_index(self) -> dict[str, list[str]]:
+        index = dict(self._static_stock_name_index)
+        for alias, codes in self._get_dynamic_stock_name_index().items():
+            bucket = index.setdefault(alias, [])
+            for code in codes:
+                text = str(code or "").strip()
+                if text and text not in bucket:
+                    bucket.append(text)
+        return index
+
+    def _get_stock_name_profiles(self) -> dict[str, dict[str, Any]]:
+        profiles = dict(self._static_stock_name_profiles)
+        for code, profile in self._get_dynamic_stock_name_profiles().items():
+            if code not in profiles:
+                profiles[code] = dict(profile)
+        return profiles
+
+    def _get_stock_name_profile(self, code: str) -> dict[str, Any] | None:
+        normalized = canonical_stock_code(str(code or "").strip())
+        if not normalized:
+            return None
+        profile = self._static_stock_name_profiles.get(normalized)
+        if profile is not None:
+            return dict(profile)
+        dynamic_profiles = self._get_dynamic_stock_name_profiles()
+        profile = dynamic_profiles.get(normalized)
+        return dict(profile) if profile is not None else None
+
+    @staticmethod
+    def _score_stock_name_alias_match(query_key: str, alias_key: str) -> int | None:
+        if not query_key or not alias_key:
+            return None
+        if alias_key == query_key:
+            return 0
+        if len(query_key) < 2:
+            return None
+        if alias_key.startswith(query_key) or query_key.startswith(alias_key):
+            return 1
+        if query_key in alias_key or alias_key in query_key:
+            return 2
+        return None
+
+    def _collect_stock_name_match_candidates(self, raw_name: str) -> list[dict[str, Any]]:
+        name = str(raw_name or "").strip()
+        query_key = self._normalize_stock_name_key(name)
+        if not query_key:
+            return []
+
+        exact_codes: list[str] = []
+        for index in (self._static_stock_name_index, self._get_dynamic_stock_name_index()):
+            for code in index.get(query_key) or []:
+                text = str(code or "").strip()
+                if text and text not in exact_codes:
+                    exact_codes.append(text)
+
+        if exact_codes:
+            candidates: list[dict[str, Any]] = []
+            for code in exact_codes:
+                profile = self._get_stock_name_profile(code)
+                candidates.append(
+                    {
+                        "code": code,
+                        "name": str((profile or {}).get("name") or code).strip() or code,
+                        "score": 0,
+                    }
+                )
+            return candidates
+
+        candidates_by_code: dict[str, dict[str, Any]] = {}
+        for code, profile in self._get_stock_name_profiles().items():
+            best_score: int | None = None
+            for alias in profile.get("aliases") or []:
+                score = self._score_stock_name_alias_match(query_key, str(alias or "").strip())
+                if score is None:
+                    continue
+                if best_score is None or score < best_score:
+                    best_score = score
+            if best_score is None:
+                continue
+            candidates_by_code[code] = {
+                "code": code,
+                "name": str(profile.get("name") or code).strip() or code,
+                "score": best_score,
+            }
+
+        candidates = list(candidates_by_code.values())
+        candidates.sort(key=lambda item: (int(item.get("score") or 9), len(str(item.get("name") or "")), str(item.get("code") or "")))
+        return candidates
+
+    def _resolve_stock_name_reference(self, raw_name: str) -> dict[str, Any]:
+        name = str(raw_name or "").strip()
+        if not name:
+            return {
+                "raw_name": "",
+                "normalized_name": "",
+                "status": "unknown",
+                "stock_codes": [],
+                "candidate_matches": [],
+            }
+
+        candidates = self._collect_stock_name_match_candidates(name)
+        if len(candidates) == 1:
+            candidate = dict(candidates[0])
+            return {
+                "raw_name": name,
+                "normalized_name": self._normalize_stock_name_key(name),
+                "status": "resolved",
+                "stock_codes": [str(candidate.get("code") or "").strip()],
+                "candidate_matches": [candidate],
+                "matched_name": str(candidate.get("name") or "").strip(),
+            }
+        if len(candidates) > 1:
+            return {
+                "raw_name": name,
+                "normalized_name": self._normalize_stock_name_key(name),
+                "status": "ambiguous",
+                "stock_codes": [],
+                "candidate_matches": [dict(item) for item in candidates[:_BOARD_AMBIGUOUS_LIMIT]],
+            }
+        return {
+            "raw_name": name,
+            "normalized_name": self._normalize_stock_name_key(name),
+            "status": "unknown",
+            "stock_codes": [],
+            "candidate_matches": [],
+        }
 
     @classmethod
     def _normalize_board_name_key(cls, value: Any) -> str:
@@ -2931,7 +3337,11 @@ class AgentChatService:
                 "message": self._build_market_wide_scope_unsupported_message(),
             }
 
-        explicit_codes, unresolved_names = self._extract_explicit_stock_references(raw_ref)
+        stock_ref_resolution = self._extract_explicit_stock_reference_resolution(raw_ref)
+        explicit_codes = [str(code or "").strip() for code in stock_ref_resolution.get("stock_codes") or [] if str(code or "").strip()]
+        ambiguous_refs = [dict(item) for item in stock_ref_resolution.get("ambiguous_refs") or [] if isinstance(item, dict)]
+        unresolved_names = [str(item or "").strip() for item in stock_ref_resolution.get("unresolved_refs") or [] if str(item or "").strip()]
+
         if explicit_codes:
             return {
                 "raw_ref": raw_ref,
@@ -2939,8 +3349,41 @@ class AgentChatService:
                 "entity_type": "stock",
                 "status": "resolved",
                 "stock_codes": list(explicit_codes),
-                "candidate_matches": [],
+                "candidate_matches": [
+                    {
+                        "code": str(item.get("code") or "").strip(),
+                        "name": str(item.get("name") or "").strip(),
+                    }
+                    for item in (
+                        self._resolve_stock_name_reference(raw_ref).get("candidate_matches")
+                        if not self._extract_stock_codes(raw_ref)
+                        else []
+                    )
+                    if isinstance(item, dict)
+                ],
                 "unresolved_tokens": list(unresolved_names),
+            }
+        if ambiguous_refs:
+            first_match = ambiguous_refs[0]
+            candidate_matches = [
+                {
+                    "code": str(item.get("code") or "").strip(),
+                    "name": str(item.get("name") or "").strip(),
+                }
+                for item in first_match.get("candidate_matches") or []
+                if isinstance(item, dict)
+            ]
+            return {
+                "raw_ref": raw_ref,
+                "normalized_ref": normalized_ref,
+                "entity_type": "stock",
+                "status": "ambiguous",
+                "stock_codes": [],
+                "candidate_matches": candidate_matches,
+                "message": self._build_stock_name_ambiguous_clarification(
+                    str(first_match.get("raw_name") or raw_ref).strip(),
+                    candidate_matches,
+                ),
             }
 
         matches = self._match_board_entries(normalized_ref)
@@ -3052,46 +3495,120 @@ class AgentChatService:
             return False
         return True
 
-    def _resolve_stock_codes_from_names(self, names: list[str]) -> tuple[list[str], list[str]]:
+    def _resolve_stock_codes_from_names(self, names: list[str]) -> tuple[list[str], list[dict[str, Any]], list[str]]:
         if not names:
-            return [], []
+            return [], [], []
 
         codes: list[str] = []
+        ambiguous_refs: list[dict[str, Any]] = []
         unresolved: list[str] = []
-        dynamic_index: dict[str, str] | None = None
 
         for raw_name in names:
-            name = str(raw_name or "").strip()
-            key = self._normalize_stock_name_key(name)
-            if not key:
+            resolution = self._resolve_stock_name_reference(raw_name)
+            status = str(resolution.get("status") or "").strip()
+            if status == "resolved":
+                for code in resolution.get("stock_codes") or []:
+                    text = str(code or "").strip()
+                    if text and text not in codes:
+                        codes.append(text)
+                continue
+            if status == "ambiguous":
+                ambiguous_refs.append(
+                    {
+                        "raw_name": str(resolution.get("raw_name") or "").strip(),
+                        "candidate_matches": [
+                            {
+                                "code": str(item.get("code") or "").strip(),
+                                "name": str(item.get("name") or "").strip(),
+                            }
+                            for item in resolution.get("candidate_matches") or []
+                            if isinstance(item, dict)
+                        ],
+                    }
+                )
                 continue
 
-            code = self._static_stock_name_index.get(key)
-            if code is None:
-                if dynamic_index is None:
-                    dynamic_index = self._get_dynamic_stock_name_index()
-                code = dynamic_index.get(key) if dynamic_index is not None else None
+            unresolved_name = str(resolution.get("raw_name") or "").strip()
+            if unresolved_name:
+                unresolved.append(unresolved_name)
 
-            if code is None:
-                unresolved.append(name)
-                continue
+        return codes, ambiguous_refs, unresolved
 
-            if code not in codes:
-                codes.append(code)
-
-        return codes, unresolved
-
-    def _extract_explicit_stock_references(self, message: str) -> tuple[list[str], list[str]]:
+    def _extract_explicit_stock_reference_resolution(self, message: str) -> dict[str, Any]:
         explicit_codes = self._extract_stock_codes(message)
         name_candidates = self._extract_stock_name_candidates(message)
-        name_codes, unresolved_names = self._resolve_stock_codes_from_names(name_candidates)
+        name_codes, ambiguous_refs, unresolved_names = self._resolve_stock_codes_from_names(name_candidates)
 
         merged_codes: list[str] = []
         for code in [*explicit_codes, *name_codes]:
             text = str(code or "").strip()
             if text and text not in merged_codes:
                 merged_codes.append(text)
-        return merged_codes, unresolved_names
+
+        raw_refs: list[str] = []
+        for ref in [*explicit_codes, *name_candidates]:
+            text = str(ref or "").strip()
+            if text and text not in raw_refs:
+                raw_refs.append(text)
+
+        return {
+            "stock_codes": merged_codes,
+            "ambiguous_refs": ambiguous_refs,
+            "unresolved_refs": unresolved_names,
+            "name_candidates": name_candidates,
+            "raw_refs": raw_refs,
+        }
+
+    def _extract_strategy_backtest_stock_refs(self, message: str) -> list[str]:
+        raw_message = str(message or "")
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        def push(ref: str) -> None:
+            text = str(ref or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                refs.append(text)
+
+        for raw_code in _A_SHARE_RE.findall(raw_message):
+            code = canonical_stock_code(str(raw_code or "").strip())
+            if re.fullmatch(r"\d{6}", code or ""):
+                push(code)
+        if refs:
+            return refs
+
+        compact = self._normalize_stock_name_key(raw_message)
+        if not compact:
+            return []
+
+        alias_matches: list[tuple[int, int, str]] = []
+        for alias in self._get_stock_name_index():
+            normalized_alias = str(alias or "").strip()
+            if len(normalized_alias) < 2 or normalized_alias in _STRATEGY_BACKTEST_STOCK_REF_IGNORE_TOKENS:
+                continue
+            position = compact.find(normalized_alias)
+            if position < 0:
+                continue
+            alias_matches.append((position, -len(normalized_alias), normalized_alias))
+
+        alias_matches.sort(key=lambda item: (item[0], item[1], item[2]))
+        occupied_spans: list[tuple[int, int]] = []
+        for position, neg_length, alias in alias_matches:
+            end = position - neg_length
+            if any(not (end <= start or position >= stop) for start, stop in occupied_spans):
+                continue
+            occupied_spans.append((position, end))
+            push(alias)
+
+        return refs
+
+    def _extract_explicit_stock_references(self, message: str) -> tuple[list[str], list[str]]:
+        resolution = self._extract_explicit_stock_reference_resolution(message)
+        unresolved_names = [
+            *[str(item.get("raw_name") or "").strip() for item in resolution.get("ambiguous_refs") or [] if isinstance(item, dict)],
+            *[str(item or "").strip() for item in resolution.get("unresolved_refs") or []],
+        ]
+        return list(resolution.get("stock_codes") or []), [item for item in unresolved_names if item]
 
     @staticmethod
     def _build_stock_name_clarification(unresolved_names: list[str]) -> str:
@@ -3100,6 +3617,39 @@ class AgentChatService:
             f"我识别到你提到了 {joined}，但当前还没法把它准确映射到股票、行业板块或概念板块。"
             "请补充更具体的板块名，或直接给我 6 位股票代码，例如“601899 紫金矿业”。"
         )
+
+    @staticmethod
+    def _format_stock_candidate_matches(candidate_matches: list[dict[str, Any]]) -> str:
+        return "、".join(
+            f"{str(item.get('code') or '').strip()} {str(item.get('name') or '').strip()}".strip()
+            for item in candidate_matches[:_BOARD_AMBIGUOUS_LIMIT]
+            if isinstance(item, dict) and (str(item.get("code") or "").strip() or str(item.get("name") or "").strip())
+        )
+
+    @classmethod
+    def _build_stock_name_ambiguous_clarification(cls, raw_name: str, candidate_matches: list[dict[str, Any]]) -> str:
+        candidates = cls._format_stock_candidate_matches(candidate_matches)
+        return (
+            f"我识别到你提到了 {str(raw_name or '').strip()}，但它可能对应多只股票：{candidates}。"
+            "请再说得更具体一点，或直接给我股票代码。"
+        )
+
+    @staticmethod
+    def _remove_direct_stock_query_fillers(message: str, ref_tokens: list[str]) -> str:
+        working = re.sub(r"\s+", "", str(message or "").strip())
+        for token in sorted((str(item or "").strip() for item in ref_tokens), key=len, reverse=True):
+            if token:
+                working = working.replace(token, "")
+        working = re.sub(r"(?:、|,|，|/|以及|还有|和|及|与|跟)+", "", working)
+        for token in _DIRECT_STOCK_QUERY_FILLER_TOKENS:
+            if token:
+                working = working.replace(token, "")
+        return re.sub(r"[，。！？!?；;：:\-—_~`'\"()\[\]{}<>]", "", working)
+
+    def _is_direct_stock_reference_message(self, message: str, ref_tokens: list[str]) -> bool:
+        if not ref_tokens:
+            return False
+        return not self._remove_direct_stock_query_fillers(message, ref_tokens)
 
     @staticmethod
     def _build_board_scope_ambiguous_clarification(ref: str, matches: list[dict[str, Any]]) -> str:
@@ -3121,15 +3671,28 @@ class AgentChatService:
             "你可以稍后再试，或直接告诉我几只想分析的股票代码。"
         )
 
-    @staticmethod
     def _extract_default_stock_codes(
+        self,
         latest_assistant_meta: dict[str, Any],
         frontend_context: dict[str, Any],
         conversation_state: dict[str, Any],
     ) -> list[str]:
         codes: list[str] = []
+        query_ref = str(
+            frontend_context.get("stock_ref")
+            or frontend_context.get("stockRef")
+            or frontend_context.get("stock_code")
+            or frontend_context.get("stockCode")
+            or ""
+        ).strip()
         query_code = str(frontend_context.get("stock_code") or frontend_context.get("stockCode") or "").strip()
-        if query_code:
+        if query_ref:
+            resolution = self._extract_explicit_stock_reference_resolution(query_ref)
+            for code in resolution.get("stock_codes") or []:
+                text = str(code or "").strip()
+                if text and text not in codes:
+                    codes.append(text)
+        elif query_code:
             codes.append(query_code)
 
         structured_result = latest_assistant_meta.get("structured_result")
@@ -3153,9 +3716,11 @@ class AgentChatService:
                     if code and code not in codes:
                         codes.append(code)
         for code in conversation_state.get("focus_stocks") or []:
-            text = str(code or "").strip()
-            if text and text not in codes:
-                codes.append(text)
+            resolution = self._extract_explicit_stock_reference_resolution(str(code or "").strip())
+            for resolved_code in resolution.get("stock_codes") or []:
+                text = str(resolved_code or "").strip()
+                if text and text not in codes:
+                    codes.append(text)
         return codes
 
     def _build_llm_plan(
@@ -3171,6 +3736,13 @@ class AgentChatService:
         pending_actions = self._normalize_pending_actions(conversation_state.get("pending_actions"))
         candidate_snapshots = self._extract_candidate_snapshots(recent_assistant_messages)
         default_focus_codes = self._extract_default_stock_codes(latest_assistant_meta, frontend_context, conversation_state)
+        explicit_ref_resolution = self._extract_explicit_stock_reference_resolution(message)
+        explicit_stock_refs = [
+            str(ref or "").strip()
+            for ref in explicit_ref_resolution.get("raw_refs") or []
+            if str(ref or "").strip()
+        ]
+        direct_stock_reference_message = self._is_direct_stock_reference_message(message, explicit_stock_refs)
         if self._contains_portfolio_health_intent(message):
             intent_resolution = self._build_intent_resolution(
                 intent="portfolio_health",
@@ -3204,14 +3776,21 @@ class AgentChatService:
                 followup_target={"mode": "none", "stock_refs": []},
             )
         if self._contains_strategy_backtest_run_intent(message):
-            explicit_stock_codes, unresolved_stock_names = self._extract_explicit_stock_references(message)
-            explicit_stock_codes = [
-                code
-                for code in explicit_stock_codes
-                if re.fullmatch(r"\d{6}", str(code or "").strip())
-            ]
-            if unresolved_stock_names and not explicit_stock_codes:
-                clarification = self._build_stock_name_clarification(unresolved_stock_names)
+            strategy_requested_refs: list[str] = []
+            for ref in self._extract_strategy_backtest_stock_refs(message):
+                text = str(ref or "").strip()
+                if text and text not in strategy_requested_refs:
+                    strategy_requested_refs.append(text)
+            stock_scope_mode = "explicit" if strategy_requested_refs else "focus"
+            requested_refs = strategy_requested_refs if strategy_requested_refs else []
+            scope_resolution = self._resolve_stock_codes_from_refs(
+                requested_refs,
+                fallback_focus_codes=default_focus_codes,
+                stock_scope_mode=stock_scope_mode,
+                pending_actions=pending_actions,
+            )
+            if scope_resolution.get("clarification"):
+                clarification = str(scope_resolution.get("clarification") or "").strip()
                 return ChatPlan(
                     primary_intent="clarify",
                     clarification=clarification,
@@ -3230,15 +3809,11 @@ class AgentChatService:
                     ),
                     pending_actions=pending_actions,
                 )
-            stock_scope_mode = "explicit" if explicit_stock_codes else "focus"
-            requested_refs = explicit_stock_codes if explicit_stock_codes else []
-            scope_resolution = self._resolve_stock_codes_from_refs(
-                requested_refs,
-                fallback_focus_codes=default_focus_codes,
-                stock_scope_mode=stock_scope_mode,
-                pending_actions=pending_actions,
-            )
-            stock_codes = self._normalize_stock_codes(scope_resolution.get("stock_codes"))
+            stock_codes = [
+                code
+                for code in self._normalize_stock_codes(scope_resolution.get("stock_codes"))
+                if re.fullmatch(r"\d{6}", str(code or "").strip())
+            ]
             if len(stock_codes) != 1:
                 clarification = (
                     "策略回测当前一次只支持 1 只股票。请直接告诉我一只股票代码，"
@@ -3329,6 +3904,90 @@ class AgentChatService:
                 followup_target={"mode": "none", "stock_refs": []},
                 blocked_code="market_wide_stock_selection_unsupported",
             )
+        if direct_stock_reference_message and explicit_stock_refs and explicit_ref_resolution.get("stock_codes"):
+            scope_resolution = self._resolve_stock_codes_from_refs(
+                explicit_stock_refs,
+                fallback_focus_codes=default_focus_codes,
+                stock_scope_mode="explicit",
+                pending_actions=pending_actions,
+            )
+            direct_stock_codes = self._normalize_stock_codes(scope_resolution.get("stock_codes"))
+            blocked_code = str(scope_resolution.get("blocked_code") or "").strip() or None
+            clarification = str(scope_resolution.get("clarification") or "").strip()
+            if blocked_code == "market_wide_stock_selection_unsupported":
+                intent_resolution = self._build_intent_resolution(
+                    intent="unsupported",
+                    stock_codes=[],
+                    requested_order_side=None,
+                    requested_quantity=None,
+                    conditions=[],
+                    followup_reference=None,
+                    confidence=0.99,
+                    missing_slots=[],
+                    source="rule",
+                )
+                intent_resolution["scope_resolution"] = dict(scope_resolution.get("scope_resolution") or {})
+                intent_resolution["resolved_scope_entities"] = list(scope_resolution.get("resolved_scope_entities") or [])
+                return ChatPlan(
+                    primary_intent="unsupported",
+                    clarification=clarification or self._build_market_wide_scope_unsupported_message(),
+                    planner_source="rule",
+                    intent_source="rule",
+                    intent_resolution=intent_resolution,
+                    pending_actions=pending_actions,
+                    stock_scope={"mode": "explicit", "stock_refs": explicit_stock_refs},
+                    followup_target={"mode": "none", "stock_refs": []},
+                    blocked_code=blocked_code,
+                )
+            if clarification:
+                intent_resolution = self._build_intent_resolution(
+                    intent="clarify",
+                    stock_codes=direct_stock_codes,
+                    requested_order_side=None,
+                    requested_quantity=None,
+                    conditions=[],
+                    followup_reference=None,
+                    confidence=0.96,
+                    missing_slots=["stock_codes"],
+                    source="rule",
+                )
+                intent_resolution["scope_resolution"] = dict(scope_resolution.get("scope_resolution") or {})
+                intent_resolution["resolved_scope_entities"] = list(scope_resolution.get("resolved_scope_entities") or [])
+                return ChatPlan(
+                    primary_intent="clarify",
+                    clarification=clarification,
+                    planner_source="rule",
+                    intent_source="rule",
+                    intent_resolution=intent_resolution,
+                    pending_actions=pending_actions,
+                    stock_scope={"mode": "explicit", "stock_refs": explicit_stock_refs},
+                    followup_target={"mode": "none", "stock_refs": []},
+                )
+            if direct_stock_codes:
+                intent_resolution = self._build_intent_resolution(
+                    intent="analysis",
+                    stock_codes=direct_stock_codes,
+                    requested_order_side=None,
+                    requested_quantity=None,
+                    conditions=[],
+                    followup_reference=None,
+                    confidence=0.98,
+                    missing_slots=[],
+                    source="rule",
+                )
+                intent_resolution["scope_resolution"] = dict(scope_resolution.get("scope_resolution") or {})
+                intent_resolution["resolved_scope_entities"] = list(scope_resolution.get("resolved_scope_entities") or [])
+                return ChatPlan(
+                    primary_intent="analysis",
+                    stock_codes=direct_stock_codes,
+                    planner_source="rule",
+                    intent_source="rule",
+                    intent_resolution=intent_resolution,
+                    pending_actions=pending_actions,
+                    required_tools=["run_multi_stock_analysis"],
+                    stock_scope={"mode": "explicit", "stock_refs": explicit_stock_refs},
+                    followup_target={"mode": "none", "stock_refs": []},
+                )
         session_summary = {
             "focus_stocks": list(conversation_state.get("focus_stocks") or default_focus_codes),
             "last_intent": conversation_state.get("last_intent"),
@@ -3361,6 +4020,63 @@ class AgentChatService:
         resolved_session_overrides = dict(planner_plan.session_preference_overrides)
 
         if planner_plan.intent == "clarify":
+            if explicit_stock_refs and direct_stock_reference_message:
+                fallback_scope_resolution = self._resolve_stock_codes_from_refs(
+                    explicit_stock_refs,
+                    fallback_focus_codes=default_focus_codes,
+                    stock_scope_mode="explicit",
+                    pending_actions=pending_actions,
+                )
+                fallback_stock_codes = self._normalize_stock_codes(fallback_scope_resolution.get("stock_codes"))
+                resolved_intent_resolution["scope_resolution"] = dict(fallback_scope_resolution.get("scope_resolution") or {})
+                resolved_intent_resolution["resolved_scope_entities"] = [
+                    dict(item)
+                    for item in fallback_scope_resolution.get("resolved_scope_entities") or []
+                    if isinstance(item, dict)
+                ]
+                if fallback_scope_resolution.get("blocked_code") == "market_wide_stock_selection_unsupported":
+                    return ChatPlan(
+                        primary_intent="unsupported",
+                        clarification=str(
+                            fallback_scope_resolution.get("clarification") or self._build_market_wide_scope_unsupported_message()
+                        ).strip(),
+                        planner_source="rule",
+                        intent_source="rule",
+                        intent_resolution=resolved_intent_resolution,
+                        pending_actions=pending_actions,
+                        required_tools=list(planner_plan.required_tools),
+                        stock_scope={"mode": "explicit", "stock_refs": explicit_stock_refs},
+                        followup_target=resolved_followup_target,
+                        session_preference_overrides=resolved_session_overrides,
+                        blocked_code="market_wide_stock_selection_unsupported",
+                    )
+                if fallback_stock_codes:
+                    return ChatPlan(
+                        primary_intent="analysis",
+                        stock_codes=fallback_stock_codes,
+                        planner_source="rule",
+                        intent_source="rule",
+                        intent_resolution=resolved_intent_resolution,
+                        pending_actions=pending_actions,
+                        required_tools=["run_multi_stock_analysis"],
+                        stock_scope={"mode": "explicit", "stock_refs": explicit_stock_refs},
+                        followup_target={"mode": "none", "stock_refs": []},
+                        session_preference_overrides=resolved_session_overrides,
+                    )
+                fallback_clarification = str(fallback_scope_resolution.get("clarification") or "").strip()
+                if fallback_clarification:
+                    return ChatPlan(
+                        primary_intent="clarify",
+                        clarification=fallback_clarification,
+                        planner_source="rule",
+                        intent_source="rule",
+                        intent_resolution=resolved_intent_resolution,
+                        pending_actions=pending_actions,
+                        required_tools=list(planner_plan.required_tools),
+                        stock_scope={"mode": "explicit", "stock_refs": explicit_stock_refs},
+                        followup_target=resolved_followup_target,
+                        session_preference_overrides=resolved_session_overrides,
+                    )
             return ChatPlan(
                 primary_intent="clarify",
                 clarification=planner_plan.clarification,
@@ -3376,12 +4092,21 @@ class AgentChatService:
 
         if (
             planner_plan.intent in {"analysis", "analysis_then_execute"}
+            and explicit_stock_refs
+            and not resolved_stock_scope.get("stock_refs")
+        ):
+            resolved_stock_scope["mode"] = "explicit"
+            resolved_stock_scope["stock_refs"] = list(explicit_stock_refs)
+            resolved_intent_resolution["stock_scope"] = dict(resolved_stock_scope)
+        elif (
+            planner_plan.intent in {"analysis", "analysis_then_execute"}
             and str(resolved_stock_scope.get("mode") or "none") == "explicit"
             and not resolved_stock_scope.get("stock_refs")
         ):
             fallback_codes, fallback_unresolved = self._extract_explicit_stock_references(message)
             fallback_refs = [*fallback_codes, *fallback_unresolved]
             if fallback_refs:
+                resolved_stock_scope["mode"] = "explicit"
                 resolved_stock_scope["stock_refs"] = fallback_refs
                 resolved_intent_resolution["stock_scope"] = dict(resolved_stock_scope)
             else:
