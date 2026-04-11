@@ -168,6 +168,22 @@ class BackendAgentChatClient:
             payload["slippage_bps"] = float(slippage_bps)
         return await self._post("/internal/v1/agent-chat/strategy-backtest", payload)
 
+    async def save_strategy_backtest_interpretation(
+        self,
+        *,
+        owner_user_id: int,
+        run_group_id: int,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return await self._post(
+            "/internal/v1/agent-chat/strategy-backtest-interpretation",
+            {
+                "owner_user_id": owner_user_id,
+                "run_group_id": int(run_group_id),
+                "items": [dict(item) for item in items if isinstance(item, dict)],
+            },
+        )
+
     async def place_simulated_order(
         self,
         *,

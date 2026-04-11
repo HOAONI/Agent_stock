@@ -430,6 +430,7 @@ class FakeBackendClient:
         self.placed_orders: list[dict[str, Any]] = []
         self.preference_calls: list[dict[str, Any]] = []
         self.saved_analysis_calls: list[dict[str, Any]] = []
+        self.saved_strategy_backtest_interpretation_calls: list[dict[str, Any]] = []
         self.portfolio_health_calls: list[dict[str, Any]] = []
         self.strategy_backtest_calls: list[dict[str, Any]] = []
         self.blocked_order_codes: set[str] = set()
@@ -769,6 +770,22 @@ class FakeBackendClient:
         self.saved_analysis_calls.append(payload)
         return {"saved_count": len(analysis_result.get("stocks") or []), "skipped_count": 0, "items": []}
 
+    async def save_strategy_backtest_interpretation(
+        self,
+        *,
+        owner_user_id: int,
+        run_group_id: int,
+        items: list[dict[str, Any]],
+    ):
+        self.saved_strategy_backtest_interpretation_calls.append(
+            {
+                "owner_user_id": owner_user_id,
+                "run_group_id": run_group_id,
+                "items": [dict(item) for item in items],
+            }
+        )
+        return {"run_group_id": run_group_id, "saved_count": len(items), "ai_interpretation_status": "completed"}
+
     async def place_simulated_order(self, *, owner_user_id: int, session_id: str, candidate_order: dict[str, Any]):
         self.placed_orders.append(dict(candidate_order))
         code = str(candidate_order.get("code") or "").strip()
@@ -1065,6 +1082,12 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("MACD 金叉", second["content"])
         self.assertIn("AI 解读", second["content"])
         self.assertEqual(len(self.backtest_interpretation_service.calls), 1)
+        self.assertEqual(len(self.backend_client.saved_strategy_backtest_interpretation_calls), 1)
+        persisted_call = self.backend_client.saved_strategy_backtest_interpretation_calls[0]
+        self.assertEqual(persisted_call["owner_user_id"], 1)
+        self.assertEqual(persisted_call["run_group_id"], 901)
+        self.assertEqual([item["item_key"] for item in persisted_call["items"]], ["strategy-run-100"])
+        self.assertEqual(persisted_call["items"][0]["status"], "ready")
 
     async def test_strategy_backtest_supports_generic_day_span(self):
         payload = await self.service.handle_chat(

@@ -1166,6 +1166,32 @@ class AgentChatService:
             return {}
         return dict(analysis)
 
+    @staticmethod
+    def _extract_strategy_backtest_interpretation_for_mirror(structured_result: dict[str, Any]) -> dict[str, Any]:
+        intent = str(structured_result.get("intent") or "").strip()
+        backtest_mode = str(structured_result.get("backtest_mode") or "").strip()
+        if intent != "backtest" or backtest_mode != "strategy_run":
+            return {}
+
+        strategy_backtest = structured_result.get("strategy_backtest")
+        if not isinstance(strategy_backtest, dict):
+            return {}
+        run_group_id = int(strategy_backtest.get("run_group_id") or 0)
+        if run_group_id <= 0:
+            return {}
+
+        interpretation = structured_result.get("interpretation")
+        if not isinstance(interpretation, dict):
+            return {}
+        items = [dict(item) for item in interpretation.get("items") or [] if isinstance(item, dict)]
+        if not items:
+            return {}
+
+        return {
+            "run_group_id": run_group_id,
+            "items": items,
+        }
+
     async def _mirror_analysis_history_if_needed(
         self,
         *,
@@ -1193,6 +1219,33 @@ class AgentChatService:
                 assistant_message_id,
                 redact_sensitive_text(str(exc)),
             )
+
+    async def _mirror_strategy_backtest_interpretation_if_needed(
+        self,
+        *,
+        owner_user_id: int,
+        session_id: str,
+        structured_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        mirror_payload = self._extract_strategy_backtest_interpretation_for_mirror(structured_result)
+        if not mirror_payload:
+            return {}
+
+        try:
+            return await self.backend_client.save_strategy_backtest_interpretation(
+                owner_user_id=owner_user_id,
+                run_group_id=int(mirror_payload.get("run_group_id") or 0),
+                items=[dict(item) for item in mirror_payload.get("items") or [] if isinstance(item, dict)],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Mirror strategy backtest interpretation failed: session=%s owner=%s run_group_id=%s error=%s",
+                session_id,
+                owner_user_id,
+                int(mirror_payload.get("run_group_id") or 0),
+                redact_sensitive_text(str(exc)),
+            )
+            return {}
 
     async def _finalize_chat_response(
         self,
@@ -1249,6 +1302,17 @@ class AgentChatService:
                 assistant_message_id=assistant_message_id,
                 structured_result=structured_result,
             )
+            backtest_mirror_result = await self._mirror_strategy_backtest_interpretation_if_needed(
+                owner_user_id=owner_user_id,
+                session_id=session_id,
+                structured_result=structured_result,
+            )
+            if backtest_mirror_result:
+                strategy_backtest = structured_result.get("strategy_backtest")
+                if isinstance(strategy_backtest, dict):
+                    strategy_backtest["ai_interpretation_status"] = str(
+                        backtest_mirror_result.get("ai_interpretation_status") or "completed"
+                    ).strip() or "completed"
         self.monitor_service.finalize_run(owner_user_id, session_id)
         return final_payload
 
