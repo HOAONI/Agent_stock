@@ -760,12 +760,14 @@ class FakeBackendClient:
         session_id: str,
         assistant_message_id: int,
         analysis_result: dict[str, Any],
+        news_items_by_stock: dict[str, list[dict[str, Any]]] | None = None,
     ):
         payload = {
             "owner_user_id": owner_user_id,
             "session_id": session_id,
             "assistant_message_id": assistant_message_id,
             "analysis_result": dict(analysis_result),
+            "news_items_by_stock": dict(news_items_by_stock or {}),
         }
         self.saved_analysis_calls.append(payload)
         return {"saved_count": len(analysis_result.get("stocks") or []), "skipped_count": 0, "items": []}
@@ -845,6 +847,32 @@ class FakeAgentService:
                     operation_advice="买入" if has_candidate else "观望",
                     sentiment_score=sentiment,
                     trend_signal="BUY" if has_candidate else "HOLD",
+                    ai_payload={
+                        "analysis_summary": f"{name} 当前维持 {'买入' if has_candidate else '观望'}判断。",
+                        "news_summary": f"{name} 近期有 2 条相关情报。",
+                        "news_items": [
+                            {
+                                "title": f"{name} 新闻 1",
+                                "snippet": f"{name} 相关新闻摘要 1",
+                                "url": f"https://example.com/{code}/news-1",
+                                "source": "example.com",
+                                "published_date": "2026-04-02T09:00:00+08:00",
+                                "provider": "mock_search",
+                                "dimension": "news",
+                                "query": f"{name} 最新新闻",
+                            },
+                            {
+                                "title": f"{name} 新闻 2",
+                                "snippet": f"{name} 相关新闻摘要 2",
+                                "url": f"https://example.com/{code}/news-2",
+                                "source": "example.com",
+                                "published_date": "2026-04-01T21:00:00+08:00",
+                                "provider": "mock_search",
+                                "dimension": "announcement",
+                                "query": f"{name} 公告",
+                            },
+                        ],
+                    },
                 ),
                 risk=RiskAgentOutput(
                     code=code,
@@ -986,6 +1014,14 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
             self.backend_client.saved_analysis_calls[0]["analysis_result"]["stocks"][0]["code"],
             "600519",
         )
+        self.assertEqual(
+            [item["title"] for item in self.backend_client.saved_analysis_calls[0]["news_items_by_stock"]["600519"]],
+            ["贵州茅台 新闻 1", "贵州茅台 新闻 2"],
+        )
+        self.assertEqual(
+            self.backend_client.saved_analysis_calls[0]["analysis_result"]["stocks"][0]["raw"]["signal"]["ai_payload"]["news_items"][0]["url"],
+            "https://example.com/600519/news-1",
+        )
 
         detail = self.service.get_session_detail(1, payload["session_id"])
         assert detail is not None
@@ -1038,6 +1074,10 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [item["code"] for item in self.backend_client.saved_analysis_calls[0]["analysis_result"]["stocks"]],
             ["600519", "300750"],
+        )
+        self.assertEqual(
+            sorted(self.backend_client.saved_analysis_calls[0]["news_items_by_stock"].keys()),
+            ["300750", "600519"],
         )
 
         detail = self.service.get_session_detail(1, payload["session_id"])

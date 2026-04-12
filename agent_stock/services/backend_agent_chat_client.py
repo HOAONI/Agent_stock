@@ -114,15 +114,19 @@ class BackendAgentChatClient:
         session_id: str,
         assistant_message_id: int,
         analysis_result: dict[str, Any],
+        news_items_by_stock: dict[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
+        payload = {
+            "owner_user_id": owner_user_id,
+            "session_id": session_id,
+            "assistant_message_id": int(assistant_message_id),
+            "analysis_result": analysis_result,
+        }
+        if news_items_by_stock is not None:
+            payload["news_items_by_stock"] = news_items_by_stock
         return await self._post(
             "/internal/v1/agent-chat/analysis-records",
-            {
-                "owner_user_id": owner_user_id,
-                "session_id": session_id,
-                "assistant_message_id": int(assistant_message_id),
-                "analysis_result": analysis_result,
-            },
+            payload,
         )
 
     async def get_backtest_summary(

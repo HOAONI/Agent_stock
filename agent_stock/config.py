@@ -291,10 +291,10 @@ class Config:
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             openai_temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
             agent_llm_request_timeout_ms=max(1000, int(os.getenv("AGENT_LLM_REQUEST_TIMEOUT_MS", "120000"))),
-            bocha_api_keys=cls._split_csv(os.getenv("BOCHA_API_KEYS", "")),
-            tavily_api_keys=cls._split_csv(os.getenv("TAVILY_API_KEYS", "")),
-            brave_api_keys=cls._split_csv(os.getenv("BRAVE_API_KEYS", "")),
-            serpapi_keys=cls._split_csv(os.getenv("SERPAPI_API_KEYS", "")),
+            bocha_api_keys=cls._split_secret_csv(os.getenv("BOCHA_API_KEYS", "")),
+            tavily_api_keys=cls._split_secret_csv(os.getenv("TAVILY_API_KEYS", "")),
+            brave_api_keys=cls._split_secret_csv(os.getenv("BRAVE_API_KEYS", "")),
+            serpapi_keys=cls._split_secret_csv(os.getenv("SERPAPI_API_KEYS", "")),
             news_max_age_days=max(1, int(os.getenv("NEWS_MAX_AGE_DAYS", "3"))),
             bias_threshold=max(1.0, float(os.getenv("BIAS_THRESHOLD", "5.0"))),
             database_path=os.getenv("DATABASE_PATH", "./data/stock_analysis.db"),
@@ -341,6 +341,11 @@ class Config:
     def _split_csv(value: str) -> list[str]:
         """按逗号拆分并清理字符串列表。"""
         return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+    @staticmethod
+    def _split_secret_csv(value: str) -> list[str]:
+        """按逗号拆分敏感令牌列表，并过滤空值与占位符。"""
+        return [item for item in Config._split_csv(value) if is_valid_secret(item)]
 
     @classmethod
     def _parse_stock_list(cls, value: str) -> list[str]:
@@ -497,7 +502,7 @@ class Config:
         elif not self.gemini_api_key and not self.anthropic_api_key:
             warnings.append("Gemini/Anthropic are not configured; OpenAI-compatible fallback will be used.")
         if not self.bocha_api_keys and not self.tavily_api_keys and not self.brave_api_keys and not self.serpapi_keys:
-            warnings.append("No search API key is configured.")
+            warnings.append("No valid search API key is configured; public news fallback will be used.")
         if self.agent_run_mode not in ALLOWED_AGENT_RUN_MODES:
             warnings.append("AGENT_RUN_MODE must be once or realtime.")
         if self.agent_ai_refresh_policy not in ALLOWED_AI_REFRESH_POLICIES:

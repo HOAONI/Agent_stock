@@ -88,6 +88,7 @@ class StockAnalysisPipeline:
             trend_result = self._resolve_trend_result(code)
 
             news_context = None
+            news_items: list[dict[str, Any]] = []
             if self.search_service.is_available:
                 try:
                     intel_results = self.search_service.search_comprehensive_intel(
@@ -97,6 +98,7 @@ class StockAnalysisPipeline:
                     )
                     if intel_results:
                         news_context = self.search_service.format_intel_report(intel_results, stock_name)
+                        news_items = self._build_news_items(intel_results)
                         query_context = self._build_query_context(query_id=query_id)
                         for dimension, response in intel_results.items():
                             if response and response.success and response.results:
@@ -133,6 +135,7 @@ class StockAnalysisPipeline:
             result = self.analyzer.analyze(enhanced_context, news_context=news_context)
 
             if result:
+                result.news_items = news_items
                 realtime_data = enhanced_context.get("realtime", {})
                 result.current_price = realtime_data.get("price")
                 result.change_pct = realtime_data.get("change_pct")
@@ -375,3 +378,55 @@ class StockAnalysisPipeline:
             "query_id": query_id or self.query_id or "",
             "query_source": self.query_source or "",
         }
+
+    @staticmethod
+    def _build_news_items(intel_results: dict[str, Any]) -> list[dict[str, Any]]:
+        """把多维搜索响应归一化为可镜像回写的新闻条目列表。"""
+        if not isinstance(intel_results, dict):
+            return []
+
+        items: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+
+        for dimension, response in intel_results.items():
+            if not response or not getattr(response, "success", False):
+                continue
+
+            provider = str(getattr(response, "provider", "") or "").strip()
+            query = str(getattr(response, "query", "") or "").strip()
+            raw_results = getattr(response, "results", None) or []
+            if not isinstance(raw_results, list):
+                continue
+
+            for raw_item in raw_results:
+                url = str(getattr(raw_item, "url", "") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+
+                title = str(getattr(raw_item, "title", "") or "").strip()
+                snippet = str(getattr(raw_item, "snippet", "") or "").strip()
+                source = str(getattr(raw_item, "source", "") or "").strip()
+                published_date = str(getattr(raw_item, "published_date", "") or "").strip()
+                if not title and not snippet:
+                    continue
+
+                item = {
+                    "title": title or url,
+                    "snippet": snippet,
+                    "url": url,
+                }
+                if source:
+                    item["source"] = source
+                if published_date:
+                    item["published_date"] = published_date
+                if provider:
+                    item["provider"] = provider
+                if dimension:
+                    item["dimension"] = str(dimension).strip()
+                if query:
+                    item["query"] = query
+
+                items.append(item)
+                seen_urls.add(url)
+
+        return items

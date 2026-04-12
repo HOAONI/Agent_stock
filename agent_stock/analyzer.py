@@ -11,7 +11,7 @@
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 
@@ -190,6 +190,7 @@ class AnalysisResult:
 
     # ========== 情绪面/消息面分析 ==========
     news_summary: str = ""  # 近期重要新闻/公告摘要
+    news_items: list[dict[str, Any]] = field(default_factory=list)  # 搜索到的结构化新闻条目
     market_sentiment: str = ""  # 市场情绪分析
     hot_topics: str = ""  # 相关热点话题
 
@@ -233,6 +234,7 @@ class AnalysisResult:
             "sector_position": self.sector_position,
             "company_highlights": self.company_highlights,
             "news_summary": self.news_summary,
+            "news_items": [dict(item) for item in self.news_items if isinstance(item, dict)],
             "market_sentiment": self.market_sentiment,
             "hot_topics": self.hot_topics,
             "analysis_summary": self.analysis_summary,
@@ -1623,6 +1625,7 @@ class GeminiAnalyzer:
                     company_highlights=data.get("company_highlights", ""),
                     # 情绪面/消息面
                     news_summary=data.get("news_summary", ""),
+                    news_items=[dict(item) for item in data.get("news_items", []) if isinstance(item, dict)],
                     market_sentiment=data.get("market_sentiment", ""),
                     hot_topics=data.get("hot_topics", ""),
                     # 综合

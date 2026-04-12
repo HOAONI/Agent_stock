@@ -25,6 +25,17 @@ class _FakeAIResult:
         self.sentiment_score = sentiment_score
         self.trend_prediction = "看多"
         self.analysis_summary = "fake summary"
+        self.news_summary = "近期新闻偏利多"
+        self.news_items = [
+            {
+                "title": "测试新闻",
+                "snippet": "测试摘要",
+                "url": "https://example.com/news-1",
+                "source": "example.com",
+                "published_date": "2026-04-02T09:00:00+08:00",
+            }
+        ]
+        self.search_performed = True
 
     def get_sniper_points(self):
         return {"stop_loss": "9.50", "take_profit": "12.00"}
@@ -97,6 +108,8 @@ class SignalAgentCacheTestCase(unittest.TestCase):
         self.assertFalse(second.ai_refreshed)
         self.assertEqual(first.operation_advice, "买入")
         self.assertEqual(second.operation_advice, "买入")
+        self.assertEqual(second.ai_payload.get("news_summary"), "近期新闻偏利多")
+        self.assertEqual(second.ai_payload.get("news_items")[0]["url"], "https://example.com/news-1")
         stop_loss = second.stop_loss
         self.assertIsNotNone(stop_loss)
         assert stop_loss is not None

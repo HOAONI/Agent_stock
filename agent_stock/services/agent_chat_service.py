@@ -1203,6 +1203,7 @@ class AgentChatService:
         analysis_result = self._extract_analysis_result_for_mirror(structured_result)
         if not analysis_result:
             return
+        news_items_by_stock = self._extract_news_items_by_stock_for_mirror(analysis_result)
 
         try:
             await self.backend_client.save_analysis_records(
@@ -1210,6 +1211,7 @@ class AgentChatService:
                 session_id=session_id,
                 assistant_message_id=assistant_message_id,
                 analysis_result=analysis_result,
+                news_items_by_stock=news_items_by_stock or None,
             )
         except Exception as exc:
             logger.warning(
@@ -5729,6 +5731,35 @@ class AgentChatService:
             "candidate_orders": candidate_orders,
             "execution_result": dict(run_result.execution_result or {}) if isinstance(run_result.execution_result, dict) else None,
         }
+
+    def _extract_news_items_by_stock_for_mirror(self, analysis_result: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        mapping: dict[str, list[dict[str, Any]]] = {}
+        stocks = analysis_result.get("stocks") if isinstance(analysis_result.get("stocks"), list) else []
+
+        for stock in stocks:
+            if not isinstance(stock, dict):
+                continue
+            code = str(stock.get("code") or "").strip()
+            if not code:
+                continue
+
+            raw = stock.get("raw") if isinstance(stock.get("raw"), dict) else {}
+            signal = raw.get("signal") if isinstance(raw.get("signal"), dict) else {}
+            ai_payload = signal.get("ai_payload") if isinstance(signal.get("ai_payload"), dict) else {}
+            raw_items = ai_payload.get("news_items") if isinstance(ai_payload.get("news_items"), list) else []
+            items = []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                items.append(dict(item))
+
+            if items:
+                mapping[code] = items
+
+        return mapping
 
     def _serialize_stock_result(self, item: StockAgentResult) -> dict[str, Any]:
         realtime_quote = item.data.realtime_quote if isinstance(item.data.realtime_quote, dict) else {}

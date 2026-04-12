@@ -340,7 +340,12 @@ class SignalAgent:
             "sentiment_score": getattr(ai_result, "sentiment_score", None),
             "trend_prediction": getattr(ai_result, "trend_prediction", None),
             "analysis_summary": getattr(ai_result, "analysis_summary", None),
+            "news_summary": getattr(ai_result, "news_summary", None),
+            "search_performed": bool(getattr(ai_result, "search_performed", False)),
         }
+        news_items = getattr(ai_result, "news_items", None)
+        if isinstance(news_items, list):
+            payload["news_items"] = [dict(item) for item in news_items if isinstance(item, dict)]
 
         stop_loss = None
         take_profit = None
