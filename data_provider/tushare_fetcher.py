@@ -104,6 +104,9 @@ class TushareFetcher(BaseFetcher):
         self._call_count = 0  # 当前分钟内的调用次数
         self._minute_start: float | None = None  # 当前计数周期开始时间
         self._api: Any | None = None  # Tushare API 实例
+        self._auth_verified = False
+        self._auth_failed = False
+        self._auth_failure_reason: str | None = None
 
         # 尝试初始化 API
         self._init_api()
@@ -136,8 +139,14 @@ class TushareFetcher(BaseFetcher):
             # 不可用（503），因此通过 monkey patch 改写查询方法，改为使用
             # 官方 `api.tushare.pro` 端点，并向根 URL 发起 POST 请求。
             self._patch_api_endpoint(config.tushare_token)
-
-            logger.info("Tushare API 初始化成功")
+            self._validate_api_access()
+            if self._auth_failed:
+                logger.error("Tushare API 鉴权失败，当前进程已禁用该数据源")
+                return
+            if self._auth_verified:
+                logger.info("Tushare API 初始化并鉴权成功")
+            else:
+                logger.warning("Tushare API 初始化成功，但未通过轻量健康校验，暂不提升优先级")
 
         except Exception as e:
             logger.error(f"Tushare API 初始化失败: {e}")
@@ -180,6 +189,58 @@ class TushareFetcher(BaseFetcher):
         self._api.query = types.MethodType(patched_query, self._api)
         logger.debug(f"Tushare API endpoint patched to {TUSHARE_API_URL}")
 
+    @staticmethod
+    def _is_auth_failure_error(error: Exception | str) -> bool:
+        message = str(error or "").strip()
+        if not message:
+            return False
+
+        normalized = message.lower()
+        if any(keyword in normalized for keyword in ("quota", "配额", "rate limit", "too many requests")):
+            return False
+
+        if "token不对" in normalized or "您的token不对" in normalized:
+            return True
+
+        auth_tokens = ("token", "auth", "authorization", "credential", "鉴权", "授权")
+        auth_failures = ("invalid", "wrong", "error", "expired", "forbidden", "unauthorized", "无效", "不对", "错误", "失效", "失败")
+        return any(token in normalized for token in auth_tokens) and any(flag in normalized for flag in auth_failures)
+
+    def _mark_auth_failure(self, error: Exception | str) -> None:
+        self._auth_failed = True
+        self._auth_verified = False
+        self._auth_failure_reason = str(error or "").strip() or "unknown auth failure"
+        self._api = None
+        self.priority = 2
+        logger.error(f"Tushare 鉴权失败，已标记为不可用: {self._auth_failure_reason}")
+
+    def _handle_api_exception(self, error: Exception | str) -> bool:
+        if self._is_auth_failure_error(error):
+            self._mark_auth_failure(error)
+            return True
+        return False
+
+    def _validate_api_access(self) -> None:
+        if self._api is None:
+            return
+
+        today = local_now().strftime("%Y%m%d")
+        try:
+            self._api.trade_cal(
+                exchange="SSE",
+                start_date=today,
+                end_date=today,
+                fields="exchange,cal_date,is_open",
+            )
+            self._auth_verified = True
+            self._auth_failed = False
+            self._auth_failure_reason = None
+        except Exception as exc:
+            if self._handle_api_exception(exc):
+                return
+            logger.warning(f"Tushare 轻量鉴权校验失败，保持普通优先级: {exc}")
+            self._auth_verified = False
+
     def _determine_priority(self) -> int:
         """
         根据 Token 配置和 API 初始化状态确定优先级
@@ -193,7 +254,7 @@ class TushareFetcher(BaseFetcher):
         """
         config = get_config()
 
-        if config.tushare_token and self._api is not None:
+        if config.tushare_token and self._api is not None and self._auth_verified and not self._auth_failed:
             # Token 配置且 API 初始化成功，提升为最高优先级
             logger.info("✅ 检测到 TUSHARE_TOKEN 且 API 初始化成功，Tushare 数据源优先级提升为最高 (Priority -1)")
             return -1
@@ -208,7 +269,7 @@ class TushareFetcher(BaseFetcher):
         返回：
             True 表示可用，False 表示不可用
         """
-        return self._api is not None
+        return self._api is not None and not self._auth_failed
 
     def _check_rate_limit(self) -> None:
         """
@@ -353,6 +414,8 @@ class TushareFetcher(BaseFetcher):
 
         except Exception as e:
             error_msg = str(e).lower()
+            if self._handle_api_exception(e):
+                raise DataFetchError(f"Tushare 鉴权失败: {e}") from e
 
             # 检测配额超限
             if any(keyword in error_msg for keyword in ["quota", "配额", "limit", "权限"]):
@@ -448,6 +511,7 @@ class TushareFetcher(BaseFetcher):
                 return name
 
         except Exception as e:
+            self._handle_api_exception(e)
             logger.warning(f"Tushare 获取股票名称失败 {stock_code}: {e}")
 
         return None
@@ -486,6 +550,7 @@ class TushareFetcher(BaseFetcher):
                 return df[["code", "name", "industry", "area", "market"]]
 
         except Exception as e:
+            self._handle_api_exception(e)
             logger.warning(f"Tushare 获取股票列表失败: {e}")
 
         return None
@@ -541,6 +606,9 @@ class TushareFetcher(BaseFetcher):
                     total_mv=safe_float(row.get("total_mv")),
                 )
         except Exception as e:
+            if self._handle_api_exception(e):
+                logger.warning(f"Tushare Pro 实时行情鉴权失败 {stock_code}: {e}")
+                return None
             # 仅记录调试日志，不报错，继续尝试降级
             logger.debug(f"Tushare Pro 实时行情不可用 (可能是积分不足): {e}")
 
@@ -599,6 +667,7 @@ class TushareFetcher(BaseFetcher):
             )
 
         except Exception as e:
+            self._handle_api_exception(e)
             logger.warning(f"Tushare (旧版) 获取实时行情失败 {stock_code}: {e}")
             return None
 
@@ -662,6 +731,7 @@ class TushareFetcher(BaseFetcher):
                             }
                         )
                 except Exception as e:
+                    self._handle_api_exception(e)
                     logger.debug(f"Tushare 获取指数 {name} 失败: {e}")
                     continue
 
@@ -671,6 +741,7 @@ class TushareFetcher(BaseFetcher):
                 logger.warning("[Tushare] 未获取到指数行情数据")
 
         except Exception as e:
+            self._handle_api_exception(e)
             logger.error(f"[Tushare] 获取指数行情失败: {e}")
 
         return None
@@ -749,6 +820,7 @@ class TushareFetcher(BaseFetcher):
                 logger.warning("[Tushare] 获取市场统计数据为空")
 
         except Exception as e:
+            self._handle_api_exception(e)
             logger.error(f"[Tushare] 获取市场统计失败: {e}")
 
         return None

@@ -257,6 +257,31 @@ class AgentChatMonitorServiceTestCase(unittest.TestCase):
         self.assertEqual(signal_visits[1]["visit"], 2)
         self.assertEqual(signal_visits[1]["detail"]["summary"], "第二次信号复核完成")
 
+    def test_start_run_marks_previous_live_run_as_superseded(self) -> None:
+        first = self.service.start_run(
+            owner_user_id=1,
+            session_id="session-live-a",
+            title="第一次问股",
+            user_message="分析一下寒武纪",
+        )
+        second = self.service.start_run(
+            owner_user_id=1,
+            session_id="session-live-b",
+            title="第二次问股",
+            user_message="再分析一下寒武纪",
+        )
+
+        self.assertIsNone(first)
+        assert second is not None
+        self.assertEqual(second["session_id"], "session-live-a")
+        self.assertEqual(second["user_message"], "分析一下寒武纪")
+
+        snapshot = self.service.get_snapshot(1)
+        self.assertEqual(snapshot["session"]["session_id"], "session-live-b")
+        self.assertEqual(snapshot["session"]["live_status"], "running")
+        self.assertEqual(snapshot["session"]["superseded_run"]["session_id"], "session-live-a")
+        self.assertEqual(snapshot["session"]["superseded_run"]["interrupted_reason"], "superseded_by_new_run")
+
 
 if __name__ == "__main__":
     unittest.main()

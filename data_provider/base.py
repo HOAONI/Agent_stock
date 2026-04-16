@@ -416,6 +416,52 @@ class DataFetcherManager:
         priority_info = ", ".join([f"{f.name}(P{f.priority})" for f in self._fetchers])
         logger.info(f"已初始化 {len(self._fetchers)} 个数据源（按优先级）: {priority_info}")
 
+    @staticmethod
+    def _is_fetcher_available(fetcher: BaseFetcher) -> bool:
+        checker = getattr(fetcher, "is_available", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker())
+        except Exception as exc:
+            logger.debug(f"[{fetcher.name}] 可用性检查失败，按可用处理: {exc}")
+            return True
+
+    def _iter_available_fetchers(self):
+        for fetcher in self._fetchers:
+            if not self._is_fetcher_available(fetcher):
+                logger.debug(f"[{fetcher.name}] 当前不可用，已跳过")
+                continue
+            yield fetcher
+
+    @staticmethod
+    def _normalize_stock_list_frame(stock_list: pd.DataFrame | None, *, fetcher_name: str) -> pd.DataFrame | None:
+        if stock_list is None or getattr(stock_list, "empty", True):
+            return None
+
+        if not isinstance(stock_list, pd.DataFrame):
+            try:
+                stock_list = pd.DataFrame(stock_list)
+            except Exception as exc:
+                logger.warning(f"[{fetcher_name}] 股票列表无法转换为 DataFrame: {exc}")
+                return None
+
+        if "code" not in stock_list.columns or "name" not in stock_list.columns:
+            logger.warning(f"[{fetcher_name}] 股票列表缺少 code/name 列，已跳过")
+            return None
+
+        normalized = stock_list.copy()
+        normalized["code"] = normalized["code"].apply(
+            lambda value: canonical_stock_code(normalize_stock_code(str(value or "").strip()))
+        )
+        normalized["name"] = normalized["name"].apply(lambda value: str(value or "").strip())
+        normalized = normalized[(normalized["code"] != "") & (normalized["name"] != "")]
+        if normalized.empty:
+            return None
+
+        normalized = normalized.drop_duplicates(subset=["code"], keep="first").reset_index(drop=True)
+        return normalized
+
     def add_fetcher(self, fetcher: BaseFetcher) -> None:
         """添加数据源并重新排序"""
         self._fetchers.append(fetcher)
@@ -448,7 +494,7 @@ class DataFetcherManager:
 
         if source == "efinance":
             fetcher = self._find_fetcher("EfinanceFetcher")
-            if fetcher is None:
+            if fetcher is None or not self._is_fetcher_available(fetcher):
                 raise DataSourceUnavailableError("efinance fetcher is not available")
             try:
                 df = fetcher.get_daily_data(stock_code=stock_code, start_date=start_date, end_date=end_date, days=days)
@@ -460,7 +506,7 @@ class DataFetcherManager:
             if not str(get_config().tushare_token or "").strip():
                 raise DataSourceUnavailableError("tushare is unavailable: TUSHARE_TOKEN is not configured")
             fetcher = self._find_fetcher("TushareFetcher")
-            if fetcher is None:
+            if fetcher is None or not self._is_fetcher_available(fetcher):
                 raise DataSourceUnavailableError("tushare fetcher is not available")
             try:
                 df = fetcher.get_daily_data(stock_code=stock_code, start_date=start_date, end_date=end_date, days=days)
@@ -468,7 +514,7 @@ class DataFetcherManager:
                 raise DataSourceUnavailableError(f"tushare daily data failed: {exc}") from exc
         else:
             fetcher = self._find_fetcher("AkshareFetcher")
-            if fetcher is None or not hasattr(fetcher, "get_daily_data_by_source"):
+            if fetcher is None or not self._is_fetcher_available(fetcher) or not hasattr(fetcher, "get_daily_data_by_source"):
                 raise DataSourceUnavailableError("akshare fixed-source daily data is not available")
             sub_source = "em" if source == "eastmoney" else source
             try:
@@ -534,7 +580,7 @@ class DataFetcherManager:
 
         # 快速路径：美股指数与美股股票直接路由到 YfinanceFetcher
         if is_us_index_code(stock_code) or is_us_stock_code(stock_code):
-            for fetcher in self._fetchers:
+            for fetcher in self._iter_available_fetchers():
                 if fetcher.name == "YfinanceFetcher":
                     try:
                         logger.info(f"[{fetcher.name}] 美股/美股指数 {stock_code} 直接路由...")
@@ -557,7 +603,7 @@ class DataFetcherManager:
             logger.error(error_summary)
             raise DataFetchError(error_summary)
 
-        for fetcher in self._fetchers:
+        for fetcher in self._iter_available_fetchers():
             try:
                 logger.info(f"尝试使用 [{fetcher.name}] 获取 {stock_code}...")
                 df = fetcher.get_daily_data(stock_code=stock_code, start_date=start_date, end_date=end_date, days=days)
@@ -581,7 +627,7 @@ class DataFetcherManager:
     @property
     def available_fetchers(self) -> list[str]:
         """返回可用数据源名称列表"""
-        return [f.name for f in self._fetchers]
+        return [f.name for f in self._iter_available_fetchers()]
 
     def prefetch_realtime_quotes(self, stock_codes: list[str]) -> int:
         """
@@ -664,7 +710,7 @@ class DataFetcherManager:
 
         if source == "efinance":
             fetcher = self._find_fetcher("EfinanceFetcher")
-            if fetcher is None or not hasattr(fetcher, "get_realtime_quote"):
+            if fetcher is None or not self._is_fetcher_available(fetcher) or not hasattr(fetcher, "get_realtime_quote"):
                 raise DataSourceUnavailableError("efinance realtime fetcher is not available")
             try:
                 quote = fetcher.get_realtime_quote(stock_code)
@@ -676,7 +722,7 @@ class DataFetcherManager:
             if not str(get_config().tushare_token or "").strip():
                 raise DataSourceUnavailableError("tushare is unavailable: TUSHARE_TOKEN is not configured")
             fetcher = self._find_fetcher("TushareFetcher")
-            if fetcher is None or not hasattr(fetcher, "get_realtime_quote"):
+            if fetcher is None or not self._is_fetcher_available(fetcher) or not hasattr(fetcher, "get_realtime_quote"):
                 raise DataSourceUnavailableError("tushare realtime fetcher is not available")
             try:
                 quote = fetcher.get_realtime_quote(stock_code)
@@ -684,7 +730,7 @@ class DataFetcherManager:
                 raise DataSourceUnavailableError(f"tushare realtime quote failed: {exc}") from exc
         else:
             fetcher = self._find_fetcher("AkshareFetcher")
-            if fetcher is None or not hasattr(fetcher, "get_realtime_quote"):
+            if fetcher is None or not self._is_fetcher_available(fetcher) or not hasattr(fetcher, "get_realtime_quote"):
                 raise DataSourceUnavailableError("akshare realtime fetcher is not available")
             sub_source = "em" if source == "eastmoney" else source
             try:
@@ -733,7 +779,7 @@ class DataFetcherManager:
 
         # 美股指数由 YfinanceFetcher 处理（在美股股票检查之前）
         if is_us_index_code(stock_code):
-            for fetcher in self._fetchers:
+            for fetcher in self._iter_available_fetchers():
                 if fetcher.name == "YfinanceFetcher":
                     if hasattr(fetcher, "get_realtime_quote"):
                         try:
@@ -749,7 +795,7 @@ class DataFetcherManager:
 
         # 美股单独处理，使用 YfinanceFetcher
         if _is_us_code(stock_code):
-            for fetcher in self._fetchers:
+            for fetcher in self._iter_available_fetchers():
                 if fetcher.name == "YfinanceFetcher":
                     if hasattr(fetcher, "get_realtime_quote"):
                         try:
@@ -780,7 +826,7 @@ class DataFetcherManager:
 
                 if source == "efinance":
                     # 尝试 EfinanceFetcher
-                    for fetcher in self._fetchers:
+                    for fetcher in self._iter_available_fetchers():
                         if fetcher.name == "EfinanceFetcher":
                             if hasattr(fetcher, "get_realtime_quote"):
                                 quote = fetcher.get_realtime_quote(stock_code)
@@ -788,7 +834,7 @@ class DataFetcherManager:
 
                 elif source == "akshare_em":
                     # 尝试 AkshareFetcher 东财数据源
-                    for fetcher in self._fetchers:
+                    for fetcher in self._iter_available_fetchers():
                         if fetcher.name == "AkshareFetcher":
                             if hasattr(fetcher, "get_realtime_quote"):
                                 quote = fetcher.get_realtime_quote(stock_code, source="em")
@@ -796,7 +842,7 @@ class DataFetcherManager:
 
                 elif source == "akshare_sina":
                     # 尝试 AkshareFetcher 新浪数据源
-                    for fetcher in self._fetchers:
+                    for fetcher in self._iter_available_fetchers():
                         if fetcher.name == "AkshareFetcher":
                             if hasattr(fetcher, "get_realtime_quote"):
                                 quote = fetcher.get_realtime_quote(stock_code, source="sina")
@@ -804,7 +850,7 @@ class DataFetcherManager:
 
                 elif source in ("tencent", "akshare_qq"):
                     # 尝试 AkshareFetcher 腾讯数据源
-                    for fetcher in self._fetchers:
+                    for fetcher in self._iter_available_fetchers():
                         if fetcher.name == "AkshareFetcher":
                             if hasattr(fetcher, "get_realtime_quote"):
                                 quote = fetcher.get_realtime_quote(stock_code, source="tencent")
@@ -812,7 +858,7 @@ class DataFetcherManager:
 
                 elif source == "tushare":
                     # 尝试 TushareFetcher（需要 Tushare Pro 积分）
-                    for fetcher in self._fetchers:
+                    for fetcher in self._iter_available_fetchers():
                         if fetcher.name == "TushareFetcher":
                             if hasattr(fetcher, "get_realtime_quote"):
                                 quote = fetcher.get_realtime_quote(stock_code)
@@ -992,7 +1038,7 @@ class DataFetcherManager:
             return name
 
         # 3. 依次尝试各个数据源
-        for fetcher in self._fetchers:
+        for fetcher in self._iter_available_fetchers():
             if hasattr(fetcher, "get_stock_name"):
                 try:
                     name = fetcher.get_stock_name(stock_code)
@@ -1006,6 +1052,36 @@ class DataFetcherManager:
 
         # 4. 所有数据源都失败
         logger.warning(f"[股票名称] 所有数据源都无法获取 {stock_code} 的名称")
+        return None
+
+    def get_stock_list(self) -> pd.DataFrame | None:
+        """
+        获取股票列表（按优先级自动回退）
+
+        返回首个可用数据源的标准化股票列表，至少包含 `code` 和 `name` 列。
+        """
+        errors: list[str] = []
+
+        for fetcher in self._iter_available_fetchers():
+            if not hasattr(fetcher, "get_stock_list"):
+                continue
+            try:
+                stock_list = fetcher.get_stock_list()
+            except Exception as exc:
+                error_msg = f"[{fetcher.name}] 股票列表获取失败: {exc}"
+                logger.warning(error_msg)
+                errors.append(error_msg)
+                continue
+
+            normalized = self._normalize_stock_list_frame(stock_list, fetcher_name=fetcher.name)
+            if normalized is not None and not normalized.empty:
+                logger.info(f"[{fetcher.name}] 股票列表获取成功，共 {len(normalized)} 条")
+                return normalized
+
+            logger.warning(f"[{fetcher.name}] 股票列表为空或格式无效，继续回退")
+
+        if errors:
+            logger.warning("股票列表聚合失败，所有支持的数据源均不可用")
         return None
 
     def batch_get_stock_names(self, stock_codes: list[str]) -> dict[str, str]:
@@ -1037,27 +1113,16 @@ class DataFetcherManager:
             return result
 
         # 2. 尝试批量获取股票列表
-        for fetcher in self._fetchers:
-            if hasattr(fetcher, "get_stock_list") and missing_codes:
-                try:
-                    stock_list = fetcher.get_stock_list()
-                    if stock_list is not None and not stock_list.empty:
-                        for _, row in stock_list.iterrows():
-                            code = row.get("code")
-                            name = row.get("name")
-                            if code and name:
-                                self._stock_name_cache[code] = name
-                                if code in missing_codes:
-                                    result[code] = name
-                                    missing_codes.discard(code)
-
-                        if not missing_codes:
-                            break
-
-                        logger.info(f"[股票名称] 从 {fetcher.name} 批量获取完成，剩余 {len(missing_codes)} 个待查")
-                except Exception as e:
-                    logger.debug(f"[股票名称] {fetcher.name} 批量获取失败: {e}")
-                    continue
+        stock_list = self.get_stock_list()
+        if stock_list is not None and not stock_list.empty:
+            for _, row in stock_list.iterrows():
+                code = str(row.get("code") or "").strip()
+                name = str(row.get("name") or "").strip()
+                if code and name:
+                    self._stock_name_cache[code] = name
+                    if code in missing_codes:
+                        result[code] = name
+                        missing_codes.discard(code)
 
         # 3. 逐个获取剩余的
         for code in list(missing_codes):
@@ -1071,7 +1136,7 @@ class DataFetcherManager:
 
     def get_main_indices(self, region: str = "cn") -> list[dict[str, Any]]:
         """获取主要指数实时行情（自动切换数据源）"""
-        for fetcher in self._fetchers:
+        for fetcher in self._iter_available_fetchers():
             try:
                 data = fetcher.get_main_indices(region=region)
                 if data:
@@ -1084,7 +1149,7 @@ class DataFetcherManager:
 
     def get_market_stats(self) -> dict[str, Any]:
         """获取市场涨跌统计（自动切换数据源）"""
-        for fetcher in self._fetchers:
+        for fetcher in self._iter_available_fetchers():
             try:
                 data = fetcher.get_market_stats()
                 if data:

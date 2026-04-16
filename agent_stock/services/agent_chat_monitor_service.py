@@ -73,7 +73,10 @@ def _empty_session() -> dict[str, Any]:
         "source": "agent_chat",
         "live_status": "idle",
         "started_at": None,
+        "ended_at": None,
         "updated_at": None,
+        "interrupted_reason": None,
+        "superseded_run": None,
     }
 
 
@@ -167,7 +170,7 @@ def _map_session_status(snapshot: dict[str, Any]) -> str:
         return "error"
     if any(_as_text(card.get("status")) == "running" for card in cards if isinstance(card, dict)):
         return "running"
-    if current_status in {"error", "running"}:
+    if current_status in {"error", "running", "interrupted"}:
         return current_status
     if _as_list(snapshot.get("execution_chain")):
         return "completed"
@@ -254,10 +257,36 @@ class AgentChatMonitorService:
         session_id: str,
         title: str,
         user_message: str,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         owner_key = self._owner_key(owner_user_id)
         now = _now_iso()
         with self._lock:
+            previous_run = self._live_runs.get(owner_key)
+            superseded_run: dict[str, Any] | None = None
+            if isinstance(previous_run, dict):
+                previous_snapshot = previous_run.get("snapshot") if isinstance(previous_run.get("snapshot"), dict) else {}
+                previous_session = _as_dict(previous_snapshot.get("session"))
+                previous_snapshot.setdefault("session", {})
+                previous_snapshot["session"]["live_status"] = "interrupted"
+                previous_snapshot["session"]["updated_at"] = now
+                previous_snapshot["session"]["ended_at"] = now
+                previous_snapshot["session"]["interrupted_reason"] = "superseded_by_new_run"
+                previous_snapshot["session"]["superseded_run"] = {
+                    "session_id": _as_text(session_id),
+                    "user_message": _as_text(user_message),
+                    "at": now,
+                }
+                self._cached_snapshots[owner_key] = _copy_snapshot(previous_snapshot)
+                self._publish_locked(owner_key, previous_snapshot)
+                superseded_run = {
+                    "session_id": _as_text(previous_session.get("session_id")),
+                    "title": _as_text(previous_session.get("title")),
+                    "user_message": _as_text(previous_session.get("user_message")),
+                    "started_at": previous_session.get("started_at"),
+                    "updated_at": previous_session.get("updated_at"),
+                    "ended_at": now,
+                    "interrupted_reason": "superseded_by_new_run",
+                }
             total_calls = self._get_historical_counts(owner_key)
             snapshot = _empty_snapshot(total_calls)
             snapshot["session"] = {
@@ -267,7 +296,10 @@ class AgentChatMonitorService:
                 "source": "agent_chat",
                 "live_status": "running",
                 "started_at": now,
+                "ended_at": None,
                 "updated_at": now,
+                "interrupted_reason": None,
+                "superseded_run": superseded_run,
             }
             live_run = {
                 "owner_key": owner_key,
@@ -279,6 +311,7 @@ class AgentChatMonitorService:
             }
             self._live_runs[owner_key] = live_run
             self._publish_locked(owner_key, snapshot)
+            return superseded_run
 
     def get_snapshot(self, owner_user_id: int | str) -> dict[str, Any]:
         owner_key = self._owner_key(owner_user_id)
@@ -350,6 +383,14 @@ class AgentChatMonitorService:
             live = self._live_runs.get(owner_key)
             if isinstance(live, dict) and _as_text(live.get("session_id")) == _as_text(session_id):
                 self._live_runs.pop(owner_key, None)
+            snapshot.setdefault("session", {})
+            session = _as_dict(snapshot.get("session"))
+            snapshot["session"] = {
+                **session,
+                "ended_at": session.get("ended_at") or _now_iso(),
+                "interrupted_reason": session.get("interrupted_reason"),
+                "superseded_run": session.get("superseded_run"),
+            }
             self._cached_snapshots[owner_key] = _copy_snapshot(snapshot)
             self._publish_locked(owner_key, snapshot)
         return snapshot

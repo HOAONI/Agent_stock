@@ -12,6 +12,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from time import monotonic
 from typing import Any, Awaitable, Callable
 
 from data_provider.base import canonical_stock_code
@@ -72,6 +73,8 @@ BoardConstituentsProvider = Callable[[str, str], list[dict[str, Any]]]
 
 _OUTSIDE_TRADING_SESSION_REASON = "outside_trading_session"
 _SUCCESSFUL_EXECUTION_STATUSES = {"filled", "submitted", "partial_filled", "partial"}
+_DYNAMIC_STOCK_NAME_CACHE_TTL_SECONDS = 6 * 60 * 60
+_DYNAMIC_STOCK_NAME_RETRY_COOLDOWN_SECONDS = 5 * 60
 
 _A_SHARE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 _HK_SHARE_RE = re.compile(r"(?<!\d)(\d{5})(?!\d)")
@@ -155,6 +158,7 @@ _STRATEGY_BACKTEST_STOCK_REF_IGNORE_TOKENS = frozenset(
     }
 )
 _ACCOUNT_KEYWORDS = ("持仓", "账户", "仓位", "资金", "模拟盘情况", "现金")
+_PORTFOLIO_SCOPE_KEYWORDS = ("投资组合", "组合", "持仓", "仓位", "账户")
 _PORTFOLIO_HEALTH_KEYWORDS = (
     "仓位健康",
     "持仓健康",
@@ -171,6 +175,28 @@ _PORTFOLIO_HEALTH_KEYWORDS = (
     "夏普",
     "夏普比率",
     "收益率",
+)
+_PORTFOLIO_REBALANCE_EXECUTION_KEYWORDS = (
+    "调仓",
+    "进行调整",
+    "调整持仓",
+    "仓位调整",
+    "组合调整",
+    "帮我调仓",
+    "自动调仓",
+    "直接调仓",
+    "执行调仓",
+    "再平衡",
+    "重新平衡",
+    "重新调整",
+    "优化持仓",
+    "调整一下持仓",
+    "根据持仓自己决定买卖",
+    "根据持仓决定买卖",
+    "自己决定买卖",
+    "自己决定买入卖出",
+    "自主决定买卖",
+    "自主决定买入卖出",
 )
 _SAVE_KEYWORDS = ("保存本轮分析", "保存分析", "保存这轮分析")
 _MARKET_WIDE_SCOPE_KEYWORDS = (
@@ -324,6 +350,7 @@ _BOARD_AMOUNT_COLUMNS = ("成交额", "amount", "turnover", "成交金额")
 _BOARD_COMPONENT_LIMIT = 10
 _BOARD_AMBIGUOUS_LIMIT = 5
 _ALLOWED_CHAT_RUNTIME_LLM_PROVIDERS = frozenset({"gemini", "anthropic", "openai", "deepseek", "custom"})
+_SUPPORTED_CHAT_RESPONSE_STYLES = frozenset({"concise_factual", "balanced", "detailed"})
 _GENERIC_STOCK_NAME_EXACT_BLOCKLIST = {
     "你自行决定",
     "自行决定",
@@ -431,6 +458,16 @@ class ChatLlmSelection:
     model: str = ""
 
 
+@dataclass(frozen=True)
+class ChatRenderResult:
+    """最终回复文案与渲染路径元数据。"""
+
+    content: str
+    render_source: str
+    render_model: str = ""
+    render_fallback_reason: str | None = None
+
+
 class AgentChatHandledError(RuntimeError):
     """表示本轮失败已被持久化为 assistant 消息，可安全回传给客户端。"""
 
@@ -478,6 +515,8 @@ class AgentChatService:
         self._static_stock_name_index = self._build_static_stock_name_index()
         self._dynamic_stock_name_profiles: dict[str, dict[str, Any]] | None = None
         self._dynamic_stock_name_index: dict[str, list[str]] | None = None
+        self._dynamic_stock_name_cache_expires_at: float | None = None
+        self._dynamic_stock_name_retry_after: float = 0.0
         self._stock_name_lookup_manager: Any | None = None
         self._board_catalog_provider = board_catalog_provider or self._default_board_catalog_provider
         self._board_constituents_provider = board_constituents_provider or self._default_board_constituents_provider
@@ -722,6 +761,11 @@ class AgentChatService:
             backtest_payload = context_bundle.backtest if context_bundle.backtest else None
             effective_preferences_payload = context_bundle.effective_user_preferences.to_dict()
             stage_memory_payload = context_bundle.stage_memory.to_dict()
+            response_style = self._resolve_response_style(
+                agent_preferences=agent_preferences,
+                effective_preferences_payload=effective_preferences_payload,
+                session_overrides=plan.session_preference_overrides,
+            )
 
             if plan.primary_intent == "order_followup_single":
                 execution_result = await self._run_tool(
@@ -793,6 +837,9 @@ class AgentChatService:
                 )
                 analysis_payload: dict[str, Any] | None = None
                 candidate_orders: list[dict[str, Any]] = []
+                execution_result: dict[str, Any] | None = None
+                autonomous_execution: dict[str, Any] | None = None
+                auto_execute_requested = bool(plan.autonomous_execution_authorized)
                 if portfolio_stock_codes:
                     analysis_payload = await self._run_tool(
                         "run_multi_stock_analysis",
@@ -814,7 +861,71 @@ class AgentChatService:
                         tool_context,
                         event_handler,
                     )
-                    candidate_orders = self._normalize_candidate_orders(analysis_payload.get("candidate_orders"))
+                    candidate_orders = self._filter_candidate_orders_by_allowed_codes(
+                        candidate_orders=analysis_payload.get("candidate_orders") if isinstance(analysis_payload, dict) else [],
+                        allowed_codes=portfolio_stock_codes,
+                    )
+                    if isinstance(analysis_payload, dict):
+                        self._sync_analysis_payload_candidate_orders(
+                            analysis_payload=analysis_payload,
+                            candidate_orders=candidate_orders,
+                            plan=plan,
+                            clear_missing_candidate_orders=True,
+                        )
+                if auto_execute_requested:
+                    if not portfolio_stock_codes:
+                        autonomous_execution = self._build_autonomous_execution_payload(
+                            authorized=True,
+                            candidate_orders=[],
+                            execution_result=None,
+                            default_reason="portfolio_empty",
+                            default_gate_passed=False,
+                            default_gate_message="当前账户暂无持仓，所以本轮没有可执行的调仓单。",
+                        )
+                    elif not isinstance(analysis_payload, dict):
+                        autonomous_execution = self._build_autonomous_execution_payload(
+                            authorized=True,
+                            candidate_orders=[],
+                            execution_result=None,
+                            default_reason="portfolio_analysis_unavailable",
+                            default_gate_passed=False,
+                            default_gate_message="当前没拿到可用的持仓分析结果，所以这轮不会自动执行调仓。",
+                        )
+                    else:
+                        execution_gate = self._evaluate_analysis_execution_gate(
+                            plan=plan,
+                            analysis_payload=analysis_payload,
+                            candidate_orders=candidate_orders,
+                            runtime_config=runtime_config,
+                        )
+                        executable_candidate_orders = self._normalize_candidate_orders(execution_gate.get("candidate_orders"))
+                        autonomous_execution = self._build_autonomous_execution_payload(
+                            authorized=True,
+                            candidate_orders=candidate_orders,
+                            execution_result=None,
+                            default_reason=str(execution_gate.get("reason") or "no_candidate_orders"),
+                            default_gate_passed=bool(execution_gate.get("eligible")),
+                            default_gate_message=str(execution_gate.get("message") or ""),
+                        )
+                        if bool(execution_gate.get("eligible")) and executable_candidate_orders:
+                            execution_result = await self._run_tool(
+                                "batch_execute_candidate_orders",
+                                {
+                                    "owner_user_id": owner_user_id,
+                                    "session_id": session_id,
+                                    "candidate_orders": executable_candidate_orders,
+                                },
+                                tool_context,
+                                event_handler,
+                            )
+                            autonomous_execution = self._build_autonomous_execution_payload(
+                                authorized=True,
+                                candidate_orders=candidate_orders,
+                                execution_result=execution_result,
+                                default_reason=str(execution_gate.get("reason") or "no_candidate_orders"),
+                                default_gate_passed=bool(execution_gate.get("eligible")),
+                                default_gate_message=str(execution_gate.get("message") or ""),
+                            )
                 portfolio_stage_memory = self._build_portfolio_health_stage_memory(
                     portfolio_health=portfolio_health_result,
                 )
@@ -824,30 +935,36 @@ class AgentChatService:
                         next_stage_memory,
                         self._build_stage_memory_from_structured_result(
                             analysis_payload.get("structured_result") if isinstance(analysis_payload.get("structured_result"), dict) else {},
-                            None,
+                            execution_result,
                         ),
                     )
                 content = self._render_portfolio_health_content(
                     portfolio_health=portfolio_health_result,
                     analysis_payload=analysis_payload,
                     effective_preferences=effective_preferences_payload,
+                    execution_result=execution_result,
+                    autonomous_execution=autonomous_execution,
+                    auto_execute_requested=auto_execute_requested,
                 )
+                structured_result = {
+                    "intent": "portfolio_health",
+                    "portfolio_health": portfolio_health_result,
+                    "account_state": account_state_payload if account_state_payload else None,
+                    "analysis": analysis_payload.get("structured_result") if isinstance(analysis_payload, dict) else None,
+                    "loaded_context_keys": list(context_bundle.loaded_keys),
+                    "effective_preferences": effective_preferences_payload,
+                    "stage_memory": next_stage_memory,
+                    "intent_source": plan.intent_source,
+                }
+                if auto_execute_requested:
+                    structured_result["autonomous_execution"] = autonomous_execution or {}
                 final_payload = {
                     "session_id": session_id,
                     "content": content,
-                    "structured_result": {
-                        "intent": "portfolio_health",
-                        "portfolio_health": portfolio_health_result,
-                        "account_state": account_state_payload if account_state_payload else None,
-                        "analysis": analysis_payload.get("structured_result") if isinstance(analysis_payload, dict) else None,
-                        "loaded_context_keys": list(context_bundle.loaded_keys),
-                        "effective_preferences": effective_preferences_payload,
-                        "stage_memory": next_stage_memory,
-                        "intent_source": plan.intent_source,
-                    },
+                    "structured_result": structured_result,
                     "candidate_orders": candidate_orders,
-                    "execution_result": None,
-                    "status": "analysis_only",
+                    "execution_result": execution_result,
+                    "status": self._resolve_execution_status(execution_result) if execution_result else "analysis_only",
                 }
             elif plan.primary_intent == "backtest" and "run_strategy_backtest" in plan.required_tools:
                 try:
@@ -1047,7 +1164,7 @@ class AgentChatService:
                                     default_gate_passed=bool(execution_gate.get("eligible")),
                                     default_gate_message=str(execution_gate.get("message") or ""),
                                 )
-                        content = await self._render_analysis_then_execute_content(
+                        render_result = await self._render_analysis_then_execute_content(
                             analysis_payload=analysis_payload,
                             candidate_orders=candidate_orders,
                             execution_result=execution_result,
@@ -1057,10 +1174,11 @@ class AgentChatService:
                             backtest_payload=backtest_payload,
                             original_message=message,
                             llm_selection=chat_llm,
+                            response_style=response_style,
                         )
                         final_payload = {
                             "session_id": session_id,
-                            "content": content,
+                            "content": render_result.content,
                             "structured_result": {
                                 "intent": "analysis_then_execute",
                                 "analysis": analysis_payload.get("structured_result"),
@@ -1080,19 +1198,23 @@ class AgentChatService:
                             "candidate_orders": candidate_orders,
                             "execution_result": execution_result,
                             "status": self._resolve_execution_status(execution_result) if execution_result else "analysis_only",
+                            "render_source": render_result.render_source,
+                            "render_model": render_result.render_model,
+                            "render_fallback_reason": render_result.render_fallback_reason,
                         }
                     else:
-                        content = await self._render_analysis_content(
+                        render_result = await self._render_analysis_content(
                             analysis_payload=analysis_payload,
                             runtime_context_payload=runtime_context_payload,
                             history_payload=history_payload,
                             backtest_payload=backtest_payload,
                             original_message=message,
                             llm_selection=chat_llm,
+                            response_style=response_style,
                         )
                         final_payload = {
                             "session_id": session_id,
-                            "content": content,
+                            "content": render_result.content,
                             "structured_result": {
                                 "intent": "analysis",
                                 "analysis": analysis_payload.get("structured_result"),
@@ -1111,6 +1233,9 @@ class AgentChatService:
                             "candidate_orders": candidate_orders,
                             "execution_result": None,
                             "status": "analysis_only",
+                            "render_source": render_result.render_source,
+                            "render_model": render_result.render_model,
+                            "render_fallback_reason": render_result.render_fallback_reason,
                         }
 
             await self._emit_outside_trading_session_warning_if_needed(
@@ -1401,13 +1526,25 @@ class AgentChatService:
     ) -> list[dict[str, Any]]:
         if intent in {"analysis", "analysis_then_execute", "portfolio_health"}:
             if candidate_orders:
-                failed_orders = []
+                failed_orders: list[dict[str, Any]] = []
+                blocked_orders: list[dict[str, Any]] = []
                 if isinstance(execution_result, dict):
                     failed_orders = self._normalize_candidate_orders(
                         [item.get("candidate_order") for item in execution_result.get("failed_orders") or [] if isinstance(item, dict)]
                     )
-                if failed_orders:
-                    return [dict(item) for item in failed_orders]
+                    blocked_orders = self._normalize_candidate_orders(
+                        [item.get("candidate_order") for item in execution_result.get("blocked_orders") or [] if isinstance(item, dict)]
+                    )
+                if failed_orders or blocked_orders:
+                    remaining_orders: list[dict[str, Any]] = []
+                    seen_keys: set[str] = set()
+                    for item in [*failed_orders, *blocked_orders]:
+                        candidate_key = self._candidate_order_key(item)
+                        if candidate_key in seen_keys:
+                            continue
+                        seen_keys.add(candidate_key)
+                        remaining_orders.append(dict(item))
+                    return remaining_orders
                 executed_count = int(execution_result.get("executed_count") or 0) if isinstance(execution_result, dict) else 0
                 if executed_count > 0 and not failed_orders:
                     return []
@@ -2081,10 +2218,25 @@ class AgentChatService:
         compact = cls._compact_message_text(message)
         if not compact:
             return False
-        portfolio_scope_tokens = ("投资组合", "组合", "持仓", "仓位", "账户")
-        if not any(token in compact for token in portfolio_scope_tokens):
+        if not any(token in compact for token in _PORTFOLIO_SCOPE_KEYWORDS):
             return False
         return any(token in compact for token in _PORTFOLIO_HEALTH_KEYWORDS)
+
+    @classmethod
+    def _contains_portfolio_rebalance_execution_intent(cls, message: str) -> bool:
+        compact = cls._compact_message_text(message)
+        if not compact:
+            return False
+        if any(token in compact for token in _PORTFOLIO_REBALANCE_EXECUTION_KEYWORDS):
+            return True
+        if not any(token in compact for token in _PORTFOLIO_SCOPE_KEYWORDS):
+            return False
+
+        contains_adjustment = any(token in compact for token in ("调仓", "调整", "再平衡", "平衡", "优化"))
+        contains_analysis = any(token in compact for token in ("分析", "诊断", "检查", "看看", "看下", "处理"))
+        contains_decision = any(token in compact for token in ("自己决定", "自主决定", "自动决定", "自动执行", "直接执行"))
+        contains_trade_action = any(token in compact for token in ("买卖", "买入", "卖出", "加仓", "减仓", "清仓"))
+        return (contains_adjustment and contains_analysis) or (contains_decision and contains_trade_action)
 
     @staticmethod
     def _compact_message_text(message: str) -> str:
@@ -3015,33 +3167,65 @@ class AgentChatService:
             self._stock_name_lookup_manager = None
         return self._stock_name_lookup_manager
 
+    @staticmethod
+    def _now_monotonic() -> float:
+        return monotonic()
+
     def _ensure_dynamic_stock_name_lookup_cache(self) -> None:
+        now = self._now_monotonic()
         if self._dynamic_stock_name_index is not None and self._dynamic_stock_name_profiles is not None:
+            if now < self._dynamic_stock_name_retry_after:
+                return
+            if (
+                self._dynamic_stock_name_cache_expires_at is not None
+                and now < self._dynamic_stock_name_cache_expires_at
+            ):
+                return
+        elif now < self._dynamic_stock_name_retry_after:
             return
 
         with self._stock_name_lookup_lock:
+            now = self._now_monotonic()
             if self._dynamic_stock_name_index is not None and self._dynamic_stock_name_profiles is not None:
+                if now < self._dynamic_stock_name_retry_after:
+                    return
+                if (
+                    self._dynamic_stock_name_cache_expires_at is not None
+                    and now < self._dynamic_stock_name_cache_expires_at
+                ):
+                    return
+            elif now < self._dynamic_stock_name_retry_after:
                 return
 
             dynamic_profiles: dict[str, dict[str, Any]] = {}
             dynamic_index: dict[str, list[str]] = {}
+            has_existing_cache = bool(self._dynamic_stock_name_profiles) and bool(self._dynamic_stock_name_index)
             fetcher_manager = self._get_stock_name_lookup_manager()
             if fetcher_manager is None or not hasattr(fetcher_manager, "get_stock_list"):
-                self._dynamic_stock_name_profiles = dynamic_profiles
-                self._dynamic_stock_name_index = dynamic_index
+                if not has_existing_cache:
+                    self._dynamic_stock_name_profiles = dynamic_profiles
+                    self._dynamic_stock_name_index = dynamic_index
+                self._dynamic_stock_name_cache_expires_at = None
+                self._dynamic_stock_name_retry_after = now + _DYNAMIC_STOCK_NAME_RETRY_COOLDOWN_SECONDS
                 return
 
             try:
                 stock_list = fetcher_manager.get_stock_list()
             except Exception as exc:
                 logger.warning("stock list lazy load failed: %s", redact_sensitive_text(str(exc)))
-                self._dynamic_stock_name_profiles = dynamic_profiles
-                self._dynamic_stock_name_index = dynamic_index
+                if not has_existing_cache:
+                    self._dynamic_stock_name_profiles = dynamic_profiles
+                    self._dynamic_stock_name_index = dynamic_index
+                self._dynamic_stock_name_cache_expires_at = None
+                self._dynamic_stock_name_retry_after = now + _DYNAMIC_STOCK_NAME_RETRY_COOLDOWN_SECONDS
                 return
 
             if stock_list is None or getattr(stock_list, "empty", True):
-                self._dynamic_stock_name_profiles = dynamic_profiles
-                self._dynamic_stock_name_index = dynamic_index
+                if not has_existing_cache:
+                    self._dynamic_stock_name_profiles = dynamic_profiles
+                    self._dynamic_stock_name_index = dynamic_index
+                self._dynamic_stock_name_cache_expires_at = None
+                self._dynamic_stock_name_retry_after = now + _DYNAMIC_STOCK_NAME_RETRY_COOLDOWN_SECONDS
                 return
 
             for _index, row in stock_list.iterrows():
@@ -3049,14 +3233,24 @@ class AgentChatService:
                 if profile is None:
                     continue
                 code = str(profile.get("code") or "").strip()
-                if not code or code in dynamic_profiles:
+                if not code or not re.fullmatch(r"\d{6}", code) or code in dynamic_profiles:
                     continue
                 dynamic_profiles[code] = profile
                 for alias in profile.get("aliases") or []:
                     self._append_stock_name_index(dynamic_index, str(alias or "").strip(), code)
 
+            if not dynamic_profiles or not dynamic_index:
+                if not has_existing_cache:
+                    self._dynamic_stock_name_profiles = {}
+                    self._dynamic_stock_name_index = {}
+                self._dynamic_stock_name_cache_expires_at = None
+                self._dynamic_stock_name_retry_after = now + _DYNAMIC_STOCK_NAME_RETRY_COOLDOWN_SECONDS
+                return
+
             self._dynamic_stock_name_profiles = dynamic_profiles
             self._dynamic_stock_name_index = dynamic_index
+            self._dynamic_stock_name_cache_expires_at = now + _DYNAMIC_STOCK_NAME_CACHE_TTL_SECONDS
+            self._dynamic_stock_name_retry_after = 0.0
 
     def _get_dynamic_stock_name_profiles(self) -> dict[str, dict[str, Any]]:
         self._ensure_dynamic_stock_name_lookup_cache()
@@ -3809,6 +4003,38 @@ class AgentChatService:
             if str(ref or "").strip()
         ]
         direct_stock_reference_message = self._is_direct_stock_reference_message(message, explicit_stock_refs)
+        if self._contains_portfolio_rebalance_execution_intent(message):
+            intent_resolution = self._build_intent_resolution(
+                intent="portfolio_health",
+                stock_codes=[],
+                requested_order_side=None,
+                requested_quantity=None,
+                conditions=[],
+                followup_reference=None,
+                confidence=0.99,
+                missing_slots=[],
+                source="rule",
+            )
+            intent_resolution["scope_resolution"] = {
+                "mode": "none",
+                "requested_refs": [],
+                "resolved_stock_codes": [],
+                "unresolved_refs": [],
+                "blocked_code": None,
+                "resolver": "portfolio_rebalance_execution_rule",
+            }
+            intent_resolution["resolved_scope_entities"] = []
+            return ChatPlan(
+                primary_intent="portfolio_health",
+                autonomous_execution_authorized=True,
+                planner_source="rule",
+                intent_source="rule",
+                intent_resolution=intent_resolution,
+                pending_actions=pending_actions,
+                required_tools=["load_system_state", "load_account_state", "load_portfolio_health", "load_user_preferences"],
+                stock_scope={"mode": "none", "stock_refs": []},
+                followup_target={"mode": "none", "stock_refs": []},
+            )
         if self._contains_portfolio_health_intent(message):
             intent_resolution = self._build_intent_resolution(
                 intent="portfolio_health",
@@ -5485,6 +5711,32 @@ class AgentChatService:
         )
         return selected_orders
 
+    def _filter_candidate_orders_by_allowed_codes(
+        self,
+        *,
+        candidate_orders: Any,
+        allowed_codes: list[str],
+    ) -> list[dict[str, Any]]:
+        allowed_code_set = {
+            code
+            for code in self._normalize_stock_codes(allowed_codes)
+            if str(code or "").strip()
+        }
+        if not allowed_code_set:
+            return []
+
+        filtered: list[dict[str, Any]] = []
+        for item in self._normalize_candidate_orders(candidate_orders):
+            code = str(item.get("code") or "").strip()
+            normalized_code = self._normalize_stock_codes([code])
+            canonical_code = normalized_code[0] if normalized_code else code
+            if canonical_code not in allowed_code_set:
+                continue
+            next_item = dict(item)
+            next_item["code"] = canonical_code
+            filtered.append(next_item)
+        return filtered
+
     @staticmethod
     def _override_candidate_order_quantity(candidate_order: dict[str, Any], quantity: int) -> dict[str, Any]:
         next_order = dict(candidate_order)
@@ -5593,6 +5845,7 @@ class AgentChatService:
         analysis_payload: dict[str, Any],
         candidate_orders: list[dict[str, Any]],
         plan: ChatPlan,
+        clear_missing_candidate_orders: bool = False,
     ) -> None:
         structured_result = analysis_payload.get("structured_result")
         if not isinstance(structured_result, dict):
@@ -5614,7 +5867,7 @@ class AgentChatService:
                 stock["candidate_order"] = dict(candidate_map[code])
                 stock["proposal_state"] = str(candidate_map[code].get("proposal_state") or "proposed")
                 stock["proposal_reason"] = candidate_map[code].get("proposal_reason") or candidate_map[code].get("reason")
-            elif not candidate_orders and (not scoped_codes or code in scoped_codes):
+            elif clear_missing_candidate_orders or (not candidate_orders and (not scoped_codes or code in scoped_codes)):
                 stock["candidate_order"] = None
         portfolio_summary = structured_result.get("portfolio_summary")
         if isinstance(portfolio_summary, dict):
@@ -5842,6 +6095,50 @@ class AgentChatService:
             "raw": item.to_dict(),
         }
 
+    @staticmethod
+    def _normalize_response_style(value: Any, *, fallback: str = "concise_factual") -> str:
+        normalized = str(value or "").strip()
+        return normalized if normalized in _SUPPORTED_CHAT_RESPONSE_STYLES else fallback
+
+    def _resolve_response_style(
+        self,
+        *,
+        agent_preferences: dict[str, Any],
+        effective_preferences_payload: dict[str, Any] | None,
+        session_overrides: dict[str, Any] | None,
+    ) -> str:
+        effective_root = effective_preferences_payload if isinstance(effective_preferences_payload, dict) else {}
+        effective = effective_root.get("effective") if isinstance(effective_root.get("effective"), dict) else {}
+        effective_chat = effective.get("chat") if isinstance(effective.get("chat"), dict) else {}
+        if effective_chat.get("responseStyle") is not None:
+            return self._normalize_response_style(effective_chat.get("responseStyle"))
+        overrides = session_overrides if isinstance(session_overrides, dict) else {}
+        if overrides.get("responseStyle") is not None:
+            return self._normalize_response_style(overrides.get("responseStyle"))
+        return self._normalize_response_style(agent_preferences.get("response_style"))
+
+    def _log_chat_render_result(
+        self,
+        *,
+        phase: str,
+        response_style: str,
+        llm_selection: ChatLlmSelection,
+        render_source: str,
+        fallback_reason: str | None,
+        output_length: int,
+    ) -> None:
+        logger.info(
+            "chat render (%s): style=%s source=%s provider=%s base_url=%s model=%s fallback_reason=%s output_length=%s",
+            phase,
+            response_style,
+            render_source,
+            llm_selection.provider or "unknown",
+            llm_selection.base_url or "",
+            llm_selection.model or "",
+            fallback_reason or "",
+            output_length,
+        )
+
     async def _render_analysis_content(
         self,
         *,
@@ -5851,7 +6148,8 @@ class AgentChatService:
         backtest_payload: dict[str, Any] | None,
         original_message: str,
         llm_selection: ChatLlmSelection,
-    ) -> str:
+        response_style: str,
+    ) -> ChatRenderResult:
         structured_result = analysis_payload.get("structured_result") if isinstance(analysis_payload.get("structured_result"), dict) else {}
         candidate_orders = analysis_payload.get("candidate_orders") if isinstance(analysis_payload.get("candidate_orders"), list) else []
         fallback = self._render_analysis_template(
@@ -5861,10 +6159,23 @@ class AgentChatService:
             history_payload=history_payload,
             backtest_payload=backtest_payload,
         )
+        normalized_style = self._normalize_response_style(response_style)
 
         try:
             if not getattr(llm_selection.analyzer, "is_available", lambda: False)():
-                return fallback
+                self._log_chat_render_result(
+                    phase="analysis",
+                    response_style=normalized_style,
+                    llm_selection=llm_selection,
+                    render_source="fallback_template",
+                    fallback_reason="llm_unavailable",
+                    output_length=len(fallback),
+                )
+                return ChatRenderResult(
+                    content=fallback,
+                    render_source="fallback_template",
+                    render_fallback_reason="llm_unavailable",
+                )
             prompt = self._build_analysis_summary_prompt(
                 original_message=original_message,
                 structured_result=structured_result,
@@ -5872,6 +6183,7 @@ class AgentChatService:
                 runtime_context_payload=runtime_context_payload,
                 history_payload=history_payload,
                 backtest_payload=backtest_payload,
+                response_style=normalized_style,
             )
             content = await asyncio.to_thread(
                 llm_selection.analyzer.generate_text,
@@ -5879,15 +6191,58 @@ class AgentChatService:
                 temperature=0.2,
                 max_output_tokens=1800,
             )
-            return self._normalize_analysis_text(
+            normalized_content, fallback_reason = self._normalize_analysis_text(
                 content,
-                fallback,
                 has_candidate_orders=bool(candidate_orders),
                 has_execution_result=False,
+                response_style=normalized_style,
+            )
+            raw_text = str(content or "")
+            if fallback_reason:
+                self._log_chat_render_result(
+                    phase="analysis",
+                    response_style=normalized_style,
+                    llm_selection=llm_selection,
+                    render_source="fallback_template",
+                    fallback_reason=fallback_reason,
+                    output_length=len(fallback),
+                )
+                return ChatRenderResult(
+                    content=fallback,
+                    render_source="fallback_template",
+                    render_model=llm_selection.model or "",
+                    render_fallback_reason=fallback_reason,
+                )
+            final_content = normalized_content or fallback
+            self._log_chat_render_result(
+                phase="analysis",
+                response_style=normalized_style,
+                llm_selection=llm_selection,
+                render_source="llm_summary",
+                fallback_reason=None,
+                output_length=len(final_content or raw_text),
+            )
+            return ChatRenderResult(
+                content=final_content,
+                render_source="llm_summary",
+                render_model=llm_selection.model or "",
             )
         except Exception as exc:
             logger.warning("LLM analysis summary fallback: %s", redact_sensitive_text(str(exc)))
-            return fallback
+            self._log_chat_render_result(
+                phase="analysis",
+                response_style=normalized_style,
+                llm_selection=llm_selection,
+                render_source="fallback_template",
+                fallback_reason="summary_exception",
+                output_length=len(fallback),
+            )
+            return ChatRenderResult(
+                content=fallback,
+                render_source="fallback_template",
+                render_model=llm_selection.model or "",
+                render_fallback_reason="summary_exception",
+            )
 
     async def _render_analysis_then_execute_content(
         self,
@@ -5901,7 +6256,8 @@ class AgentChatService:
         backtest_payload: dict[str, Any] | None,
         original_message: str,
         llm_selection: ChatLlmSelection,
-    ) -> str:
+        response_style: str,
+    ) -> ChatRenderResult:
         structured_result = analysis_payload.get("structured_result") if isinstance(analysis_payload.get("structured_result"), dict) else {}
         fallback = self._render_analysis_then_execute_template(
             structured_result=structured_result,
@@ -5913,11 +6269,36 @@ class AgentChatService:
             backtest_payload=backtest_payload,
         )
         if self._is_outside_trading_session_execution(execution_result):
-            return fallback
+            self._log_chat_render_result(
+                phase="analysis_then_execute",
+                response_style=self._normalize_response_style(response_style),
+                llm_selection=llm_selection,
+                render_source="fallback_template",
+                fallback_reason="summary_skipped_by_execution_guard",
+                output_length=len(fallback),
+            )
+            return ChatRenderResult(
+                content=fallback,
+                render_source="fallback_template",
+                render_fallback_reason="summary_skipped_by_execution_guard",
+            )
 
+        normalized_style = self._normalize_response_style(response_style)
         try:
             if not getattr(llm_selection.analyzer, "is_available", lambda: False)():
-                return fallback
+                self._log_chat_render_result(
+                    phase="analysis_then_execute",
+                    response_style=normalized_style,
+                    llm_selection=llm_selection,
+                    render_source="fallback_template",
+                    fallback_reason="llm_unavailable",
+                    output_length=len(fallback),
+                )
+                return ChatRenderResult(
+                    content=fallback,
+                    render_source="fallback_template",
+                    render_fallback_reason="llm_unavailable",
+                )
             prompt = self._build_analysis_then_execute_prompt(
                 original_message=original_message,
                 structured_result=structured_result,
@@ -5927,6 +6308,7 @@ class AgentChatService:
                 runtime_context_payload=runtime_context_payload,
                 history_payload=history_payload,
                 backtest_payload=backtest_payload,
+                response_style=normalized_style,
             )
             content = await asyncio.to_thread(
                 llm_selection.analyzer.generate_text,
@@ -5934,15 +6316,57 @@ class AgentChatService:
                 temperature=0.2,
                 max_output_tokens=2000,
             )
-            return self._normalize_analysis_text(
+            normalized_content, fallback_reason = self._normalize_analysis_text(
                 content,
-                fallback,
                 has_candidate_orders=bool(candidate_orders),
                 has_execution_result=execution_result is not None,
+                response_style=normalized_style,
+            )
+            if fallback_reason:
+                self._log_chat_render_result(
+                    phase="analysis_then_execute",
+                    response_style=normalized_style,
+                    llm_selection=llm_selection,
+                    render_source="fallback_template",
+                    fallback_reason=fallback_reason,
+                    output_length=len(fallback),
+                )
+                return ChatRenderResult(
+                    content=fallback,
+                    render_source="fallback_template",
+                    render_model=llm_selection.model or "",
+                    render_fallback_reason=fallback_reason,
+                )
+            final_content = normalized_content or fallback
+            self._log_chat_render_result(
+                phase="analysis_then_execute",
+                response_style=normalized_style,
+                llm_selection=llm_selection,
+                render_source="llm_summary",
+                fallback_reason=None,
+                output_length=len(final_content),
+            )
+            return ChatRenderResult(
+                content=final_content,
+                render_source="llm_summary",
+                render_model=llm_selection.model or "",
             )
         except Exception as exc:
             logger.warning("LLM autonomous execution summary fallback: %s", redact_sensitive_text(str(exc)))
-            return fallback
+            self._log_chat_render_result(
+                phase="analysis_then_execute",
+                response_style=normalized_style,
+                llm_selection=llm_selection,
+                render_source="fallback_template",
+                fallback_reason="summary_exception",
+                output_length=len(fallback),
+            )
+            return ChatRenderResult(
+                content=fallback,
+                render_source="fallback_template",
+                render_model=llm_selection.model or "",
+                render_fallback_reason="summary_exception",
+            )
 
     @staticmethod
     def _build_analysis_summary_prompt(
@@ -5953,11 +6377,14 @@ class AgentChatService:
         runtime_context_payload: dict[str, Any] | None,
         history_payload: dict[str, Any] | None,
         backtest_payload: dict[str, Any] | None,
+        response_style: str,
     ) -> str:
         return (
-            "你是一个股票 Agent 助手，请根据以下结构化结果生成简洁中文 Markdown 回复。"
+            "你是一个股票 Agent 助手，请根据以下结构化结果生成中文 Markdown 回复。"
             "要求：1. 先给组合结论；2. 再逐只股票给建议；3. 如果存在候选订单，要明确说明这只是候选单，"
-            "用户明确确认后才会下到模拟盘；4. 不要编造数据；5. 只输出自然语言，不要输出 JSON、键值对、代码块或伪代码。\n\n"
+            "用户明确确认后才会下到模拟盘；4. 不要编造数据；5. 允许按完整分析报告方式组织内容，可使用明确标题和分段；"
+            "6. 只输出自然语言，不要输出 JSON、键值对、代码块或伪代码。\n\n"
+            f"回复风格：{AgentChatService._build_response_style_instruction(response_style)}\n\n"
             f"用户问题：{original_message}\n\n"
             f"分析结果：{structured_result}\n\n"
             f"候选订单：{candidate_orders}\n\n"
@@ -5977,12 +6404,15 @@ class AgentChatService:
         runtime_context_payload: dict[str, Any] | None,
         history_payload: dict[str, Any] | None,
         backtest_payload: dict[str, Any] | None,
+        response_style: str,
     ) -> str:
         return (
             "你是一个会自主决策的股票 Agent。用户已经明确授权你根据分析结果决定是否在模拟盘下单。"
-            "请根据以下结构化结果输出简洁中文 Markdown。"
+            "请根据以下结构化结果输出中文 Markdown。"
             "要求：1. 先给最终决策（执行/暂不执行）与理由；2. 再概括个股判断；3. 若已执行，说明执行了几笔、状态如何；"
-            "4. 不要编造数据；5. 只输出自然语言，不要输出 JSON、键值对、代码块或伪代码。\n\n"
+            "4. 不要编造数据；5. 允许写成完整分析说明，重点讲清为什么执行或不执行；"
+            "6. 只输出自然语言，不要输出 JSON、键值对、代码块或伪代码。\n\n"
+            f"回复风格：{AgentChatService._build_response_style_instruction(response_style)}\n\n"
             f"用户问题：{original_message}\n\n"
             f"分析结果：{structured_result}\n\n"
             f"候选订单：{candidate_orders}\n\n"
@@ -5994,27 +6424,40 @@ class AgentChatService:
         )
 
     @staticmethod
+    def _build_response_style_instruction(response_style: str) -> str:
+        normalized = AgentChatService._normalize_response_style(response_style)
+        if normalized == "detailed":
+            return "detailed；给出完整的结论、依据、风险、关键价位和操作建议，可使用较完整的小标题结构，总长度控制在 3600 字以内。"
+        if normalized == "balanced":
+            return "balanced；结论清楚，同时保留较充分的依据、风险和建议，总长度控制在 2800 字以内。"
+        return "concise_factual；优先给出清晰结论与关键事实，但仍保留必要的依据、风险和操作建议，总长度控制在 2200 字以内。"
+
+    @staticmethod
     def _normalize_analysis_text(
         content: Any,
-        fallback: str,
         *,
         has_candidate_orders: bool,
         has_execution_result: bool,
-    ) -> str:
+        response_style: str,
+    ) -> tuple[str | None, str | None]:
         clean = str(content or "").strip()
         if not clean:
-            return fallback
+            return None, "summary_invalid"
 
         if AgentChatService._looks_like_structured_output(clean):
-            return fallback
+            return None, "summary_guard_rejected"
 
         lowered = clean.lower()
         if not has_candidate_orders and any(token in clean for token in ("候选订单", "候选单", "等你确认即可执行", "已生成提议单")):
-            return fallback
+            return None, "summary_guard_rejected"
         if not has_execution_result and any(token in lowered for token in ("已下单", "已执行", "提交模拟盘", "执行了")):
-            return fallback
+            return None, "summary_guard_rejected"
+        normalized_style = AgentChatService._normalize_response_style(response_style)
+        max_length = 3600 if normalized_style == "detailed" else 2800 if normalized_style == "balanced" else 2200
+        if len(clean) > max_length:
+            return None, "summary_guard_rejected"
 
-        return clean
+        return clean, None
 
     @staticmethod
     def _looks_like_structured_output(content: str) -> bool:
@@ -6209,6 +6652,9 @@ class AgentChatService:
         portfolio_health: dict[str, Any],
         analysis_payload: dict[str, Any] | None,
         effective_preferences: dict[str, Any] | None,
+        execution_result: dict[str, Any] | None = None,
+        autonomous_execution: dict[str, Any] | None = None,
+        auto_execute_requested: bool = False,
     ) -> str:
         positions = [dict(item) for item in portfolio_health.get("positions") or [] if isinstance(item, dict)]
         metrics = portfolio_health.get("metrics") if isinstance(portfolio_health.get("metrics"), dict) else {}
@@ -6218,6 +6664,7 @@ class AgentChatService:
         analysis_structured = analysis_payload.get("structured_result") if isinstance(analysis_payload, dict) and isinstance(analysis_payload.get("structured_result"), dict) else {}
         stocks = [dict(item) for item in analysis_structured.get("stocks") or [] if isinstance(item, dict)]
         candidate_orders = [dict(item) for item in analysis_payload.get("candidate_orders") or [] if isinstance(item, dict)] if isinstance(analysis_payload, dict) else []
+        autonomous_execution_payload = autonomous_execution if isinstance(autonomous_execution, dict) else {}
         stock_map = {
             str(item.get("code") or "").strip(): item
             for item in stocks
@@ -6261,6 +6708,13 @@ class AgentChatService:
 
         if not positions:
             lines.append("当前账户暂无持仓，所以这轮只能给出账户风险与现金状态，无法做逐仓位健康诊断。")
+            if auto_execute_requested:
+                lines.append("")
+                lines.append("## 自动执行结果")
+                lines.append(
+                    str(autonomous_execution_payload.get("gate_message") or "").strip()
+                    or "当前账户暂无持仓，所以本轮没有自动执行调仓。"
+                )
             return "\n".join(lines)
 
         if industry_exposures:
@@ -6324,6 +6778,40 @@ class AgentChatService:
             lines.append("## 调整建议")
             for item in rebalance_suggestions[:5]:
                 lines.append(f"- {item}")
+
+        if auto_execute_requested:
+            lines.append("")
+            lines.append("## 自动执行结果")
+            if not candidate_orders:
+                lines.append(
+                    str(autonomous_execution_payload.get("gate_message") or "").strip()
+                    or "这轮没有形成合格的持仓内候选单，所以未自动执行调仓。"
+                )
+            elif execution_result is None:
+                lines.append(
+                    str(autonomous_execution_payload.get("gate_message") or "").strip()
+                    or "这轮已形成持仓内候选单，但当前没有可用的执行结果。"
+                )
+            elif self._is_outside_trading_session_execution(execution_result):
+                lines.append(
+                    self._extract_execution_message(execution_result)
+                    or str(autonomous_execution_payload.get("gate_message") or "").strip()
+                    or "当前处于非交易时段，本轮未执行模拟盘调仓单，候选单已保留。"
+                )
+            else:
+                executed_count = int(execution_result.get("executed_count") or 0)
+                failed_count = len(execution_result.get("failed_orders") or []) if isinstance(execution_result.get("failed_orders"), list) else 0
+                blocked_count = len(execution_result.get("blocked_orders") or []) if isinstance(execution_result.get("blocked_orders"), list) else 0
+                if executed_count > 0:
+                    lines.append(f"本轮已自动执行 {executed_count} 笔持仓内调仓单。")
+                else:
+                    lines.append("这轮原本允许尝试自动调仓，但提交模拟盘订单时未成功落单。")
+                if failed_count > 0:
+                    lines.append(f"其中有 {failed_count} 笔执行失败。")
+                if blocked_count > 0:
+                    lines.append(f"其中有 {blocked_count} 笔因交易时段限制未执行，候选单已保留。")
+                lines.append("")
+                lines.append(self._render_execution_content(execution_result).replace("## 模拟盘执行结果\n", "").strip())
 
         return "\n".join(lines)
 

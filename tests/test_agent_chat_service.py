@@ -12,6 +12,8 @@ import unittest
 from datetime import date, datetime, timedelta
 from typing import Any
 
+import pandas as pd
+
 from agent_stock.agents.contracts import (
     AgentRunResult,
     AgentState,
@@ -353,6 +355,14 @@ class TrackingPlannerAnalyzer(FakePlannerAnalyzer):
         return self.summary_text
 
 
+class ExplodingSummaryAnalyzer(FakePlannerAnalyzer):
+    def generate_text(self, prompt: str, *_args, **_kwargs) -> str:
+        if "Agent问股 的聊天主控规划器" in prompt:
+            message = self._extract_user_message(prompt)
+            return json.dumps(self._plan_for_message(message), ensure_ascii=False)
+        raise RuntimeError("summary exploded")
+
+
 def fake_board_catalog_provider(board_type: str) -> list[dict[str, Any]]:
     if board_type == "industry_board":
         return [dict(item) for item in FAKE_INDUSTRY_BOARD_CATALOG]
@@ -423,6 +433,26 @@ class FakeMarketWidePlannerAnalyzer:
         return """```json
 {"structured": true}
 ```"""
+
+
+class FakeStockNameLookupManager:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        *,
+        errors: list[Exception | None] | None = None,
+    ) -> None:
+        self.rows = [dict(item) for item in (rows or [])]
+        self.errors = list(errors or [])
+        self.calls = 0
+
+    def get_stock_list(self) -> pd.DataFrame:
+        self.calls += 1
+        if self.errors and self.calls <= len(self.errors):
+            error = self.errors[self.calls - 1]
+            if error is not None:
+                raise error
+        return pd.DataFrame(self.rows)
 
 
 class FakeBackendClient:
@@ -612,6 +642,7 @@ class FakeBackendClient:
         overrides = dict(session_overrides or {})
         self.preference_calls.append(overrides)
         risk_profile = str(overrides.get("riskProfile") or "conservative")
+        response_style = str(overrides.get("responseStyle") or "concise_factual")
         return {
             "persistent": {
                 "trading": {
@@ -643,7 +674,7 @@ class FakeBackendClient:
                     "executionPolicy": "auto_execute_if_condition_met",
                     "confirmationShortcutsEnabled": True,
                     "followupFocusResolutionEnabled": True,
-                    "responseStyle": "concise_factual",
+                    "responseStyle": response_style,
                 },
             },
             "source": {
@@ -927,6 +958,18 @@ class FakeAgentService:
         )
 
 
+class ExtraCandidateAgentService(FakeAgentService):
+    def __init__(self, *, extra_code: str = "000001") -> None:
+        super().__init__()
+        self.extra_code = extra_code
+
+    def run_once(self, stock_codes, **kwargs):
+        expanded_codes = list(stock_codes)
+        if self.extra_code not in expanded_codes:
+            expanded_codes.append(self.extra_code)
+        return super().run_once(expanded_codes, **kwargs)
+
+
 class FakeBacktestInterpretationService:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -1079,6 +1122,7 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
             sorted(self.backend_client.saved_analysis_calls[0]["news_items_by_stock"].keys()),
             ["300750", "600519"],
         )
+        self.assertEqual(self.backend_client.placed_orders, [])
 
         detail = self.service.get_session_detail(1, payload["session_id"])
         assert detail is not None
@@ -1087,6 +1131,122 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
             [item["code"] for item in detail["context"]["conversation_state"]["pending_actions"]],
             ["600519", "300750"],
         )
+
+    async def test_portfolio_rebalance_request_auto_executes_current_holdings(self):
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "分析一下持仓，进行调整",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "simulation_order_filled")
+        self.assertEqual(payload["structured_result"]["intent"], "portfolio_health")
+        self.assertIn("system_state", payload["structured_result"]["loaded_context_keys"])
+        self.assertIn("自动执行结果", payload["content"])
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["600519", "300750"])
+        autonomous_execution = payload["structured_result"]["autonomous_execution"]
+        self.assertTrue(autonomous_execution["authorized"])
+        self.assertTrue(autonomous_execution["executed"])
+        self.assertEqual(autonomous_execution["execution_scope"], "all")
+        self.assertEqual(autonomous_execution["executed_count"], 2)
+        self.assertEqual([item["code"] for item in self.backend_client.placed_orders], ["600519", "300750"])
+
+        detail = self.service.get_session_detail(1, payload["session_id"])
+        assert detail is not None
+        self.assertEqual(detail["context"]["conversation_state"]["pending_actions"], [])
+
+    async def test_portfolio_rebalance_request_blocked_outside_trading_session_keeps_pending_actions(self):
+        self.backend_client.blocked_order_codes.update({"600519", "300750"})
+
+        payload = await self.service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "帮我调仓",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["structured_result"]["intent"], "portfolio_health")
+        self.assertEqual(payload["execution_result"]["reason"], "outside_trading_session")
+        self.assertIn("当前处于非交易时段", payload["content"])
+        autonomous_execution = payload["structured_result"]["autonomous_execution"]
+        self.assertFalse(autonomous_execution["executed"])
+        self.assertEqual(autonomous_execution["reason"], "outside_trading_session")
+        self.assertIn("当前处于非交易时段", autonomous_execution["gate_message"])
+
+        detail = self.service.get_session_detail(1, payload["session_id"])
+        assert detail is not None
+        self.assertEqual(
+            [item["code"] for item in detail["context"]["conversation_state"]["pending_actions"]],
+            ["600519", "300750"],
+        )
+
+    async def test_portfolio_rebalance_request_without_candidate_orders_stays_analysis_only(self):
+        backend_client = FakeBackendClient()
+        service = AgentChatService(
+            config=Config.get_instance(),
+            db_manager=self.db,
+            chat_repo=self.repo,
+            agent_service=FakeAgentService(no_candidate_codes={"600519", "300750"}),
+            backend_client=backend_client,
+            backtest_interpretation_service=self.backtest_interpretation_service,
+            analyzer=FakePlannerAnalyzer(),
+        )
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "根据持仓自己决定买卖",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "portfolio_health")
+        self.assertEqual(payload["candidate_orders"], [])
+        self.assertIsNone(payload["execution_result"])
+        autonomous_execution = payload["structured_result"]["autonomous_execution"]
+        self.assertFalse(autonomous_execution["executed"])
+        self.assertEqual(autonomous_execution["reason"], "no_candidate_orders")
+        self.assertEqual(backend_client.placed_orders, [])
+
+    async def test_portfolio_rebalance_request_filters_out_non_holding_candidate_orders(self):
+        backend_client = FakeBackendClient()
+        service = AgentChatService(
+            config=Config.get_instance(),
+            db_manager=self.db,
+            chat_repo=self.repo,
+            agent_service=ExtraCandidateAgentService(),
+            backend_client=backend_client,
+            backtest_interpretation_service=self.backtest_interpretation_service,
+            analyzer=FakePlannerAnalyzer(),
+        )
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "分析一下持仓，进行调整",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "simulation_order_filled")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["600519", "300750"])
+        self.assertEqual([item["code"] for item in backend_client.placed_orders], ["600519", "300750"])
+        self.assertEqual(len(backend_client.saved_analysis_calls), 1)
+        saved_stocks = {
+            item["code"]: item
+            for item in backend_client.saved_analysis_calls[0]["analysis_result"]["stocks"]
+        }
+        self.assertIn("000001", saved_stocks)
+        self.assertIsNone(saved_stocks["000001"]["candidate_order"])
 
     async def test_strategy_backtest_request_reuses_focus_stock_and_interprets_result(self):
         first = await self.service.handle_chat(
@@ -1416,6 +1576,7 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 "owner_user_id": 1,
                 "username": "tester",
                 "message": "帮我分析一下今天的 600519 行情",
+                "context": {"agent_chat_preferences": {"responseStyle": "balanced"}},
                 "runtime_config": build_runtime_config(),
             }
         )
@@ -1423,6 +1584,8 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("```", payload["content"])
         self.assertIn("综合判断", payload["content"])
         self.assertIn("600519", payload["content"])
+        self.assertEqual(payload["render_source"], "fallback_template")
+        self.assertEqual(payload["render_fallback_reason"], "summary_guard_rejected")
 
     async def test_runtime_llm_overrides_chat_planner_and_analysis_summary(self):
         default_analyzer = TrackingPlannerAnalyzer(label="default", summary_text="default analysis summary")
@@ -1440,16 +1603,20 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 "owner_user_id": 1,
                 "username": "tester",
                 "message": "帮我分析一下今天的 600519 行情",
+                "context": {"agent_chat_preferences": {"responseStyle": "balanced"}},
                 "runtime_config": build_runtime_config_with_llm(),
             }
         )
 
         self.assertEqual(payload["status"], "analysis_only")
         self.assertEqual(payload["content"], "runtime analysis summary")
+        self.assertEqual(payload["render_source"], "llm_summary")
+        self.assertEqual(payload["render_model"], "Pro/zai-org/GLM-5")
         self.assertEqual(len(runtime_factory_calls), 1)
         self.assertEqual(runtime_factory_calls[0].base_url, "https://api.siliconflow.cn/v1")
         self.assertEqual(runtime_factory_calls[0].model, "Pro/zai-org/GLM-5")
         self.assertTrue(any("Agent问股 的聊天主控规划器" in prompt for prompt in runtime_analyzer.calls))
+        self.assertTrue(any("回复风格：balanced" in prompt for prompt in runtime_analyzer.calls))
         self.assertFalse(default_analyzer.calls)
 
     async def test_runtime_llm_overrides_analysis_then_execute_summary(self):
@@ -1466,12 +1633,14 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 "owner_user_id": 1,
                 "username": "tester",
                 "message": "分析 600519，如果风险低就买100股",
+                "context": {"agent_chat_preferences": {"responseStyle": "balanced"}},
                 "runtime_config": build_runtime_config_with_llm(),
             }
         )
 
         self.assertEqual(payload["status"], "simulation_order_filled")
         self.assertEqual(payload["content"], "runtime execute summary")
+        self.assertEqual(payload["render_source"], "llm_summary")
         self.assertGreaterEqual(len(runtime_analyzer.calls), 2)
         self.assertFalse(default_analyzer.calls)
 
@@ -1490,14 +1659,94 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
                 "owner_user_id": 1,
                 "username": "tester",
                 "message": "帮我分析一下今天的 600519 行情",
+                "context": {"agent_chat_preferences": {"responseStyle": "balanced"}},
                 "runtime_config": build_runtime_config(),
             }
         )
 
         self.assertEqual(payload["status"], "analysis_only")
         self.assertEqual(payload["content"], "default analysis summary")
+        self.assertEqual(payload["render_source"], "llm_summary")
         self.assertFalse(runtime_factory_calls)
         self.assertTrue(any("Agent问股 的聊天主控规划器" in prompt for prompt in default_analyzer.calls))
+
+    async def test_concise_response_style_stays_deterministic_across_repeated_runs(self):
+        analyzer = TrackingPlannerAnalyzer(
+            label="default",
+            summary_text="# 寒武纪(688256)决策仪表盘\n\n## 组合结论\n\n**🟡 持有观望 — 暂不开新仓**",
+        )
+        service = self.build_service(analyzer)
+        contents: list[str] = []
+        for index in range(10):
+            payload = await service.handle_chat(
+                {
+                    "owner_user_id": 1,
+                    "username": "tester",
+                    "session_id": f"session-concise-{index}",
+                    "message": "帮我分析一下今天的 600519 行情",
+                    "runtime_config": build_runtime_config(),
+                }
+            )
+            contents.append(payload["content"])
+            self.assertEqual(payload["render_source"], "llm_summary")
+            self.assertIn("决策仪表盘", payload["content"])
+        self.assertEqual(len(set(contents)), 1)
+
+    async def test_detailed_response_style_uses_summary_prompt_and_model_output(self):
+        analyzer = TrackingPlannerAnalyzer(
+            label="default",
+            summary_text="# 寒武纪(688256)决策仪表盘\n\n## 组合结论\n\n详细分析正文",
+        )
+        service = self.build_service(analyzer)
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "帮我分析一下今天的 600519 行情",
+                "context": {"agent_chat_preferences": {"responseStyle": "detailed"}},
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertIn("决策仪表盘", payload["content"])
+        self.assertEqual(payload["render_source"], "llm_summary")
+        self.assertTrue(any("回复风格：detailed" in prompt for prompt in analyzer.calls))
+
+    async def test_summary_guard_rejects_false_execution_claims(self):
+        analyzer = TrackingPlannerAnalyzer(label="default", summary_text="本轮已执行 1 笔模拟盘下单。")
+        service = self.build_service(analyzer)
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "帮我分析一下今天的 600519 行情",
+                "context": {"agent_chat_preferences": {"responseStyle": "balanced"}},
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertIn("综合判断", payload["content"])
+        self.assertEqual(payload["render_source"], "fallback_template")
+        self.assertEqual(payload["render_fallback_reason"], "summary_guard_rejected")
+
+    async def test_summary_exception_falls_back_with_reason(self):
+        service = self.build_service(ExplodingSummaryAnalyzer())
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "帮我分析一下今天的 600519 行情",
+                "context": {"agent_chat_preferences": {"responseStyle": "balanced"}},
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertIn("综合判断", payload["content"])
+        self.assertEqual(payload["render_source"], "fallback_template")
+        self.assertEqual(payload["render_fallback_reason"], "summary_exception")
 
     async def test_unresolved_chinese_stock_name_clarifies(self):
         payload = await self.service.handle_chat(
@@ -1512,6 +1761,71 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "blocked")
         self.assertEqual(payload["structured_result"]["intent"], "clarify")
         self.assertIn("不存在科技", payload["content"])
+
+    async def test_dynamic_stock_name_resolution_supports_china_bank(self):
+        service = self.build_service(
+            FakeMappedPlannerAnalyzer(
+                {
+                    "分析一下中国银行": FakePlannerAnalyzer._plan(
+                        intent="analysis",
+                        required_tools=["run_multi_stock_analysis"],
+                        stock_scope={"mode": "explicit", "stock_refs": ["中国银行"]},
+                    ),
+                }
+            )
+        )
+        service._stock_name_lookup_manager = FakeStockNameLookupManager(
+            [
+                {"code": "601988", "name": "中国银行"},
+                {"code": "600036", "name": "招商银行"},
+            ]
+        )
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "分析一下中国银行",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "analysis")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["601988"])
+        self.assertEqual(payload["structured_result"]["conversation_state"]["focus_stocks"], ["601988"])
+
+    async def test_dynamic_multi_stock_names_run_analysis(self):
+        service = self.build_service(
+            FakeMappedPlannerAnalyzer(
+                {
+                    "分析一下中国银行和招商银行": FakePlannerAnalyzer._plan(
+                        intent="analysis",
+                        required_tools=["run_multi_stock_analysis"],
+                        stock_scope={"mode": "explicit", "stock_refs": ["中国银行", "招商银行"]},
+                    ),
+                }
+            )
+        )
+        service._stock_name_lookup_manager = FakeStockNameLookupManager(
+            [
+                {"code": "601988", "name": "中国银行"},
+                {"code": "600036", "name": "招商银行"},
+            ]
+        )
+
+        payload = await service.handle_chat(
+            {
+                "owner_user_id": 1,
+                "username": "tester",
+                "message": "分析一下中国银行和招商银行",
+                "runtime_config": build_runtime_config(),
+            }
+        )
+
+        self.assertEqual(payload["status"], "analysis_only")
+        self.assertEqual(payload["structured_result"]["intent"], "analysis")
+        self.assertEqual([item["code"] for item in payload["candidate_orders"]], ["601988", "600036"])
 
     async def test_name_only_query_runs_analysis(self):
         payload = await self.service.handle_chat(
@@ -1571,6 +1885,28 @@ class AgentChatServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["structured_result"]["intent"], "clarify")
         self.assertIn("000001 平安银行", payload["content"])
         self.assertIn("601318 中国平安", payload["content"])
+
+    def test_dynamic_stock_name_lookup_retries_after_cooldown(self):
+        service = self.build_service(FakePlannerAnalyzer())
+        lookup_manager = FakeStockNameLookupManager(
+            [{"code": "601988", "name": "中国银行"}],
+            errors=[RuntimeError("temporary stock list failure")],
+        )
+        service._stock_name_lookup_manager = lookup_manager
+
+        first = service._resolve_stock_name_reference("中国银行")
+        second = service._resolve_stock_name_reference("中国银行")
+
+        self.assertEqual(first["status"], "unknown")
+        self.assertEqual(second["status"], "unknown")
+        self.assertEqual(lookup_manager.calls, 1)
+
+        service._dynamic_stock_name_retry_after = 0.0
+        third = service._resolve_stock_name_reference("中国银行")
+
+        self.assertEqual(third["status"], "resolved")
+        self.assertEqual(third["stock_codes"], ["601988"])
+        self.assertEqual(lookup_manager.calls, 2)
 
     async def test_llm_clarify_falls_back_to_local_name_resolution(self):
         service = self.build_service(
